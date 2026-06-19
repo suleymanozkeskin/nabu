@@ -2,7 +2,7 @@ use nabu_core::{
     doctor_with_options, export_session_jsonl_with_options, export_session_markdown_with_options,
     get_event_by_pointer_with_options, get_session_page, list_sessions, redact_export_json,
     redact_export_text, search_history_page, Error, EventOptions, SearchMode, SearchOptions,
-    SessionOptions, Tool,
+    SearchResult, SessionOptions, StoredEvent, Tool,
 };
 use serde_json::{json, Value};
 use std::io::{BufRead, Write};
@@ -13,6 +13,45 @@ pub use nabu_core as core;
 
 const PROTOCOL_VERSION: &str = "2025-03-26";
 const MAX_MCP_BYTES: usize = 256 * 1024;
+const JSON_FIT_SAFETY_BYTES: usize = 2048;
+
+#[derive(Debug, Clone)]
+struct ResponseBudget {
+    used_bytes: usize,
+    limit_bytes: usize,
+}
+
+impl ResponseBudget {
+    fn from_base(base: &Value) -> Option<Self> {
+        let used_bytes = serde_json::to_vec(base).ok()?.len();
+        Some(Self {
+            used_bytes,
+            limit_bytes: MAX_MCP_BYTES.saturating_sub(JSON_FIT_SAFETY_BYTES),
+        })
+    }
+
+    fn try_reserve_value(&mut self, value: &Value, separator_bytes: usize) -> bool {
+        let Ok(serialized) = serde_json::to_vec(value) else {
+            return false;
+        };
+        let next = self
+            .used_bytes
+            .saturating_add(separator_bytes)
+            .saturating_add(serialized.len());
+        if next > self.limit_bytes {
+            return false;
+        }
+        self.used_bytes = next;
+        true
+    }
+}
+
+#[derive(Debug, Clone)]
+struct RecallWindow {
+    start: i64,
+    end: i64,
+    events: Option<Vec<StoredEvent>>,
+}
 
 pub fn serve_stdio(home: PathBuf) -> nabu_core::Result<()> {
     serve_with_io(home, std::io::stdin().lock(), std::io::stdout().lock())
@@ -415,36 +454,36 @@ fn tool_recall_answer(home: &Path, arguments: &Value) -> Result<Value, ToolError
         },
     )?;
 
-    let mut seen_context = std::collections::BTreeSet::new();
+    let mut context_windows = recall_context_windows(&search_page.results, before, after);
     let mut hits = Vec::new();
+    let mut response = json!({
+        "query": query,
+        "mode_requested": search_page.mode_requested,
+        "mode_applied": search_page.mode_applied,
+        "semantic_available": search_page.semantic_available,
+        "hits": [],
+        "returned": 0,
+        "truncated": search_page.truncated,
+        "redacted": redact
+    });
+    let Some(mut budget) = ResponseBudget::from_base(&response) else {
+        return Ok(enforce_size_bound(response, false));
+    };
+    let mut seen_context = std::collections::BTreeSet::new();
+    let mut budget_truncated = false;
     for (index, hit) in search_page.results.iter().enumerate() {
-        let session = get_session_page(
+        let context = recall_context_for_hit(
             home,
-            hit.tool,
-            &hit.session_id,
-            SessionOptions {
-                limit_events: before.saturating_add(after).saturating_add(1),
-                after_raw_line: None,
-                around_raw_line: Some(hit.raw_line),
+            hit,
+            &mut context_windows,
+            RecallParams {
                 before,
                 after,
-                include_deltas: false,
-                canonical_type: None,
                 redact,
                 corroborate,
             },
+            &mut seen_context,
         )?;
-        let mut context = Vec::new();
-        for event in session.events {
-            let key = (
-                event.tool.as_str().to_string(),
-                event.session_id.clone(),
-                event.raw_line,
-            );
-            if seen_context.insert(key) {
-                context.push(serde_json::to_value(event)?);
-            }
-        }
         let mut snippet = hit.snippet.clone();
         if redact {
             snippet = redact_export_text(&snippet);
@@ -466,22 +505,169 @@ fn tool_recall_answer(home: &Path, arguments: &Value) -> Result<Value, ToolError
         if let Some(corroboration) = &hit.corroboration {
             hit_value["corroboration"] = serde_json::to_value(corroboration)?;
         }
+        let separator = usize::from(!hits.is_empty());
+        if !budget.try_reserve_value(&hit_value, separator) {
+            budget_truncated = true;
+            break;
+        }
         hits.push(hit_value);
     }
 
-    Ok(enforce_size_bound(
-        json!({
-            "query": query,
-            "mode_requested": search_page.mode_requested,
-            "mode_applied": search_page.mode_applied,
-            "semantic_available": search_page.semantic_available,
-            "hits": hits,
-            "returned": hits.len(),
-            "truncated": search_page.truncated,
-            "redacted": redact
-        }),
-        false,
-    ))
+    let returned = hits.len();
+    response["hits"] = Value::Array(hits);
+    response["returned"] = json!(returned);
+    response["truncated"] = json!(search_page.truncated || budget_truncated);
+    trim_recall_response_to_limit(&mut response);
+    Ok(enforce_size_bound(response, false))
+}
+
+fn recall_context_windows(
+    hits: &[SearchResult],
+    before: usize,
+    after: usize,
+) -> std::collections::BTreeMap<(String, String), Vec<RecallWindow>> {
+    let mut planned = std::collections::BTreeMap::<(String, String), Vec<(Tool, i64, i64)>>::new();
+    for hit in hits {
+        let start = hit.raw_line.saturating_sub(before as i64).max(1);
+        let end = hit.raw_line.saturating_add(after as i64);
+        planned
+            .entry((hit.tool.as_str().to_string(), hit.session_id.clone()))
+            .or_default()
+            .push((hit.tool, start, end));
+    }
+
+    let mut fetched = std::collections::BTreeMap::new();
+    for ((tool_name, session_id), mut windows) in planned {
+        windows.sort_by_key(|(_, start, end)| (*start, *end));
+        let mut merged = Vec::<(i64, i64)>::new();
+        for (_, start, end) in windows {
+            if let Some((_, current_end)) = merged.last_mut() {
+                if start <= current_end.saturating_add(1) {
+                    *current_end = (*current_end).max(end);
+                    continue;
+                }
+            }
+            merged.push((start, end));
+        }
+
+        fetched.insert(
+            (tool_name, session_id),
+            merged
+                .into_iter()
+                .map(|(start, end)| RecallWindow {
+                    start,
+                    end,
+                    events: None,
+                })
+                .collect(),
+        );
+    }
+    fetched
+}
+
+fn trim_recall_response_to_limit(value: &mut Value) {
+    while serde_json::to_vec(value)
+        .map(|serialized| serialized.len() > MAX_MCP_BYTES)
+        .unwrap_or(false)
+    {
+        let Some(hits) = value.get_mut("hits").and_then(Value::as_array_mut) else {
+            break;
+        };
+        if hits.pop().is_none() {
+            break;
+        }
+        let returned = hits.len();
+        value["returned"] = json!(returned);
+        value["truncated"] = json!(true);
+    }
+}
+
+/// Recall rendering parameters that travel together when materializing a hit's
+/// surrounding context.
+#[derive(Clone, Copy)]
+struct RecallParams {
+    before: usize,
+    after: usize,
+    redact: bool,
+    corroborate: bool,
+}
+
+fn recall_context_for_hit(
+    home: &Path,
+    hit: &SearchResult,
+    windows: &mut std::collections::BTreeMap<(String, String), Vec<RecallWindow>>,
+    params: RecallParams,
+    seen_context: &mut std::collections::BTreeSet<(String, String, i64)>,
+) -> Result<Vec<Value>, ToolError> {
+    let RecallParams {
+        before,
+        after,
+        redact,
+        corroborate,
+    } = params;
+    let start = hit.raw_line.saturating_sub(before as i64).max(1);
+    let end = hit.raw_line.saturating_add(after as i64);
+    let key = (hit.tool.as_str().to_string(), hit.session_id.clone());
+    let Some(windows) = windows.get_mut(&key) else {
+        return Ok(Vec::new());
+    };
+    let mut context = Vec::new();
+    for window in windows {
+        if end < window.start || start > window.end {
+            continue;
+        }
+        let events = window_events(home, hit, window, redact, corroborate)?;
+        for event in events {
+            if event.raw_line < start || event.raw_line > end {
+                continue;
+            }
+            let key = (
+                event.tool.as_str().to_string(),
+                event.session_id.clone(),
+                event.raw_line,
+            );
+            if seen_context.insert(key) {
+                context.push(serde_json::to_value(event)?);
+            }
+        }
+    }
+    Ok(context)
+}
+
+fn window_events<'a>(
+    home: &Path,
+    hit: &SearchResult,
+    window: &'a mut RecallWindow,
+    redact: bool,
+    corroborate: bool,
+) -> Result<&'a [StoredEvent], ToolError> {
+    if window.events.is_none() {
+        let center = window
+            .start
+            .saturating_add(window.end)
+            .saturating_div(2)
+            .max(1);
+        let before = usize::try_from(center.saturating_sub(window.start)).unwrap_or(usize::MAX);
+        let after = usize::try_from(window.end.saturating_sub(center)).unwrap_or(usize::MAX);
+        let session = get_session_page(
+            home,
+            hit.tool,
+            &hit.session_id,
+            SessionOptions {
+                limit_events: before.saturating_add(after).saturating_add(1),
+                after_raw_line: None,
+                around_raw_line: Some(center),
+                before,
+                after,
+                include_deltas: false,
+                canonical_type: None,
+                redact,
+                corroborate,
+            },
+        )?;
+        window.events = Some(session.events);
+    }
+    Ok(window.events.as_deref().unwrap_or(&[]))
 }
 
 fn handle_resource_read(home: &Path, params: &Value) -> Value {
@@ -840,20 +1026,16 @@ fn fit_search_response(mut value: Value) -> Value {
     value["truncated"] = json!(true);
     value["continuation"] = json!({ "next_offset": offset });
 
+    let Some(mut budget) = ResponseBudget::from_base(&value) else {
+        return enforce_size_bound(value, false);
+    };
     let mut kept = Vec::new();
     for result in results {
-        kept.push(result);
-        value["results"] = Value::Array(kept.clone());
-        value["returned"] = json!(kept.len());
-        value["continuation"] = json!({ "next_offset": offset.saturating_add(kept.len()) });
-        let Ok(serialized) = serde_json::to_vec(&value) else {
-            kept.pop();
-            break;
-        };
-        if serialized.len() > MAX_MCP_BYTES {
-            kept.pop();
+        let separator = usize::from(!kept.is_empty());
+        if !budget.try_reserve_value(&result, separator) {
             break;
         }
+        kept.push(result);
     }
 
     value["results"] = Value::Array(kept);
@@ -864,7 +1046,25 @@ fn fit_search_response(mut value: Value) -> Value {
         .unwrap_or(0);
     value["returned"] = json!(returned);
     value["continuation"] = json!({ "next_offset": offset.saturating_add(returned) });
+    trim_search_response_to_limit(&mut value, offset);
     value
+}
+
+fn trim_search_response_to_limit(value: &mut Value, offset: usize) {
+    while serde_json::to_vec(value)
+        .map(|serialized| serialized.len() > MAX_MCP_BYTES)
+        .unwrap_or(false)
+    {
+        let Some(results) = value.get_mut("results").and_then(Value::as_array_mut) else {
+            break;
+        };
+        if results.pop().is_none() {
+            break;
+        }
+        let returned = results.len();
+        value["returned"] = json!(returned);
+        value["continuation"] = json!({ "next_offset": offset.saturating_add(returned) });
+    }
 }
 
 fn truncate_resource(content: String) -> String {

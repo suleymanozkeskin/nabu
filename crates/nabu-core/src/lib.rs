@@ -10,11 +10,14 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::env;
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command as ProcessCommand, Stdio};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicUsize, Ordering};
+#[cfg(feature = "semantic")]
+use std::sync::Arc;
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration as StdDuration, Instant, SystemTime, UNIX_EPOCH};
 use time::format_description::well_known::Rfc3339;
 use time::{Date, Month, OffsetDateTime};
@@ -96,6 +99,8 @@ const SEMANTIC_EMBED_MAX_LENGTH: usize = 2048;
 const SEMANTIC_EMBED_BATCH_SIZE: usize = 64;
 #[cfg(feature = "semantic")]
 const SEMANTIC_EMBED_WRITE_CHUNK_SIZE: usize = 2048;
+#[cfg(feature = "semantic")]
+const SEMANTIC_EMBED_COLLECT_BATCH_SIZE: usize = 4096;
 #[cfg(feature = "semantic")]
 const SEMANTIC_EMBED_PROGRESS_INTERVAL: StdDuration = StdDuration::from_secs(2);
 
@@ -522,6 +527,12 @@ pub struct SearchResult {
     pub cwd: Option<String>,
     #[serde(skip)]
     pub project_root: Option<String>,
+}
+
+#[derive(Debug)]
+struct RankedSearchResult {
+    event_id: i64,
+    result: SearchResult,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -1040,6 +1051,30 @@ pub struct EmbeddingModelStatus {
     pub message: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FileSignature {
+    len: u64,
+    modified_nanos: u128,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SemanticStatusSignature {
+    model_files: Option<Vec<FileSignature>>,
+    index_files: Vec<Option<FileSignature>>,
+}
+
+#[derive(Debug, Clone)]
+struct SemanticStatusCacheEntry {
+    signature: SemanticStatusSignature,
+    status: EmbeddingModelStatus,
+}
+
+#[cfg(feature = "semantic")]
+struct CachedLocalEmbedder {
+    model_files: Vec<FileSignature>,
+    embedder: Arc<FastembedEmbedder>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct EmbeddingDownloadReport {
     pub model_id: String,
@@ -1303,16 +1338,8 @@ fn append_envelopes_locked(
         })?;
     chmod(raw_file, 0o600)?;
 
-    let mut dedupe_state = append_dedupe_state(home, raw_file)?;
-    let mut raw_offset = file
-        .metadata()
-        .map_err(|source| Error::Io {
-            path: raw_file.to_path_buf(),
-            source,
-        })?
-        .len();
-    let mut reports = Vec::with_capacity(events.len());
-
+    let mut keyed_events = Vec::with_capacity(events.len());
+    let mut lookup_keys = HashSet::with_capacity(events.len());
     for mut envelope in events {
         envelope.dedupe_key = dedupe_key(DedupeParts {
             tool: envelope.tool,
@@ -1322,7 +1349,21 @@ fn append_envelopes_locked(
             sequence: envelope.sequence,
             payload: &envelope.payload,
         })?;
+        lookup_keys.insert(envelope.dedupe_key.clone());
+        keyed_events.push(envelope);
+    }
 
+    let mut dedupe_state = append_dedupe_state(home, raw_file, &lookup_keys)?;
+    let mut raw_offset = file
+        .metadata()
+        .map_err(|source| Error::Io {
+            path: raw_file.to_path_buf(),
+            source,
+        })?
+        .len();
+    let mut reports = Vec::with_capacity(keyed_events.len());
+
+    for mut envelope in keyed_events {
         if let Some(existing) = dedupe_state.existing(&envelope.dedupe_key) {
             reports.push(AppendReport {
                 raw_file: raw_file.to_path_buf(),
@@ -1384,8 +1425,6 @@ struct RawDedupeSnapshot {
     events: HashMap<String, ExistingRawEvent>,
     ordered: Vec<(String, u64)>,
     raw_len: u64,
-    keys_len: u64,
-    offsets_len: u64,
 }
 
 impl RawDedupeSnapshot {
@@ -1394,8 +1433,6 @@ impl RawDedupeSnapshot {
             events: HashMap::new(),
             ordered: Vec::new(),
             raw_len,
-            keys_len: 0,
-            offsets_len: 0,
         }
     }
 }
@@ -1403,29 +1440,49 @@ impl RawDedupeSnapshot {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct AppendDedupeState {
     events: HashMap<String, ExistingRawEvent>,
-    ordered: Vec<(String, u64)>,
+    pending: Vec<(String, u64)>,
     raw_len: u64,
-    keys_len: u64,
-    offsets_len: u64,
-    pending_start: usize,
+    key_count: usize,
+    bucket_lengths: Vec<u64>,
     sidecar: Option<DedupeSidecarFiles>,
 }
 
 impl AppendDedupeState {
-    fn from_snapshot(mut snapshot: RawDedupeSnapshot, sidecar: Option<DedupeSidecarFiles>) -> Self {
-        if !snapshot.ordered.is_empty() && snapshot.keys_len == 0 && snapshot.offsets_len == 0 {
-            let (keys, offsets) = dedupe_sidecar_contents(&snapshot.ordered);
-            snapshot.keys_len = keys.len() as u64;
-            snapshot.offsets_len = offsets.len() as u64;
-        }
-        let pending_start = snapshot.ordered.len();
+    fn from_sidecar(
+        events: HashMap<String, ExistingRawEvent>,
+        raw_len: u64,
+        key_count: usize,
+        bucket_lengths: Vec<u64>,
+        sidecar: DedupeSidecarFiles,
+    ) -> Self {
         Self {
-            events: snapshot.events,
-            ordered: snapshot.ordered,
+            events,
+            pending: Vec::new(),
+            raw_len,
+            key_count,
+            bucket_lengths,
+            sidecar: Some(sidecar),
+        }
+    }
+
+    fn from_snapshot(
+        snapshot: RawDedupeSnapshot,
+        sidecar: Option<DedupeSidecarFiles>,
+        bucket_lengths: Vec<u64>,
+        lookup_keys: &HashSet<String>,
+    ) -> Self {
+        let key_count = snapshot.ordered.len();
+        let events = snapshot
+            .events
+            .into_iter()
+            .filter(|(dedupe_key, _)| lookup_keys.contains(dedupe_key))
+            .collect();
+        Self {
+            events,
+            pending: Vec::new(),
             raw_len: snapshot.raw_len,
-            keys_len: snapshot.keys_len,
-            offsets_len: snapshot.offsets_len,
-            pending_start,
+            key_count,
+            bucket_lengths,
             sidecar,
         }
     }
@@ -1440,28 +1497,27 @@ impl AppendDedupeState {
         existing: ExistingRawEvent,
         raw_line_len: u64,
     ) {
-        self.ordered.push((dedupe_key.clone(), existing.raw_offset));
+        self.pending.push((dedupe_key.clone(), existing.raw_offset));
         self.events.entry(dedupe_key).or_insert(existing);
         self.raw_len = self.raw_len.saturating_add(raw_line_len);
+        self.key_count = self.key_count.saturating_add(1);
     }
 
     fn flush(&mut self) {
         let Some(sidecar) = self.sidecar.as_ref() else {
             return;
         };
-        if self.pending_start >= self.ordered.len() {
+        if self.pending.is_empty() {
             return;
         }
         match append_dedupe_sidecar(sidecar, self) {
-            Ok((appended_keys_len, appended_offsets_len)) => {
-                self.keys_len = self.keys_len.saturating_add(appended_keys_len);
-                self.offsets_len = self.offsets_len.saturating_add(appended_offsets_len);
+            Ok(bucket_lengths) => {
+                self.bucket_lengths = bucket_lengths;
                 if let Err(error) = write_dedupe_sidecar_meta(
                     sidecar,
                     self.raw_len,
-                    self.ordered.len(),
-                    self.keys_len,
-                    self.offsets_len,
+                    self.key_count,
+                    &self.bucket_lengths,
                 ) {
                     eprintln!(
                         "nabu: dedupe sidecar metadata update failed at {}: {}; future appends will rebuild or fall back to raw",
@@ -1475,22 +1531,23 @@ impl AppendDedupeState {
             Err(error) => {
                 eprintln!(
                     "nabu: dedupe sidecar update failed at {}: {}; future appends will rebuild or fall back to raw",
-                    sidecar.keys.display(),
+                    sidecar.meta.display(),
                     error
                 );
                 self.sidecar = None;
                 return;
             }
         }
-        self.pending_start = self.ordered.len();
+        self.pending.clear();
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct DedupeSidecarFiles {
-    keys: PathBuf,
-    offsets: PathBuf,
+    buckets_dir: PathBuf,
     meta: PathBuf,
+    legacy_keys: PathBuf,
+    legacy_offsets: PathBuf,
 }
 
 impl DedupeSidecarFiles {
@@ -1502,14 +1559,19 @@ impl DedupeSidecarFiles {
             .unwrap_or("raw");
         let dir = home.join("spool").join("dedupe");
         Self {
-            keys: dir.join(format!("{base}.keys")),
-            offsets: dir.join(format!("{base}.offsets")),
+            buckets_dir: dir.join(format!("{base}.buckets")),
             meta: dir.join(format!("{base}.meta.json")),
+            legacy_keys: dir.join(format!("{base}.keys")),
+            legacy_offsets: dir.join(format!("{base}.offsets")),
         }
     }
 
-    fn paths(&self) -> [&Path; 3] {
-        [&self.keys, &self.offsets, &self.meta]
+    fn bucket_path(&self, bucket: usize) -> PathBuf {
+        self.buckets_dir.join(format!("{bucket:02x}.dedupe"))
+    }
+
+    fn file_paths(&self) -> [&Path; 3] {
+        [&self.meta, &self.legacy_keys, &self.legacy_offsets]
     }
 }
 
@@ -1518,76 +1580,143 @@ struct DedupeSidecarMeta {
     schema_version: u32,
     raw_len: u64,
     key_count: usize,
-    keys_len: u64,
-    offsets_len: u64,
+    bucket_count: usize,
+    bucket_lengths: Vec<u64>,
 }
 
-const DEDUPE_SIDECAR_SCHEMA_VERSION: u32 = 1;
+const DEDUPE_SIDECAR_SCHEMA_VERSION: u32 = 2;
+const DEDUPE_BUCKET_COUNT: usize = 256;
 
-fn append_dedupe_state(home: &Path, raw_file: &Path) -> Result<AppendDedupeState> {
+fn append_dedupe_state(
+    home: &Path,
+    raw_file: &Path,
+    lookup_keys: &HashSet<String>,
+) -> Result<AppendDedupeState> {
     let sidecar = DedupeSidecarFiles::for_raw_file(home, raw_file);
-    match load_dedupe_sidecar(raw_file, &sidecar) {
-        Ok(Some(snapshot)) => Ok(AppendDedupeState::from_snapshot(snapshot, Some(sidecar))),
-        Ok(None) => rebuild_dedupe_state(raw_file, sidecar),
+    match load_append_dedupe_sidecar(raw_file, &sidecar, lookup_keys) {
+        Ok(Some(state)) => Ok(state),
+        Ok(None) => rebuild_dedupe_state(raw_file, sidecar, lookup_keys),
         Err(error) => {
             eprintln!(
                 "nabu: dedupe sidecar read failed at {}: {}; falling back to raw-derived check",
-                sidecar.keys.display(),
+                sidecar.meta.display(),
                 error
             );
             Ok(AppendDedupeState::from_snapshot(
                 read_raw_dedupe_snapshot(raw_file)?,
                 None,
+                zero_bucket_lengths(),
+                lookup_keys,
             ))
         }
     }
 }
 
-fn rebuild_dedupe_state(raw_file: &Path, sidecar: DedupeSidecarFiles) -> Result<AppendDedupeState> {
+fn rebuild_dedupe_state(
+    raw_file: &Path,
+    sidecar: DedupeSidecarFiles,
+    lookup_keys: &HashSet<String>,
+) -> Result<AppendDedupeState> {
     let snapshot = read_raw_dedupe_snapshot(raw_file)?;
     match write_full_dedupe_sidecar(&sidecar, &snapshot) {
-        Ok(()) => Ok(AppendDedupeState::from_snapshot(snapshot, Some(sidecar))),
+        Ok(bucket_lengths) => Ok(AppendDedupeState::from_snapshot(
+            snapshot,
+            Some(sidecar),
+            bucket_lengths,
+            lookup_keys,
+        )),
         Err(error) => {
             eprintln!(
                 "nabu: dedupe sidecar rebuild failed at {}: {}; falling back to raw-derived check",
-                sidecar.keys.display(),
+                sidecar.meta.display(),
                 error
             );
-            Ok(AppendDedupeState::from_snapshot(snapshot, None))
+            Ok(AppendDedupeState::from_snapshot(
+                snapshot,
+                None,
+                zero_bucket_lengths(),
+                lookup_keys,
+            ))
         }
     }
 }
 
-fn load_dedupe_sidecar(
+fn load_append_dedupe_sidecar(
     raw_file: &Path,
     sidecar: &DedupeSidecarFiles,
-) -> Result<Option<RawDedupeSnapshot>> {
+    lookup_keys: &HashSet<String>,
+) -> Result<Option<AppendDedupeState>> {
+    let Some((meta, raw_len)) = read_dedupe_sidecar_meta(raw_file, sidecar)? else {
+        return Ok(None);
+    };
+    let mut events = HashMap::new();
+    let mut buckets = BTreeMap::<usize, HashSet<String>>::new();
+    for dedupe_key in lookup_keys {
+        let Some(bucket) = dedupe_bucket_index(dedupe_key) else {
+            return Ok(None);
+        };
+        buckets
+            .entry(bucket)
+            .or_default()
+            .insert(dedupe_key.clone());
+    }
+
+    for (bucket, needed) in buckets {
+        if !load_dedupe_bucket(
+            sidecar,
+            bucket,
+            meta.bucket_lengths[bucket],
+            Some(&needed),
+            &mut events,
+        )? {
+            return Ok(None);
+        }
+    }
+
+    Ok(Some(AppendDedupeState::from_sidecar(
+        events,
+        raw_len,
+        meta.key_count,
+        meta.bucket_lengths,
+        sidecar.clone(),
+    )))
+}
+
+fn load_full_dedupe_sidecar_events(
+    raw_file: &Path,
+    sidecar: &DedupeSidecarFiles,
+) -> Result<Option<HashMap<String, ExistingRawEvent>>> {
+    let Some((meta, _)) = read_dedupe_sidecar_meta(raw_file, sidecar)? else {
+        return Ok(None);
+    };
+    let mut events = HashMap::new();
+    for bucket in 0..DEDUPE_BUCKET_COUNT {
+        if !load_dedupe_bucket(
+            sidecar,
+            bucket,
+            meta.bucket_lengths[bucket],
+            None,
+            &mut events,
+        )? {
+            return Ok(None);
+        }
+    }
+    if events.len() > meta.key_count {
+        return Ok(None);
+    }
+    Ok(Some(events))
+}
+
+fn read_dedupe_sidecar_meta(
+    raw_file: &Path,
+    sidecar: &DedupeSidecarFiles,
+) -> Result<Option<(DedupeSidecarMeta, u64)>> {
     let raw_len = match fs::metadata(raw_file) {
         Ok(metadata) => metadata.len(),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
         Err(source) => {
             return Err(Error::Io {
                 path: raw_file.to_path_buf(),
-                source,
-            })
-        }
-    };
-    let keys = match fs::read(&sidecar.keys) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(source) => {
-            return Err(Error::Io {
-                path: sidecar.keys.clone(),
-                source,
-            })
-        }
-    };
-    let offsets = match fs::read(&sidecar.offsets) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(source) => {
-            return Err(Error::Io {
-                path: sidecar.offsets.clone(),
                 source,
             })
         }
@@ -1607,63 +1736,68 @@ fn load_dedupe_sidecar(
     };
     if meta.schema_version != DEDUPE_SIDECAR_SCHEMA_VERSION
         || meta.raw_len != raw_len
-        || meta.keys_len != keys.len() as u64
-        || meta.offsets_len != offsets.len() as u64
+        || meta.bucket_count != DEDUPE_BUCKET_COUNT
+        || meta.bucket_lengths.len() != DEDUPE_BUCKET_COUNT
     {
         return Ok(None);
     }
 
-    let Some(ordered) = parse_dedupe_sidecar_entries(&keys, &offsets) else {
-        return Ok(None);
-    };
-    if meta.key_count != ordered.len() {
-        return Ok(None);
-    }
-
-    let mut events = HashMap::new();
-    for (dedupe_key, raw_offset) in &ordered {
-        events
-            .entry(dedupe_key.clone())
-            .or_insert(ExistingRawEvent {
-                raw_offset: *raw_offset,
-            });
-    }
-    Ok(Some(RawDedupeSnapshot {
-        events,
-        ordered,
-        raw_len,
-        keys_len: keys.len() as u64,
-        offsets_len: offsets.len() as u64,
-    }))
+    Ok(Some((meta, raw_len)))
 }
 
-fn parse_dedupe_sidecar_entries(keys: &[u8], offsets: &[u8]) -> Option<Vec<(String, u64)>> {
-    let key_lines = parse_complete_utf8_lines(keys)?;
-    let offset_lines = parse_complete_utf8_lines(offsets)?;
-    if key_lines.len() != offset_lines.len() {
-        return None;
-    }
-
-    let mut ordered = Vec::with_capacity(key_lines.len());
-    for (key, offset) in key_lines.into_iter().zip(offset_lines) {
-        if !valid_dedupe_key(&key) {
-            return None;
+fn load_dedupe_bucket(
+    sidecar: &DedupeSidecarFiles,
+    bucket: usize,
+    expected_len: u64,
+    needed: Option<&HashSet<String>>,
+    events: &mut HashMap<String, ExistingRawEvent>,
+) -> Result<bool> {
+    let path = sidecar.bucket_path(bucket);
+    match fs::metadata(&path) {
+        Ok(metadata) if metadata.len() == expected_len => {}
+        Ok(_) => return Ok(false),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound && expected_len == 0 => {
+            return Ok(true)
         }
-        let raw_offset = offset.parse::<u64>().ok()?;
-        ordered.push((key, raw_offset));
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(source) => return Err(Error::Io { path, source }),
     }
-    Some(ordered)
+    let file = match File::open(&path) {
+        Ok(file) => file,
+        Err(source) => return Err(Error::Io { path, source }),
+    };
+    let mut reader = BufReader::new(file);
+    let mut line = String::new();
+    loop {
+        line.clear();
+        let bytes = reader.read_line(&mut line).map_err(|source| Error::Io {
+            path: path.clone(),
+            source,
+        })?;
+        if bytes == 0 {
+            break;
+        }
+        let Some((dedupe_key, raw_offset)) = parse_dedupe_bucket_entry(line.trim_end()) else {
+            return Ok(false);
+        };
+        if dedupe_bucket_index(dedupe_key) != Some(bucket) {
+            return Ok(false);
+        }
+        if needed.map(|keys| keys.contains(dedupe_key)).unwrap_or(true) {
+            events
+                .entry(dedupe_key.to_string())
+                .or_insert(ExistingRawEvent { raw_offset });
+        }
+    }
+    Ok(true)
 }
 
-fn parse_complete_utf8_lines(bytes: &[u8]) -> Option<Vec<String>> {
-    if bytes.is_empty() {
-        return Some(Vec::new());
-    }
-    if !bytes.ends_with(b"\n") {
+fn parse_dedupe_bucket_entry(line: &str) -> Option<(&str, u64)> {
+    let (dedupe_key, raw_offset) = line.split_once('\t')?;
+    if !valid_dedupe_key(dedupe_key) {
         return None;
     }
-    let text = std::str::from_utf8(bytes).ok()?;
-    Some(text.lines().map(str::to_string).collect())
+    Some((dedupe_key, raw_offset.parse::<u64>().ok()?))
 }
 
 fn valid_dedupe_key(value: &str) -> bool {
@@ -1713,112 +1847,140 @@ fn read_raw_dedupe_snapshot(raw_file: &Path) -> Result<RawDedupeSnapshot> {
         events,
         ordered,
         raw_len: raw_offset,
-        keys_len: 0,
-        offsets_len: 0,
     })
 }
 
 fn write_full_dedupe_sidecar(
     sidecar: &DedupeSidecarFiles,
     snapshot: &RawDedupeSnapshot,
-) -> Result<()> {
-    let Some(parent) = sidecar.keys.parent() else {
+) -> Result<Vec<u64>> {
+    let Some(parent) = sidecar.meta.parent() else {
         return Err(Error::Validation(
             "dedupe sidecar has no parent".to_string(),
         ));
     };
     create_dir_0700(parent)?;
-    let (keys, offsets) = dedupe_sidecar_contents(&snapshot.ordered);
-    fs::write(&sidecar.keys, &keys).map_err(|source| Error::Io {
-        path: sidecar.keys.clone(),
-        source,
-    })?;
-    fs::write(&sidecar.offsets, &offsets).map_err(|source| Error::Io {
-        path: sidecar.offsets.clone(),
-        source,
-    })?;
-    chmod(&sidecar.keys, 0o600)?;
-    chmod(&sidecar.offsets, 0o600)?;
+    match fs::remove_dir_all(&sidecar.buckets_dir) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(source) => {
+            return Err(Error::Io {
+                path: sidecar.buckets_dir.clone(),
+                source,
+            })
+        }
+    }
+    create_dir_0700(&sidecar.buckets_dir)?;
+
+    let mut bucket_lengths = zero_bucket_lengths();
+    let mut bucket_files = (0..DEDUPE_BUCKET_COUNT)
+        .map(|_| None)
+        .collect::<Vec<Option<File>>>();
+    for (dedupe_key, raw_offset) in &snapshot.ordered {
+        let Some(bucket) = dedupe_bucket_index(dedupe_key) else {
+            return Err(Error::Validation(format!(
+                "invalid dedupe key in raw snapshot: {dedupe_key}"
+            )));
+        };
+        if bucket_files[bucket].is_none() {
+            let path = sidecar.bucket_path(bucket);
+            let file = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
+                .map_err(|source| Error::Io {
+                    path: path.clone(),
+                    source,
+                })?;
+            chmod(&path, 0o600)?;
+            bucket_files[bucket] = Some(file);
+        }
+        let entry = dedupe_bucket_entry(dedupe_key, *raw_offset);
+        if let Some(file) = bucket_files[bucket].as_mut() {
+            file.write_all(entry.as_bytes())
+                .map_err(|source| Error::Io {
+                    path: sidecar.bucket_path(bucket),
+                    source,
+                })?;
+        }
+        bucket_lengths[bucket] = bucket_lengths[bucket].saturating_add(entry.len() as u64);
+    }
+    drop(bucket_files);
+
     write_dedupe_sidecar_meta(
         sidecar,
         snapshot.raw_len,
         snapshot.ordered.len(),
-        keys.len() as u64,
-        offsets.len() as u64,
-    )
+        &bucket_lengths,
+    )?;
+    Ok(bucket_lengths)
 }
 
 fn append_dedupe_sidecar(
     sidecar: &DedupeSidecarFiles,
     state: &AppendDedupeState,
-) -> Result<(u64, u64)> {
-    let Some(parent) = sidecar.keys.parent() else {
+) -> Result<Vec<u64>> {
+    let Some(parent) = sidecar.meta.parent() else {
         return Err(Error::Validation(
             "dedupe sidecar has no parent".to_string(),
         ));
     };
     create_dir_0700(parent)?;
+    create_dir_0700(&sidecar.buckets_dir)?;
 
-    let (pending_keys, pending_offsets) =
-        dedupe_sidecar_contents(&state.ordered[state.pending_start..]);
-    let mut keys_file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&sidecar.keys)
-        .map_err(|source| Error::Io {
-            path: sidecar.keys.clone(),
-            source,
-        })?;
-    keys_file
-        .write_all(&pending_keys)
-        .map_err(|source| Error::Io {
-            path: sidecar.keys.clone(),
-            source,
-        })?;
-    let mut offsets_file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&sidecar.offsets)
-        .map_err(|source| Error::Io {
-            path: sidecar.offsets.clone(),
-            source,
-        })?;
-    offsets_file
-        .write_all(&pending_offsets)
-        .map_err(|source| Error::Io {
-            path: sidecar.offsets.clone(),
-            source,
-        })?;
-    chmod(&sidecar.keys, 0o600)?;
-    chmod(&sidecar.offsets, 0o600)?;
-    Ok((pending_keys.len() as u64, pending_offsets.len() as u64))
-}
-
-fn dedupe_sidecar_contents(entries: &[(String, u64)]) -> (Vec<u8>, Vec<u8>) {
-    let mut keys = Vec::new();
-    let mut offsets = Vec::new();
-    for (dedupe_key, raw_offset) in entries {
-        keys.extend_from_slice(dedupe_key.as_bytes());
-        keys.push(b'\n');
-        offsets.extend_from_slice(raw_offset.to_string().as_bytes());
-        offsets.push(b'\n');
+    let mut bucket_lengths = state.bucket_lengths.clone();
+    if bucket_lengths.len() != DEDUPE_BUCKET_COUNT {
+        return Err(Error::Validation(
+            "dedupe sidecar bucket metadata is invalid".to_string(),
+        ));
     }
-    (keys, offsets)
+    let mut pending_by_bucket = BTreeMap::<usize, Vec<&(String, u64)>>::new();
+    for entry in &state.pending {
+        let Some(bucket) = dedupe_bucket_index(&entry.0) else {
+            return Err(Error::Validation(format!(
+                "invalid pending dedupe key: {}",
+                entry.0
+            )));
+        };
+        pending_by_bucket.entry(bucket).or_default().push(entry);
+    }
+
+    for (bucket, entries) in pending_by_bucket {
+        let path = sidecar.bucket_path(bucket);
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .map_err(|source| Error::Io {
+                path: path.clone(),
+                source,
+            })?;
+        for (dedupe_key, raw_offset) in entries {
+            let entry = dedupe_bucket_entry(dedupe_key, *raw_offset);
+            file.write_all(entry.as_bytes())
+                .map_err(|source| Error::Io {
+                    path: path.clone(),
+                    source,
+                })?;
+            bucket_lengths[bucket] = bucket_lengths[bucket].saturating_add(entry.len() as u64);
+        }
+        chmod(&path, 0o600)?;
+    }
+    Ok(bucket_lengths)
 }
 
 fn write_dedupe_sidecar_meta(
     sidecar: &DedupeSidecarFiles,
     raw_len: u64,
     key_count: usize,
-    keys_len: u64,
-    offsets_len: u64,
+    bucket_lengths: &[u64],
 ) -> Result<()> {
     let meta = DedupeSidecarMeta {
         schema_version: DEDUPE_SIDECAR_SCHEMA_VERSION,
         raw_len,
         key_count,
-        keys_len,
-        offsets_len,
+        bucket_count: DEDUPE_BUCKET_COUNT,
+        bucket_lengths: bucket_lengths.to_vec(),
     };
     let bytes = serde_json::to_vec_pretty(&meta)?;
     fs::write(&sidecar.meta, bytes).map_err(|source| Error::Io {
@@ -1828,10 +1990,25 @@ fn write_dedupe_sidecar_meta(
     chmod(&sidecar.meta, 0o600)
 }
 
+fn dedupe_bucket_index(dedupe_key: &str) -> Option<usize> {
+    if !valid_dedupe_key(dedupe_key) {
+        return None;
+    }
+    usize::from_str_radix(&dedupe_key["sha256:".len().."sha256:".len() + 2], 16).ok()
+}
+
+fn dedupe_bucket_entry(dedupe_key: &str, raw_offset: u64) -> String {
+    format!("{dedupe_key}\t{raw_offset}\n")
+}
+
+fn zero_bucket_lengths() -> Vec<u64> {
+    vec![0; DEDUPE_BUCKET_COUNT]
+}
+
 fn remove_dedupe_sidecar_for_raw_file(raw_file: &Path) -> Result<()> {
     let home = harness_home_for_raw_file(raw_file);
     let sidecar = DedupeSidecarFiles::for_raw_file(&home, raw_file);
-    for path in sidecar.paths() {
+    for path in sidecar.file_paths() {
         match fs::remove_file(path) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -1841,6 +2018,16 @@ fn remove_dedupe_sidecar_for_raw_file(raw_file: &Path) -> Result<()> {
                     source,
                 })
             }
+        }
+    }
+    match fs::remove_dir_all(&sidecar.buckets_dir) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(source) => {
+            return Err(Error::Io {
+                path: sidecar.buckets_dir,
+                source,
+            })
         }
     }
     Ok(())
@@ -1966,10 +2153,41 @@ pub fn search_history_filtered(
 }
 
 pub fn embedding_model_status(home: &Path) -> EmbeddingModelStatus {
+    let signature = semantic_status_signature(home);
+    let cache_key = home.to_path_buf();
+    if let Ok(cache) = semantic_status_cache().lock() {
+        if let Some(entry) = cache.get(&cache_key) {
+            if entry.signature == signature {
+                return entry.status.clone();
+            }
+        }
+    }
+
+    let status = embedding_model_status_uncached(home, &signature);
+    if let Ok(mut cache) = semantic_status_cache().lock() {
+        cache.insert(
+            cache_key,
+            SemanticStatusCacheEntry {
+                signature,
+                status: status.clone(),
+            },
+        );
+    }
+    status
+}
+
+fn embedding_model_status_uncached(
+    home: &Path,
+    signature: &SemanticStatusSignature,
+) -> EmbeddingModelStatus {
     let cache_path = semantic_model_cache_path(home);
     let feature_enabled = cfg!(feature = "semantic");
-    let model_present = semantic_model_files_present(home);
-    let vector_rows = semantic_vector_row_count(home).unwrap_or(0);
+    let model_present = signature.model_files.is_some();
+    let vector_rows = if feature_enabled && model_present {
+        semantic_vector_row_count(home).unwrap_or(0)
+    } else {
+        0
+    };
     let semantic_available = feature_enabled && model_present && vector_rows > 0;
     let message = if !feature_enabled {
         "semantic feature is disabled in this build".to_string()
@@ -1990,6 +2208,11 @@ pub fn embedding_model_status(home: &Path) -> EmbeddingModelStatus {
         expected_dimensions: SEMANTIC_VECTOR_DIMENSIONS,
         message,
     }
+}
+
+fn semantic_status_cache() -> &'static Mutex<HashMap<PathBuf, SemanticStatusCacheEntry>> {
+    static CACHE: OnceLock<Mutex<HashMap<PathBuf, SemanticStatusCacheEntry>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 pub fn prune_embedding_cache(home: &Path) -> Result<StorageFootprint> {
@@ -2138,6 +2361,9 @@ where
 }
 
 fn semantic_search_available(home: &Path) -> bool {
+    if !cfg!(feature = "semantic") {
+        return false;
+    }
     embedding_model_status(home).semantic_available
 }
 
@@ -2146,10 +2372,56 @@ fn semantic_model_cache_path(home: &Path) -> PathBuf {
 }
 
 fn semantic_model_files_present(home: &Path) -> bool {
+    semantic_model_file_signatures(home).is_some()
+}
+
+fn semantic_status_signature(home: &Path) -> SemanticStatusSignature {
+    let model_files = semantic_model_file_signatures(home);
+    let index_files = if cfg!(feature = "semantic") && model_files.is_some() {
+        semantic_index_file_signatures(home)
+    } else {
+        Vec::new()
+    };
+    SemanticStatusSignature {
+        model_files,
+        index_files,
+    }
+}
+
+fn semantic_index_file_signatures(home: &Path) -> Vec<Option<FileSignature>> {
+    let db_path = home.join("index").join("harness.db");
+    vec![
+        file_signature(&db_path),
+        file_signature(&db_path.with_file_name("harness.db-wal")),
+        file_signature(&db_path.with_file_name("harness.db-shm")),
+    ]
+}
+
+fn semantic_model_file_signatures(home: &Path) -> Option<Vec<FileSignature>> {
     let cache_path = semantic_model_cache_path(home);
-    SEMANTIC_MODEL_REMOTE_FILES
-        .iter()
-        .all(|(_, local)| cache_path.join(local).is_file())
+    let mut signatures = Vec::with_capacity(SEMANTIC_MODEL_REMOTE_FILES.len());
+    for (_, local) in SEMANTIC_MODEL_REMOTE_FILES {
+        let path = cache_path.join(local);
+        if !path.is_file() {
+            return None;
+        }
+        signatures.push(file_signature(&path)?);
+    }
+    Some(signatures)
+}
+
+fn file_signature(path: &Path) -> Option<FileSignature> {
+    let metadata = fs::metadata(path).ok()?;
+    let modified_nanos = metadata
+        .modified()
+        .ok()
+        .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    Some(FileSignature {
+        len: metadata.len(),
+        modified_nanos,
+    })
 }
 
 fn semantic_vector_row_count(home: &Path) -> Result<i64> {
@@ -2248,10 +2520,40 @@ fn parse_linux_physical_core_count(cpuinfo: &str) -> Option<usize> {
 }
 
 #[cfg(feature = "semantic")]
-fn load_local_embedder(home: &Path) -> Result<Option<FastembedEmbedder>> {
-    if !semantic_model_files_present(home) {
+fn load_local_embedder(home: &Path) -> Result<Option<Arc<FastembedEmbedder>>> {
+    let Some(model_files) = semantic_model_file_signatures(home) else {
         return Ok(None);
+    };
+    let cache_key = semantic_model_cache_path(home);
+    if let Ok(cache) = local_embedder_cache().lock() {
+        if let Some(entry) = cache.get(&cache_key) {
+            if entry.model_files == model_files {
+                return Ok(Some(Arc::clone(&entry.embedder)));
+            }
+        }
     }
+
+    let embedder = Arc::new(load_local_embedder_uncached(home)?);
+    if let Ok(mut cache) = local_embedder_cache().lock() {
+        cache.insert(
+            cache_key,
+            CachedLocalEmbedder {
+                model_files,
+                embedder: Arc::clone(&embedder),
+            },
+        );
+    }
+    Ok(Some(embedder))
+}
+
+#[cfg(feature = "semantic")]
+fn local_embedder_cache() -> &'static Mutex<HashMap<PathBuf, CachedLocalEmbedder>> {
+    static CACHE: OnceLock<Mutex<HashMap<PathBuf, CachedLocalEmbedder>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+#[cfg(feature = "semantic")]
+fn load_local_embedder_uncached(home: &Path) -> Result<FastembedEmbedder> {
     let intra_threads = semantic_intra_threads();
     let cache_path = semantic_model_cache_path(home);
     let tokenizer_files = fastembed::TokenizerFiles {
@@ -2282,11 +2584,11 @@ fn load_local_embedder(home: &Path) -> Result<Option<FastembedEmbedder>> {
         Error::SemanticUnavailable(format!("failed to load local embedding model: {source}"))
     })?;
 
-    Ok(Some(FastembedEmbedder {
+    Ok(FastembedEmbedder {
         model: std::sync::Mutex::new(text_embedding),
         batch_size: SEMANTIC_EMBED_BATCH_SIZE,
         intra_threads,
-    }))
+    })
 }
 
 #[cfg(feature = "semantic")]
@@ -2327,133 +2629,16 @@ pub fn search_history_page(home: &Path, query: &str, options: SearchOptions) -> 
     let offset = options.offset;
     let max_snippet_chars = options.max_snippet_chars.clamp(1, MAX_SEARCH_SNIPPET_CHARS);
     let raw_fetch_limit = search_overfetch_limit(offset, limit);
-    let db_path = home.join("index").join("harness.db");
-    let conn = open_index(&db_path)?;
-    let mut sql = String::from(
-        "SELECT
-           e.tool,
-           e.session_id,
-           e.canonical_type,
-           e.captured_at,
-           -bm25(events_fts, 8.0, 6.0, 4.0, 1.0, 0.5) AS score,
-           NULL AS snippet,
-           e.searchable_text,
-           e.raw_file,
-           e.raw_line,
-           e.raw_offset,
-           e.compaction_state,
-           e.cwd,
-           e.project_root
-         FROM events_fts
-         JOIN events e ON e.id = events_fts.rowid
-         WHERE events_fts MATCH ?",
-    );
-    let mut params = vec![SqlValue::Text(fts_query)];
-
-    if let Some(tool) = options.tool {
-        sql.push_str(" AND e.tool = ?");
-        params.push(SqlValue::Text(tool.as_str().to_string()));
-    }
-    if let Some(session_id) = options.session_id {
-        sql.push_str(" AND e.session_id = ?");
-        params.push(SqlValue::Text(session_id));
-    }
-    if let Some(cwd) = options.cwd {
-        sql.push_str(" AND e.cwd = ?");
-        params.push(SqlValue::Text(cwd));
-    }
-    if let Some(since) = options.since {
-        sql.push_str(" AND e.captured_at >= ?");
-        params.push(SqlValue::Text(normalize_date_or_duration(&since, "since")?));
-    }
-    if let Some(canonical_type) = options.canonical_type {
-        sql.push_str(" AND e.canonical_type = ?");
-        params.push(SqlValue::Text(canonical_type));
-    }
-    if !options.include_deltas {
-        sql.push_str(" AND e.canonical_type != 'assistant.delta'");
-    }
-    if let Some(file) = options.file {
-        sql.push_str(
-            " AND EXISTS (
-                SELECT 1
-                FROM event_files ef
-                JOIN files f ON f.id = ef.file_id
-                WHERE ef.event_id = e.id
-                  AND (f.path = ? OR f.path LIKE ?)
-              )",
-        );
-        params.push(SqlValue::Text(file.clone()));
-        params.push(SqlValue::Text(format!("%{file}%")));
-    }
-    if let Some(command) = options.command {
-        sql.push_str(
-            " AND EXISTS (
-                SELECT 1
-                FROM tool_events te
-                WHERE te.event_id = e.id
-                  AND te.command LIKE ?
-              )",
-        );
-        params.push(SqlValue::Text(format!("%{command}%")));
-    }
-    sql.push_str(
-        " ORDER BY bm25(events_fts, 8.0, 6.0, 4.0, 1.0, 0.5), e.captured_at DESC, e.raw_line ASC
-          LIMIT ?",
-    );
-    params.push(SqlValue::Integer(raw_fetch_limit.saturating_add(1) as i64));
-
-    let mut statement = conn.prepare(&sql).map_err(|source| Error::Sqlite {
-        path: db_path.clone(),
-        source,
-    })?;
-    let rows = statement
-        .query_map(params_from_iter(params), |row| {
-            let tool_text: String = row.get(0)?;
-            let searchable_text = row.get::<_, String>(6).unwrap_or_default();
-            Ok(SearchResult {
-                tool: Tool::from_str(&tool_text).map_err(|_| rusqlite::Error::InvalidQuery)?,
-                session_id: row.get(1)?,
-                canonical_type: row.get(2)?,
-                timestamp: row.get(3)?,
-                score: row.get(4)?,
-                snippet: match_centered_snippet(
-                    row.get::<_, Option<String>>(5)?,
-                    searchable_text.clone(),
-                    &query_terms,
-                    max_snippet_chars,
-                ),
-                raw_file: row.get(7)?,
-                raw_line: row.get(8)?,
-                raw_offset: row.get(9)?,
-                compaction_state: row.get(10)?,
-                payload: Value::Null,
-                also_at: Vec::new(),
-                corroboration: None,
-                retrieval_key: sha256_hex(searchable_text.as_bytes()),
-                corroboration_text: searchable_text,
-                cwd: row.get(11)?,
-                project_root: row.get(12)?,
-            })
-        })
-        .map_err(|source| Error::Sqlite {
-            path: db_path.clone(),
-            source,
-        })?;
-
-    let mut results = Vec::new();
-    for row in rows {
-        results.push(row.map_err(|source| Error::Sqlite {
-            path: db_path.clone(),
-            source,
-        })?);
-    }
-    let has_more_raw_rows = results.len() > raw_fetch_limit;
-    if has_more_raw_rows {
-        results.truncate(raw_fetch_limit);
-    }
+    let (mut results, has_more_raw_rows) = lexical_search_ranked_results(
+        home,
+        &options,
+        &query_terms,
+        &fts_query,
+        raw_fetch_limit,
+        max_snippet_chars,
+    )?;
     if options.dedupe {
-        results = dedupe_search_results(results)?;
+        results = dedupe_ranked_search_results(results)?;
     }
 
     let total_estimated = if has_more_raw_rows {
@@ -2466,11 +2651,10 @@ pub fn search_history_page(home: &Path, query: &str, options: SearchOptions) -> 
         .into_iter()
         .skip(offset)
         .take(limit)
+        .map(|ranked| ranked.result)
         .collect::<Vec<_>>();
     if options.include_payload {
-        for result in &mut page_results {
-            result.payload = payload_for_raw_pointer(&result.raw_file, result.raw_line)?;
-        }
+        hydrate_search_result_payloads(&mut page_results)?;
     }
     if options.corroborate {
         annotate_search_results_with_corroboration(&mut page_results);
@@ -2502,6 +2686,146 @@ pub fn search_history_page(home: &Path, query: &str, options: SearchOptions) -> 
     })
 }
 
+fn lexical_search_ranked_results(
+    home: &Path,
+    options: &SearchOptions,
+    query_terms: &[String],
+    fts_query: &str,
+    fetch_limit: usize,
+    max_snippet_chars: usize,
+) -> Result<(Vec<RankedSearchResult>, bool)> {
+    let db_path = home.join("index").join("harness.db");
+    let conn = open_index(&db_path)?;
+    let mut sql = String::from(
+        "SELECT
+           e.id,
+           e.tool,
+           e.session_id,
+           e.canonical_type,
+           e.captured_at,
+           -bm25(events_fts, 8.0, 6.0, 4.0, 1.0, 0.5) AS score,
+           NULL AS snippet,
+           e.searchable_text,
+           e.raw_file,
+           e.raw_line,
+           e.raw_offset,
+           e.compaction_state,
+           e.cwd,
+           e.project_root
+         FROM events_fts
+         JOIN events e ON e.id = events_fts.rowid
+         WHERE events_fts MATCH ?",
+    );
+    let mut params = vec![SqlValue::Text(fts_query.to_string())];
+
+    if let Some(tool) = options.tool {
+        sql.push_str(" AND e.tool = ?");
+        params.push(SqlValue::Text(tool.as_str().to_string()));
+    }
+    if let Some(session_id) = options.session_id.as_deref() {
+        sql.push_str(" AND e.session_id = ?");
+        params.push(SqlValue::Text(session_id.to_string()));
+    }
+    if let Some(cwd) = options.cwd.as_deref() {
+        sql.push_str(" AND e.cwd = ?");
+        params.push(SqlValue::Text(cwd.to_string()));
+    }
+    if let Some(since) = options.since.as_deref() {
+        sql.push_str(" AND e.captured_at >= ?");
+        params.push(SqlValue::Text(normalize_date_or_duration(since, "since")?));
+    }
+    if let Some(canonical_type) = options.canonical_type.as_deref() {
+        sql.push_str(" AND e.canonical_type = ?");
+        params.push(SqlValue::Text(canonical_type.to_string()));
+    }
+    if !options.include_deltas {
+        sql.push_str(" AND e.canonical_type != 'assistant.delta'");
+    }
+    if let Some(file) = options.file.as_deref() {
+        sql.push_str(
+            " AND EXISTS (
+                SELECT 1
+                FROM event_files ef
+                JOIN files f ON f.id = ef.file_id
+                WHERE ef.event_id = e.id
+                  AND (f.path = ? OR f.path LIKE ?)
+              )",
+        );
+        params.push(SqlValue::Text(file.to_string()));
+        params.push(SqlValue::Text(format!("%{file}%")));
+    }
+    if let Some(command) = options.command.as_deref() {
+        sql.push_str(
+            " AND EXISTS (
+                SELECT 1
+                FROM tool_events te
+                WHERE te.event_id = e.id
+                  AND te.command LIKE ?
+              )",
+        );
+        params.push(SqlValue::Text(format!("%{command}%")));
+    }
+    sql.push_str(
+        " ORDER BY bm25(events_fts, 8.0, 6.0, 4.0, 1.0, 0.5), e.captured_at DESC, e.raw_line ASC
+          LIMIT ?",
+    );
+    params.push(SqlValue::Integer(fetch_limit.saturating_add(1) as i64));
+
+    let mut statement = conn.prepare(&sql).map_err(|source| Error::Sqlite {
+        path: db_path.clone(),
+        source,
+    })?;
+    let rows = statement
+        .query_map(params_from_iter(params), |row| {
+            let tool_text: String = row.get(1)?;
+            let searchable_text = row.get::<_, String>(7).unwrap_or_default();
+            Ok(RankedSearchResult {
+                event_id: row.get(0)?,
+                result: SearchResult {
+                    tool: Tool::from_str(&tool_text).map_err(|_| rusqlite::Error::InvalidQuery)?,
+                    session_id: row.get(2)?,
+                    canonical_type: row.get(3)?,
+                    timestamp: row.get(4)?,
+                    score: row.get(5)?,
+                    snippet: match_centered_snippet(
+                        row.get::<_, Option<String>>(6)?,
+                        searchable_text.clone(),
+                        query_terms,
+                        max_snippet_chars,
+                    ),
+                    raw_file: row.get(8)?,
+                    raw_line: row.get(9)?,
+                    raw_offset: row.get(10)?,
+                    compaction_state: row.get(11)?,
+                    payload: Value::Null,
+                    also_at: Vec::new(),
+                    corroboration: None,
+                    retrieval_key: sha256_hex(searchable_text.as_bytes()),
+                    corroboration_text: searchable_text,
+                    cwd: row.get(12)?,
+                    project_root: row.get(13)?,
+                },
+            })
+        })
+        .map_err(|source| Error::Sqlite {
+            path: db_path.clone(),
+            source,
+        })?;
+
+    let mut results = Vec::new();
+    for row in rows {
+        results.push(row.map_err(|source| Error::Sqlite {
+            path: db_path.clone(),
+            source,
+        })?);
+    }
+    let has_more_raw_rows = results.len() > fetch_limit;
+    if has_more_raw_rows {
+        results.truncate(fetch_limit);
+    }
+    Ok((results, has_more_raw_rows))
+}
+
 fn search_history_hybrid_page(
     home: &Path,
     query: &str,
@@ -2513,15 +2837,16 @@ fn search_history_hybrid_page(
     let offset = options.offset;
     let max_snippet_chars = options.max_snippet_chars.clamp(1, MAX_SEARCH_SNIPPET_CHARS);
     let raw_fetch_limit = search_overfetch_limit(offset, limit);
+    let fts_query = quoted_fts_terms(&query_terms);
 
-    let mut lexical_options = options.clone();
-    lexical_options.mode = SearchMode::Lexical;
-    lexical_options.limit = raw_fetch_limit;
-    lexical_options.offset = 0;
-    lexical_options.include_payload = false;
-    lexical_options.dedupe = false;
-    lexical_options.corroborate = false;
-    let lexical_results = search_history_page(home, query, lexical_options)?.results;
+    let (lexical_results, _) = lexical_search_ranked_results(
+        home,
+        &options,
+        &query_terms,
+        &fts_query,
+        raw_fetch_limit,
+        max_snippet_chars,
+    )?;
     let vector_results = vector_search_results(
         home,
         query,
@@ -2533,7 +2858,7 @@ fn search_history_hybrid_page(
     let mut results = reciprocal_rank_fuse(lexical_results, vector_results);
 
     if options.dedupe {
-        results = dedupe_search_results(results)?;
+        results = dedupe_ranked_search_results(results)?;
     }
     let total_estimated = Some(results.len());
     let has_more_logical_rows = results.len() > offset.saturating_add(limit);
@@ -2541,11 +2866,10 @@ fn search_history_hybrid_page(
         .into_iter()
         .skip(offset)
         .take(limit)
+        .map(|ranked| ranked.result)
         .collect::<Vec<_>>();
     if options.include_payload {
-        for result in &mut page_results {
-            result.payload = payload_for_raw_pointer(&result.raw_file, result.raw_line)?;
-        }
+        hydrate_search_result_payloads(&mut page_results)?;
     }
     let returned = page_results.len();
     let continuation = if returned > 0 && has_more_logical_rows {
@@ -2582,7 +2906,7 @@ fn vector_search_results(
     fetch_limit: usize,
     query_terms: &[String],
     max_snippet_chars: usize,
-) -> Result<Vec<SearchResult>> {
+) -> Result<Vec<RankedSearchResult>> {
     let Some(embedder) = load_local_embedder(home)? else {
         return Err(Error::SemanticUnavailable(
             "local embedding model is not installed".to_string(),
@@ -2594,11 +2918,62 @@ fn vector_search_results(
     let conn = open_index(&db_path)?;
     ensure_semantic_vector_schema(&conn, &db_path)?;
 
-    let vector_k = fetch_limit
-        .clamp(1, MAX_SEARCH_LIMIT * 20)
-        .saturating_mul(4);
+    let ctx = VectorQueryContext {
+        conn: &conn,
+        db_path: &db_path,
+        query_blob: &query_blob,
+        options,
+        query_terms,
+        max_snippet_chars,
+    };
+    let max_vector_k = max_vector_search_k(fetch_limit);
+    let mut vector_k = initial_vector_search_k(fetch_limit, options).min(max_vector_k);
+    loop {
+        let row_limit = vector_search_row_limit(fetch_limit, vector_k);
+        let results = vector_search_results_for_k(&ctx, vector_k, row_limit)?;
+        let unique = unique_ranked_results_by_event(results);
+        if unique.len() >= fetch_limit || vector_k >= max_vector_k {
+            return Ok(unique);
+        }
+        let next_vector_k = vector_k.saturating_mul(2).min(max_vector_k);
+        if next_vector_k == vector_k {
+            return Ok(unique);
+        }
+        vector_k = next_vector_k;
+    }
+}
+
+#[cfg(feature = "semantic")]
+/// Loop-invariant inputs to a vector search; only `vector_k`/`row_limit` vary
+/// across the adaptive-fetch retries, so the rest travel together as context.
+#[cfg(feature = "semantic")]
+#[derive(Clone, Copy)]
+struct VectorQueryContext<'a> {
+    conn: &'a Connection,
+    db_path: &'a Path,
+    query_blob: &'a [u8],
+    options: &'a SearchOptions,
+    query_terms: &'a [String],
+    max_snippet_chars: usize,
+}
+
+#[cfg(feature = "semantic")]
+fn vector_search_results_for_k(
+    ctx: &VectorQueryContext,
+    vector_k: usize,
+    row_limit: usize,
+) -> Result<Vec<RankedSearchResult>> {
+    let VectorQueryContext {
+        conn,
+        db_path,
+        query_blob,
+        options,
+        query_terms,
+        max_snippet_chars,
+    } = *ctx;
     let mut sql = String::from(
         "SELECT
+           e.id,
            e.tool,
            e.session_id,
            e.canonical_type,
@@ -2617,7 +2992,7 @@ fn vector_search_results(
          WHERE ve.embedding MATCH ? AND ve.k = ?",
     );
     let mut params = vec![
-        SqlValue::Blob(query_blob),
+        SqlValue::Blob(query_blob.to_vec()),
         SqlValue::Integer(vector_k as i64),
     ];
 
@@ -2669,55 +3044,58 @@ fn vector_search_results(
         params.push(SqlValue::Text(format!("%{command}%")));
     }
     sql.push_str(" ORDER BY ve.distance LIMIT ?");
-    params.push(SqlValue::Integer(fetch_limit.saturating_mul(2) as i64));
+    params.push(SqlValue::Integer(row_limit as i64));
 
     let mut statement = conn.prepare(&sql).map_err(|source| Error::Sqlite {
-        path: db_path.clone(),
+        path: db_path.to_path_buf(),
         source,
     })?;
     let rows = statement
         .query_map(params_from_iter(params), |row| {
-            let tool_text: String = row.get(0)?;
-            let searchable_text = row.get::<_, String>(5).unwrap_or_default();
-            let distance = row.get::<_, f64>(4)?;
-            Ok(SearchResult {
-                tool: Tool::from_str(&tool_text).map_err(|_| rusqlite::Error::InvalidQuery)?,
-                session_id: row.get(1)?,
-                canonical_type: row.get(2)?,
-                timestamp: row.get(3)?,
-                score: 1.0 / (1.0 + distance),
-                snippet: match_centered_snippet(
-                    None,
-                    searchable_text.clone(),
-                    query_terms,
-                    max_snippet_chars,
-                ),
-                raw_file: row.get(6)?,
-                raw_line: row.get(7)?,
-                raw_offset: row.get(8)?,
-                compaction_state: row.get(9)?,
-                payload: Value::Null,
-                also_at: Vec::new(),
-                corroboration: None,
-                retrieval_key: sha256_hex(searchable_text.as_bytes()),
-                corroboration_text: searchable_text,
-                cwd: row.get(10)?,
-                project_root: row.get(11)?,
+            let tool_text: String = row.get(1)?;
+            let searchable_text = row.get::<_, String>(6).unwrap_or_default();
+            let distance = row.get::<_, f64>(5)?;
+            Ok(RankedSearchResult {
+                event_id: row.get(0)?,
+                result: SearchResult {
+                    tool: Tool::from_str(&tool_text).map_err(|_| rusqlite::Error::InvalidQuery)?,
+                    session_id: row.get(2)?,
+                    canonical_type: row.get(3)?,
+                    timestamp: row.get(4)?,
+                    score: 1.0 / (1.0 + distance),
+                    snippet: match_centered_snippet(
+                        None,
+                        searchable_text.clone(),
+                        query_terms,
+                        max_snippet_chars,
+                    ),
+                    raw_file: row.get(7)?,
+                    raw_line: row.get(8)?,
+                    raw_offset: row.get(9)?,
+                    compaction_state: row.get(10)?,
+                    payload: Value::Null,
+                    also_at: Vec::new(),
+                    corroboration: None,
+                    retrieval_key: sha256_hex(searchable_text.as_bytes()),
+                    corroboration_text: searchable_text,
+                    cwd: row.get(11)?,
+                    project_root: row.get(12)?,
+                },
             })
         })
         .map_err(|source| Error::Sqlite {
-            path: db_path.clone(),
+            path: db_path.to_path_buf(),
             source,
         })?;
 
     let mut results = Vec::new();
     for row in rows {
         results.push(row.map_err(|source| Error::Sqlite {
-            path: db_path.clone(),
+            path: db_path.to_path_buf(),
             source,
         })?);
     }
-    Ok(unique_results_by_event(results))
+    Ok(results)
 }
 
 #[cfg(not(feature = "semantic"))]
@@ -2728,31 +3106,72 @@ fn vector_search_results(
     _fetch_limit: usize,
     _query_terms: &[String],
     _max_snippet_chars: usize,
-) -> Result<Vec<SearchResult>> {
+) -> Result<Vec<RankedSearchResult>> {
     Err(Error::SemanticUnavailable(
         "semantic backend is not available in this build; rebuild with --features semantic"
             .to_string(),
     ))
 }
 
+#[cfg(feature = "semantic")]
+fn max_vector_search_k(fetch_limit: usize) -> usize {
+    fetch_limit
+        .clamp(1, MAX_SEARCH_LIMIT * 20)
+        .saturating_mul(4)
+        .max(1)
+}
+
+#[cfg(feature = "semantic")]
+fn initial_vector_search_k(fetch_limit: usize, options: &SearchOptions) -> usize {
+    let multiplier = if vector_search_filter_count(options) == 0 {
+        2
+    } else {
+        4
+    };
+    fetch_limit
+        .clamp(1, MAX_SEARCH_LIMIT * 20)
+        .saturating_mul(multiplier)
+        .max(1)
+}
+
+#[cfg(feature = "semantic")]
+fn vector_search_row_limit(fetch_limit: usize, vector_k: usize) -> usize {
+    let vector_k = vector_k.max(1);
+    fetch_limit.saturating_mul(2).max(1).min(vector_k)
+}
+
+#[cfg(feature = "semantic")]
+fn vector_search_filter_count(options: &SearchOptions) -> usize {
+    [
+        options.tool.is_some(),
+        options.session_id.is_some(),
+        options.cwd.is_some(),
+        options.since.is_some(),
+        options.canonical_type.is_some(),
+        options.file.is_some(),
+        options.command.is_some(),
+    ]
+    .into_iter()
+    .filter(|present| *present)
+    .count()
+}
+
 fn reciprocal_rank_fuse(
-    lexical_results: Vec<SearchResult>,
-    vector_results: Vec<SearchResult>,
-) -> Vec<SearchResult> {
+    lexical_results: Vec<RankedSearchResult>,
+    vector_results: Vec<RankedSearchResult>,
+) -> Vec<RankedSearchResult> {
     const RRF_K: f64 = 60.0;
-    // Fusion key: (tool, session, canonical_type, raw_line, raw_offset).
-    type FusedKey = (Tool, String, String, i64, Option<i64>);
-    let lexical_results = unique_results_by_event(lexical_results);
-    let vector_results = unique_results_by_event(vector_results);
-    let mut fused: HashMap<FusedKey, (SearchResult, f64)> = HashMap::new();
+    let lexical_results = unique_ranked_results_by_event(lexical_results);
+    let vector_results = unique_ranked_results_by_event(vector_results);
+    let mut fused: HashMap<i64, (RankedSearchResult, f64)> = HashMap::new();
 
     for (rank, result) in lexical_results.into_iter().enumerate() {
-        let key = result_event_key(&result);
+        let key = result.event_id;
         let entry = fused.entry(key).or_insert((result, 0.0));
         entry.1 += 1.0 / (RRF_K + rank as f64 + 1.0);
     }
     for (rank, result) in vector_results.into_iter().enumerate() {
-        let key = result_event_key(&result);
+        let key = result.event_id;
         let entry = fused.entry(key).or_insert((result, 0.0));
         entry.1 += 1.0 / (RRF_K + rank as f64 + 1.0);
     }
@@ -2760,39 +3179,30 @@ fn reciprocal_rank_fuse(
     let mut results = fused
         .into_values()
         .map(|(mut result, score)| {
-            result.score = score;
+            result.result.score = score;
             result
         })
         .collect::<Vec<_>>();
     results.sort_by(|left, right| {
         right
+            .result
             .score
-            .total_cmp(&left.score)
-            .then_with(|| right.timestamp.cmp(&left.timestamp))
-            .then_with(|| left.raw_line.cmp(&right.raw_line))
+            .total_cmp(&left.result.score)
+            .then_with(|| right.result.timestamp.cmp(&left.result.timestamp))
+            .then_with(|| left.result.raw_line.cmp(&right.result.raw_line))
     });
     results
 }
 
-fn unique_results_by_event(results: Vec<SearchResult>) -> Vec<SearchResult> {
+fn unique_ranked_results_by_event(results: Vec<RankedSearchResult>) -> Vec<RankedSearchResult> {
     let mut seen = HashSet::new();
     let mut unique = Vec::new();
     for result in results {
-        if seen.insert(result_event_key(&result)) {
+        if seen.insert(result.event_id) {
             unique.push(result);
         }
     }
     unique
-}
-
-fn result_event_key(result: &SearchResult) -> (Tool, String, String, i64, Option<i64>) {
-    (
-        result.tool,
-        result.session_id.clone(),
-        result.raw_file.clone(),
-        result.raw_line,
-        result.raw_offset,
-    )
 }
 
 fn annotate_search_results_with_corroboration(results: &mut [SearchResult]) {
@@ -3383,13 +3793,18 @@ fn truncate_chars(mut value: String, max_chars: usize) -> String {
     value
 }
 
-fn dedupe_search_results(results: Vec<SearchResult>) -> Result<Vec<SearchResult>> {
+fn dedupe_ranked_search_results(
+    results: Vec<RankedSearchResult>,
+) -> Result<Vec<RankedSearchResult>> {
     let mut seen: HashMap<(String, String, String), usize> = HashMap::new();
-    let mut deduped: Vec<SearchResult> = Vec::new();
+    let mut deduped: Vec<RankedSearchResult> = Vec::new();
     for result in results {
-        let key = retrieval_twin_key(&result);
+        let key = retrieval_twin_key(&result.result);
         if let Some(existing) = seen.get(&key).copied() {
-            deduped[existing].also_at.push(result.raw_line);
+            deduped[existing]
+                .result
+                .also_at
+                .push(result.result.raw_line);
         } else {
             seen.insert(key, deduped.len());
             deduped.push(result);
@@ -3790,9 +4205,7 @@ pub fn get_event_by_pointer_with_options(
         })?;
 
     let (raw_file, raw_line, raw_offset, searchable_text, cwd, project_root) = pointer;
-    let raw_path = PathBuf::from(&raw_file);
-    let raw_text = read_raw_line(&raw_path, raw_line)?;
-    let mut envelope: EventEnvelope = serde_json::from_str(raw_text.trim_end())?;
+    let mut envelope = raw_envelope_for_pointer(&raw_file, raw_line, raw_offset)?;
     let mut searchable_text = searchable_text;
     if options.redact {
         envelope.payload = redact_json_value(envelope.payload);
@@ -4258,11 +4671,132 @@ fn read_raw_line(path: &Path, requested_line: i64) -> Result<String> {
     )))
 }
 
-fn payload_for_raw_pointer(raw_file: &str, raw_line: i64) -> Result<Value> {
+fn raw_envelope_for_pointer(
+    raw_file: &str,
+    raw_line: i64,
+    raw_offset: Option<i64>,
+) -> Result<EventEnvelope> {
     let raw_path = PathBuf::from(raw_file);
-    let raw_text = read_raw_line(&raw_path, raw_line)?;
-    let envelope: EventEnvelope = serde_json::from_str(raw_text.trim_end())?;
+    if let Some(raw_offset) = raw_offset {
+        let mut reader = open_raw_offset_reader(&raw_path)?;
+        if let Some(envelope) = read_raw_envelope_at_offset(&raw_path, &mut reader, raw_offset)? {
+            return Ok(envelope);
+        }
+    }
+    raw_envelope_for_line_scan(&raw_path, raw_line)
+}
+
+fn raw_envelope_for_line_scan(raw_path: &Path, raw_line: i64) -> Result<EventEnvelope> {
+    let raw_text = read_raw_line(raw_path, raw_line)?;
+    Ok(serde_json::from_str(raw_text.trim_end())?)
+}
+
+fn open_raw_offset_reader(raw_path: &Path) -> Result<BufReader<File>> {
+    let file = File::open(raw_path).map_err(|source| Error::Io {
+        path: raw_path.to_path_buf(),
+        source,
+    })?;
+    Ok(BufReader::new(file))
+}
+
+fn read_raw_envelope_at_offset(
+    raw_path: &Path,
+    reader: &mut BufReader<File>,
+    raw_offset: i64,
+) -> Result<Option<EventEnvelope>> {
+    let Ok(offset) = u64::try_from(raw_offset) else {
+        return Ok(None);
+    };
+    reader
+        .seek(SeekFrom::Start(offset))
+        .map_err(|source| Error::Io {
+            path: raw_path.to_path_buf(),
+            source,
+        })?;
+    let mut line = String::new();
+    let bytes = reader.read_line(&mut line).map_err(|source| Error::Io {
+        path: raw_path.to_path_buf(),
+        source,
+    })?;
+    if bytes == 0 || line.trim().is_empty() {
+        return Ok(None);
+    }
+    let envelope = match serde_json::from_str::<EventEnvelope>(line.trim_end()) {
+        Ok(envelope) => envelope,
+        Err(_) => return Ok(None),
+    };
+    if !raw_envelope_matches_pointer(raw_path, raw_offset, &envelope) {
+        return Ok(None);
+    }
+    Ok(Some(envelope))
+}
+
+fn raw_envelope_matches_pointer(
+    raw_path: &Path,
+    raw_offset: i64,
+    envelope: &EventEnvelope,
+) -> bool {
+    if envelope.raw_offset != Some(raw_offset) {
+        return false;
+    }
+    if let Some(envelope_raw_file) = envelope.raw_file.as_deref() {
+        if Path::new(envelope_raw_file) != raw_path {
+            return false;
+        }
+    }
+    true
+}
+
+fn payload_for_raw_pointer(
+    raw_file: &str,
+    raw_line: i64,
+    raw_offset: Option<i64>,
+) -> Result<Value> {
+    let raw_path = PathBuf::from(raw_file);
+    let envelope = raw_envelope_for_pointer(raw_file, raw_line, raw_offset)?;
     resolved_payload_for_envelope(&raw_path, &envelope)
+}
+
+fn hydrate_search_result_payloads(results: &mut [SearchResult]) -> Result<()> {
+    let mut grouped = BTreeMap::<String, Vec<usize>>::new();
+    for (index, result) in results.iter().enumerate() {
+        grouped
+            .entry(result.raw_file.clone())
+            .or_default()
+            .push(index);
+    }
+
+    for (raw_file, mut indexes) in grouped {
+        indexes.sort_by_key(|index| {
+            (
+                results[*index].raw_offset.unwrap_or(i64::MAX),
+                results[*index].raw_line,
+            )
+        });
+        let raw_path = PathBuf::from(&raw_file);
+        let mut offset_reader = None;
+        for index in indexes {
+            let raw_line = results[index].raw_line;
+            let raw_offset = results[index].raw_offset;
+            let envelope = if let Some(raw_offset) = raw_offset {
+                if offset_reader.is_none() {
+                    offset_reader = Some(open_raw_offset_reader(&raw_path)?);
+                }
+                match read_raw_envelope_at_offset(
+                    &raw_path,
+                    offset_reader.as_mut().expect("offset reader initialized"),
+                    raw_offset,
+                )? {
+                    Some(envelope) => envelope,
+                    None => raw_envelope_for_line_scan(&raw_path, raw_line)?,
+                }
+            } else {
+                raw_envelope_for_line_scan(&raw_path, raw_line)?
+            };
+            results[index].payload = resolved_payload_for_envelope(&raw_path, &envelope)?;
+        }
+    }
+    Ok(())
 }
 
 fn rewrite_raw_file_after(path: &Path, before: &str) -> Result<bool> {
@@ -4365,7 +4899,7 @@ fn delete_indexed_events(
         let canonical_type_value = CanonicalType::from_str(canonical_type)?;
         let payload = match payload_json.as_deref() {
             Some(payload_json) => serde_json::from_str(payload_json)?,
-            None => payload_for_raw_pointer(raw_file, *raw_line)?,
+            None => payload_for_raw_pointer(raw_file, *raw_line, *raw_offset)?,
         };
         let search_document = search_document_for_event(canonical_type_value, &payload);
         tx.execute(
@@ -4524,12 +5058,7 @@ where
 {
     init_home(home)?;
     let since_threshold = since.map(parse_since_threshold).transpose()?;
-    let mut report = BackfillReport {
-        source_files: 0,
-        appended_events: 0,
-        checkpoint_files: 0,
-        discontinuities: 0,
-    };
+    let mut report = empty_backfill_report();
 
     let tools: Vec<Tool> = match selection {
         Some(tool) => vec![tool],
@@ -4543,7 +5072,9 @@ where
         }
         let mut files = Vec::new();
         collect_backfill_files(tool, &tool_root, &mut files)?;
+        files.sort();
         let parse_context = backfill_parse_context(tool, &tool_root, &files)?;
+        let files = filter_backfill_files_by_since(files, since_threshold)?;
         let total_files = files.len();
         progress(BackfillProgress {
             operation: "backfill.start".to_string(),
@@ -4554,18 +5085,21 @@ where
             source_path: None,
         });
         let processed_files = AtomicUsize::new(0);
-        let file_reports: Vec<Result<Option<SourceBackfillReport>>> = files
+        let tool_report = files
             .par_iter()
             .map(|file| {
-                let outcome = should_skip_source_file(file, since_threshold).and_then(|skip| {
-                    if skip {
-                        Ok(None)
-                    } else {
-                        backfill_source_file(home, tool, file, &parse_context).map(Some)
-                    }
-                });
+                // `since` is already filtered upstream by
+                // filter_backfill_files_by_since. Here we only guard against a
+                // source file that vanishes between enumeration and read: skip
+                // it (fail-open) instead of aborting the whole backfill.
+                let outcome = backfill_source_file(home, tool, file, &parse_context)
+                    .map(source_backfill_report_to_backfill_report);
                 let vanished = matches!(&outcome, Err(error) if is_vanished_source(error));
-                let result = if vanished { Ok(None) } else { outcome };
+                let result = if vanished {
+                    Ok(empty_backfill_report())
+                } else {
+                    outcome
+                };
                 let processed = processed_files.fetch_add(1, Ordering::SeqCst) + 1;
                 progress(BackfillProgress {
                     operation: if vanished {
@@ -4581,17 +5115,11 @@ where
                 });
                 result
             })
-            .collect();
-
-        for file_report in file_reports {
-            let Some(file_report) = file_report? else {
-                continue;
-            };
-            report.source_files += 1;
-            report.appended_events += file_report.appended_events;
-            report.checkpoint_files += 1;
-            report.discontinuities += file_report.discontinuities;
-        }
+            .try_reduce(empty_backfill_report, |mut left, right| {
+                merge_backfill_report(&mut left, right);
+                Ok(left)
+            })?;
+        merge_backfill_report(&mut report, tool_report);
     }
 
     detect_deleted_sources(home, source_root, &mut report)?;
@@ -4633,7 +5161,9 @@ where
         }
         let mut files = Vec::new();
         collect_backfill_files(tool, &tool_root, &mut files)?;
+        files.sort();
         let parse_context = backfill_parse_context(tool, &tool_root, &files)?;
+        let files = filter_backfill_files_by_since(files, since_threshold)?;
         let total_files = files.len();
         progress(BackfillProgress {
             operation: "backfill.dry_run.start".to_string(),
@@ -4647,13 +5177,9 @@ where
         let file_reports: Vec<Result<Vec<BackfillCoverageSession>>> = files
             .par_iter()
             .map(|file| {
-                let outcome = should_skip_source_file(file, since_threshold).and_then(|skip| {
-                    if skip {
-                        Ok(Vec::new())
-                    } else {
-                        backfill_dry_run_file(home, tool, file, &parse_context)
-                    }
-                });
+                // `since` filtered upstream; tolerate a file that vanishes
+                // between enumeration and read (fail-open skip).
+                let outcome = backfill_dry_run_file(home, tool, file, &parse_context);
                 let vanished = matches!(&outcome, Err(error) if is_vanished_source(error));
                 let result = if vanished { Ok(Vec::new()) } else { outcome };
                 let processed = processed_files.fetch_add(1, Ordering::SeqCst) + 1;
@@ -4695,6 +5221,54 @@ where
         partial_sessions,
         sessions,
     })
+}
+
+fn empty_backfill_report() -> BackfillReport {
+    BackfillReport {
+        source_files: 0,
+        appended_events: 0,
+        checkpoint_files: 0,
+        discontinuities: 0,
+    }
+}
+
+fn source_backfill_report_to_backfill_report(report: SourceBackfillReport) -> BackfillReport {
+    BackfillReport {
+        source_files: 1,
+        appended_events: report.appended_events,
+        checkpoint_files: 1,
+        discontinuities: report.discontinuities,
+    }
+}
+
+fn merge_backfill_report(left: &mut BackfillReport, right: BackfillReport) {
+    left.source_files = left.source_files.saturating_add(right.source_files);
+    left.appended_events = left.appended_events.saturating_add(right.appended_events);
+    left.checkpoint_files = left.checkpoint_files.saturating_add(right.checkpoint_files);
+    left.discontinuities = left.discontinuities.saturating_add(right.discontinuities);
+}
+
+fn filter_backfill_files_by_since(
+    files: Vec<PathBuf>,
+    since_threshold: Option<SystemTime>,
+) -> Result<Vec<PathBuf>> {
+    if since_threshold.is_none() {
+        return Ok(files);
+    }
+    files
+        .into_iter()
+        .filter_map(
+            |file| match should_skip_source_file(&file, since_threshold) {
+                Ok(true) => None,
+                Ok(false) => Some(Ok(file)),
+                // A file that vanishes between enumeration and this mtime stat
+                // is skipped, not fatal — same fail-open guarantee the read
+                // path gives for the no-`since` case.
+                Err(error) if is_vanished_source(&error) => None,
+                Err(error) => Some(Err(error)),
+            },
+        )
+        .collect()
 }
 
 fn backfill_dry_run_file(
@@ -6098,8 +6672,8 @@ fn existing_dedupe_events_for_raw_file(
     raw_file: &Path,
 ) -> Result<HashMap<String, ExistingRawEvent>> {
     let sidecar = DedupeSidecarFiles::for_raw_file(home, raw_file);
-    match load_dedupe_sidecar(raw_file, &sidecar) {
-        Ok(Some(snapshot)) => Ok(snapshot.events),
+    match load_full_dedupe_sidecar_events(raw_file, &sidecar) {
+        Ok(Some(events)) => Ok(events),
         Ok(None) | Err(_) => Ok(read_raw_dedupe_snapshot(raw_file)?.events),
     }
 }
@@ -6266,7 +6840,6 @@ fn collect_backfill_files(tool: Tool, dir: &Path, files: &mut Vec<PathBuf>) -> R
             files.push(path);
         }
     }
-    files.sort();
     Ok(())
 }
 
@@ -7142,65 +7715,78 @@ fn ensure_supporting_indexes(conn: &Connection, path: &Path) -> Result<()> {
 }
 
 fn rebuild_events_fts(conn: &Connection, path: &Path) -> Result<()> {
-    let rows = {
-        let mut statement = conn
-            .prepare(
-                "SELECT id, payload_json, tool, session_id, canonical_type, raw_file, raw_line, raw_offset
-                 FROM events
-                 ORDER BY id",
-            )
-            .map_err(|source| Error::Sqlite {
-                path: path.to_path_buf(),
-                source,
-            })?;
-        let rows = statement
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    row.get::<_, Option<String>>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, String>(4)?,
-                    row.get::<_, String>(5)?,
-                    row.get::<_, i64>(6)?,
-                    row.get::<_, Option<i64>>(7)?,
-                ))
-            })
-            .map_err(|source| Error::Sqlite {
-                path: path.to_path_buf(),
-                source,
-            })?;
-        let mut collected = Vec::new();
-        for row in rows {
-            collected.push(row.map_err(|source| Error::Sqlite {
-                path: path.to_path_buf(),
-                source,
-            })?);
-        }
-        collected
-    };
+    let mut select = conn
+        .prepare(
+            "SELECT id, payload_json, tool, session_id, canonical_type, raw_file, raw_line, raw_offset
+             FROM events
+             ORDER BY id",
+        )
+        .map_err(|source| Error::Sqlite {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    let mut insert = conn
+        .prepare(
+            "INSERT INTO events_fts(rowid, user_text, assistant_text, tool_intent, tool_output, metadata_text, tool, session_id, canonical_type, raw_file, raw_line, raw_offset)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+        )
+        .map_err(|source| Error::Sqlite {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    let mut rows = select.query([]).map_err(|source| Error::Sqlite {
+        path: path.to_path_buf(),
+        source,
+    })?;
 
-    for (
-        event_id,
-        payload_json,
-        tool,
-        session_id,
-        canonical_type,
-        raw_file,
-        raw_line,
-        raw_offset,
-    ) in rows
-    {
+    while let Some(row) = rows.next().map_err(|source| Error::Sqlite {
+        path: path.to_path_buf(),
+        source,
+    })? {
+        let event_id = row.get::<_, i64>(0).map_err(|source| Error::Sqlite {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        let payload_json = row
+            .get::<_, Option<String>>(1)
+            .map_err(|source| Error::Sqlite {
+                path: path.to_path_buf(),
+                source,
+            })?;
+        let tool = row.get::<_, String>(2).map_err(|source| Error::Sqlite {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        let session_id = row.get::<_, String>(3).map_err(|source| Error::Sqlite {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        let canonical_type = row.get::<_, String>(4).map_err(|source| Error::Sqlite {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        let raw_file = row.get::<_, String>(5).map_err(|source| Error::Sqlite {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        let raw_line = row.get::<_, i64>(6).map_err(|source| Error::Sqlite {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        let raw_offset = row
+            .get::<_, Option<i64>>(7)
+            .map_err(|source| Error::Sqlite {
+                path: path.to_path_buf(),
+                source,
+            })?;
         let canonical_type = CanonicalType::from_str(&canonical_type)?;
         let payload = match payload_json.as_deref() {
             Some(payload_json) => serde_json::from_str(payload_json)?,
-            None => payload_for_raw_pointer(&raw_file, raw_line)?,
+            None => payload_for_raw_pointer(&raw_file, raw_line, raw_offset)?,
         };
         let document = search_document_for_event(canonical_type, &payload);
-        conn.execute(
-            "INSERT INTO events_fts(rowid, user_text, assistant_text, tool_intent, tool_output, metadata_text, tool, session_id, canonical_type, raw_file, raw_line, raw_offset)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
-            (
+        insert
+            .execute((
                 event_id,
                 &document.user_text,
                 &document.assistant_text,
@@ -7213,12 +7799,11 @@ fn rebuild_events_fts(conn: &Connection, path: &Path) -> Result<()> {
                 &raw_file,
                 raw_line,
                 raw_offset,
-            ),
-        )
-        .map_err(|source| Error::Sqlite {
-            path: path.to_path_buf(),
-            source,
-        })?;
+            ))
+            .map_err(|source| Error::Sqlite {
+                path: path.to_path_buf(),
+                source,
+            })?;
     }
 
     Ok(())
@@ -7292,7 +7877,7 @@ fn insert_indexed_event(
     let payload_json: Option<String> = None;
 
     conn.execute(
-        "INSERT OR IGNORE INTO sessions(
+        "INSERT INTO sessions(
            tool,
            session_id,
            filename_session_id,
@@ -7302,7 +7887,20 @@ fn insert_indexed_event(
            updated_at,
            raw_file
          )
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, ?7)",
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, ?7)
+         ON CONFLICT(tool, session_id) DO UPDATE SET
+           started_at = CASE
+             WHEN sessions.started_at IS NULL OR sessions.started_at > excluded.started_at
+             THEN excluded.started_at
+             ELSE sessions.started_at
+           END,
+           updated_at = CASE
+             WHEN sessions.updated_at IS NULL OR sessions.updated_at < excluded.updated_at
+             THEN excluded.updated_at
+             ELSE sessions.updated_at
+           END,
+           project_root = COALESCE(sessions.project_root, excluded.project_root),
+           cwd = COALESCE(sessions.cwd, excluded.cwd)",
         (
             envelope.tool.as_str(),
             &envelope.session_id,
@@ -7311,25 +7909,6 @@ fn insert_indexed_event(
             envelope.cwd.as_deref(),
             &envelope.captured_at,
             &raw_file,
-        ),
-    )
-    .map_err(|source| Error::Sqlite {
-        path: path.to_path_buf(),
-        source,
-    })?;
-    conn.execute(
-        "UPDATE sessions
-         SET started_at = CASE WHEN started_at IS NULL OR started_at > ?3 THEN ?3 ELSE started_at END,
-             updated_at = CASE WHEN updated_at IS NULL OR updated_at < ?3 THEN ?3 ELSE updated_at END,
-             project_root = COALESCE(project_root, ?4),
-             cwd = COALESCE(cwd, ?5)
-         WHERE tool = ?1 AND session_id = ?2",
-        (
-            envelope.tool.as_str(),
-            &envelope.session_id,
-            &envelope.captured_at,
-            envelope.project_root.as_deref(),
-            envelope.cwd.as_deref(),
         ),
     )
     .map_err(|source| Error::Sqlite {
@@ -7624,14 +8203,14 @@ where
     let mut conn = open_index(&db_path)?;
     ensure_semantic_vector_schema(&conn, &db_path)?;
     sync_vector_units(&conn, &db_path)?;
-    let units = collect_unembedded_units(&conn, &db_path)?;
-    if units.is_empty() {
+    let total_units = count_unembedded_units(&conn, &db_path)?;
+    if total_units == 0 {
         return Ok(0);
     }
 
     let planned_threads = semantic_intra_threads();
     progress(embedding_index_plan_progress(
-        units.len(),
+        total_units,
         SEMANTIC_EMBED_BATCH_SIZE,
         SEMANTIC_EMBED_WRITE_CHUNK_SIZE,
         planned_threads,
@@ -7653,11 +8232,11 @@ where
         SEMANTIC_EMBED_WRITE_CHUNK_SIZE,
         embedder.intra_threads(),
     ));
-    embed_collected_unembedded_units_with_config(
+    embed_unembedded_units_paged_with_config(
         &mut conn,
         &db_path,
-        &embedder,
-        units,
+        &*embedder,
+        total_units,
         EmbeddingWriteConfig::default(),
         progress,
     )
@@ -7722,7 +8301,7 @@ fn sync_vector_units(conn: &Connection, db_path: &Path) -> Result<usize> {
         let canonical_type = CanonicalType::from_str(&canonical_type)?;
         let payload = match payload_json.as_deref() {
             Some(payload_json) => serde_json::from_str(payload_json)?,
-            None => payload_for_raw_pointer(&raw_file, raw_line)?,
+            None => payload_for_raw_pointer(&raw_file, raw_line, raw_offset)?,
         };
         let document = search_document_for_event(canonical_type, &payload);
         let created_at = OffsetDateTime::now_utc().format(&Rfc3339)?;
@@ -7764,6 +8343,88 @@ fn sync_vector_units(conn: &Connection, db_path: &Path) -> Result<usize> {
         }
     }
     Ok(inserted)
+}
+
+#[cfg(feature = "semantic")]
+fn embed_unembedded_units_paged_with_config(
+    conn: &mut Connection,
+    db_path: &Path,
+    embedder: &dyn Embedder,
+    total_units: usize,
+    config: EmbeddingWriteConfig,
+    mut progress: impl FnMut(EmbeddingIndexProgress),
+) -> Result<usize> {
+    let mut embedded = 0usize;
+    let mut pending_writes = Vec::with_capacity(embedder.document_batch_size());
+    let started = Instant::now();
+    let mut last_emit = started;
+    let mut after_unit_id = 0i64;
+
+    progress(embedding_index_progress(
+        "embedding",
+        "started",
+        embedded,
+        total_units,
+        started,
+        embedder,
+        config.write_chunk_size,
+    ));
+
+    loop {
+        let mut page = collect_unembedded_units_page(
+            conn,
+            db_path,
+            after_unit_id,
+            SEMANTIC_EMBED_COLLECT_BATCH_SIZE,
+        )?;
+        if page.rows_seen == 0 {
+            break;
+        }
+        after_unit_id = page.last_unit_id;
+        bucket_unembedded_units(&mut page.units);
+
+        for batch in page.units.chunks(embedder.document_batch_size()) {
+            let texts = batch
+                .iter()
+                .map(|unit| unit.text.clone())
+                .collect::<Vec<_>>();
+            let vectors = embedder.embed_documents(&texts)?;
+            for (unit, vector) in batch.iter().zip(vectors) {
+                pending_writes.push((unit.unit_id, vector));
+                embedded += 1;
+                if pending_writes.len() >= config.write_chunk_size {
+                    flush_embedding_writes(conn, db_path, &pending_writes)?;
+                    pending_writes.clear();
+                }
+            }
+            if embedded < total_units && last_emit.elapsed() >= SEMANTIC_EMBED_PROGRESS_INTERVAL {
+                progress(embedding_index_progress(
+                    "embedding",
+                    "running",
+                    embedded,
+                    total_units,
+                    started,
+                    embedder,
+                    config.write_chunk_size,
+                ));
+                last_emit = Instant::now();
+            }
+        }
+    }
+
+    if !pending_writes.is_empty() {
+        flush_embedding_writes(conn, db_path, &pending_writes)?;
+    }
+    progress(embedding_index_progress(
+        "embedding",
+        "completed",
+        embedded,
+        total_units,
+        started,
+        embedder,
+        config.write_chunk_size,
+    ));
+    Ok(embedded)
 }
 
 #[cfg(feature = "semantic")]
@@ -7980,6 +8641,13 @@ struct UnembeddedUnit {
 }
 
 #[cfg(feature = "semantic")]
+struct UnembeddedUnitPage {
+    units: Vec<UnembeddedUnit>,
+    last_unit_id: i64,
+    rows_seen: usize,
+}
+
+#[cfg(feature = "semantic")]
 fn bucket_unembedded_units(units: &mut [UnembeddedUnit]) {
     units.sort_by_key(|unit| (embedding_length_bucket(unit.estimated_tokens), unit.unit_id));
 }
@@ -8004,72 +8672,142 @@ fn estimated_embedding_token_count(text: &str) -> usize {
 }
 
 #[cfg(feature = "semantic")]
+fn count_unembedded_units(conn: &Connection, db_path: &Path) -> Result<usize> {
+    let count = conn
+        .query_row(
+            "SELECT COUNT(*)
+             FROM vector_units vu
+             LEFT JOIN vector_unit_embeddings ve ON ve.unit_id = vu.id
+             WHERE ve.unit_id IS NULL",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(|source| Error::Sqlite {
+            path: db_path.to_path_buf(),
+            source,
+        })?;
+    Ok(count.max(0) as usize)
+}
+
+#[cfg(feature = "semantic")]
 fn collect_unembedded_units(conn: &Connection, db_path: &Path) -> Result<Vec<UnembeddedUnit>> {
-    let rows = {
-        let mut statement = conn
-            .prepare(
-                "SELECT
-                   vu.id,
-                   vu.unit_kind,
-                   vu.unit_index,
-                   vu.text_hash,
-                   vut.text,
-                   e.canonical_type,
-                   e.payload_json,
-                   e.raw_file,
-                   e.raw_line
-                 FROM vector_units vu
-                 JOIN events e ON e.id = vu.event_id
-                 LEFT JOIN vector_unit_texts vut ON vut.text_hash = vu.text_hash
-                 LEFT JOIN vector_unit_embeddings ve ON ve.unit_id = vu.id
-                 WHERE ve.unit_id IS NULL
-                 ORDER BY vu.id",
-            )
-            .map_err(|source| Error::Sqlite {
-                path: db_path.to_path_buf(),
-                source,
-            })?;
-        let mapped = statement
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, i64>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, Option<String>>(4)?,
-                    row.get::<_, String>(5)?,
-                    row.get::<_, Option<String>>(6)?,
-                    row.get::<_, String>(7)?,
-                    row.get::<_, i64>(8)?,
-                ))
-            })
-            .map_err(|source| Error::Sqlite {
-                path: db_path.to_path_buf(),
-                source,
-            })?;
-        let mut rows = Vec::new();
-        for row in mapped {
-            rows.push(row.map_err(|source| Error::Sqlite {
-                path: db_path.to_path_buf(),
-                source,
-            })?);
+    let mut units = Vec::new();
+    let mut after_unit_id = 0i64;
+    loop {
+        let page = collect_unembedded_units_page(
+            conn,
+            db_path,
+            after_unit_id,
+            SEMANTIC_EMBED_COLLECT_BATCH_SIZE,
+        )?;
+        if page.rows_seen == 0 {
+            break;
         }
-        rows
-    };
+        after_unit_id = page.last_unit_id;
+        units.extend(page.units);
+    }
+    Ok(units)
+}
+
+#[cfg(feature = "semantic")]
+fn collect_unembedded_units_page(
+    conn: &Connection,
+    db_path: &Path,
+    after_unit_id: i64,
+    limit: usize,
+) -> Result<UnembeddedUnitPage> {
+    let mut statement = conn
+        .prepare(
+            "SELECT
+               vu.id,
+               vu.unit_kind,
+               vu.unit_index,
+               vu.text_hash,
+               vut.text,
+               e.canonical_type,
+               e.payload_json,
+               e.raw_file,
+               e.raw_line,
+               e.raw_offset
+             FROM vector_units vu
+             JOIN events e ON e.id = vu.event_id
+             LEFT JOIN vector_unit_texts vut ON vut.text_hash = vu.text_hash
+             LEFT JOIN vector_unit_embeddings ve ON ve.unit_id = vu.id
+             WHERE ve.unit_id IS NULL
+               AND vu.id > ?1
+             ORDER BY vu.id
+             LIMIT ?2",
+        )
+        .map_err(|source| Error::Sqlite {
+            path: db_path.to_path_buf(),
+            source,
+        })?;
+    let mut rows = statement
+        .query(params![
+            after_unit_id,
+            limit.clamp(1, SEMANTIC_EMBED_COLLECT_BATCH_SIZE) as i64
+        ])
+        .map_err(|source| Error::Sqlite {
+            path: db_path.to_path_buf(),
+            source,
+        })?;
 
     let mut units = Vec::new();
-    for row in rows {
-        let (
-            unit_id,
-            unit_kind,
-            unit_index,
-            text_hash,
-            stored_text,
-            canonical_type,
-            payload_json,
-            raw_file,
-            raw_line,
-        ) = row;
+    let mut rows_seen = 0usize;
+    let mut last_unit_id = after_unit_id;
+    while let Some(row) = rows.next().map_err(|source| Error::Sqlite {
+        path: db_path.to_path_buf(),
+        source,
+    })? {
+        rows_seen += 1;
+        let unit_id = row.get::<_, i64>(0).map_err(|source| Error::Sqlite {
+            path: db_path.to_path_buf(),
+            source,
+        })?;
+        last_unit_id = unit_id;
+        let unit_kind = row.get::<_, String>(1).map_err(|source| Error::Sqlite {
+            path: db_path.to_path_buf(),
+            source,
+        })?;
+        let unit_index = row.get::<_, i64>(2).map_err(|source| Error::Sqlite {
+            path: db_path.to_path_buf(),
+            source,
+        })?;
+        let text_hash = row.get::<_, String>(3).map_err(|source| Error::Sqlite {
+            path: db_path.to_path_buf(),
+            source,
+        })?;
+        let stored_text = row
+            .get::<_, Option<String>>(4)
+            .map_err(|source| Error::Sqlite {
+                path: db_path.to_path_buf(),
+                source,
+            })?;
+        let canonical_type = row.get::<_, String>(5).map_err(|source| Error::Sqlite {
+            path: db_path.to_path_buf(),
+            source,
+        })?;
+        let payload_json = row
+            .get::<_, Option<String>>(6)
+            .map_err(|source| Error::Sqlite {
+                path: db_path.to_path_buf(),
+                source,
+            })?;
+        let raw_file = row.get::<_, String>(7).map_err(|source| Error::Sqlite {
+            path: db_path.to_path_buf(),
+            source,
+        })?;
+        let raw_line = row.get::<_, i64>(8).map_err(|source| Error::Sqlite {
+            path: db_path.to_path_buf(),
+            source,
+        })?;
+        let raw_offset = row
+            .get::<_, Option<i64>>(9)
+            .map_err(|source| Error::Sqlite {
+                path: db_path.to_path_buf(),
+                source,
+            })?;
+
         if let Some(text) = stored_text {
             units.push(UnembeddedUnit {
                 unit_id,
@@ -8082,7 +8820,7 @@ fn collect_unembedded_units(conn: &Connection, db_path: &Path) -> Result<Vec<Une
         let canonical_type = CanonicalType::from_str(&canonical_type)?;
         let payload = match payload_json.as_deref() {
             Some(payload_json) => serde_json::from_str(payload_json)?,
-            None => payload_for_raw_pointer(&raw_file, raw_line)?,
+            None => payload_for_raw_pointer(&raw_file, raw_line, raw_offset)?,
         };
         let unit_kind = EmbeddingUnitKind::from_str(&unit_kind)?;
         let unit_index = usize::try_from(unit_index)
@@ -8105,7 +8843,11 @@ fn collect_unembedded_units(conn: &Connection, db_path: &Path) -> Result<Vec<Une
             });
         }
     }
-    Ok(units)
+    Ok(UnembeddedUnitPage {
+        units,
+        last_unit_id,
+        rows_seen,
+    })
 }
 
 #[cfg(feature = "semantic")]
@@ -10445,7 +11187,7 @@ mod tests {
         let raw_path = canonical_raw_path(&home, Tool::Claude, session_id);
         let sidecar = DedupeSidecarFiles::for_raw_file(&home, &raw_path);
         assert_eq!(raw_line_count(&raw_path), 10_000);
-        assert_eq!(raw_line_count(&sidecar.keys), 10_000);
+        assert_eq!(dedupe_sidecar_entry_count(&sidecar), 10_000);
 
         let duplicate = ingest_hook_event(
             &home,
@@ -10465,7 +11207,7 @@ mod tests {
         assert_eq!(duplicate.raw_offset, raw_offset_for_line(&raw_path, 1234));
         assert_eq!(raw_line_count(&raw_path), 10_000);
 
-        fs::remove_file(&sidecar.keys).unwrap();
+        fs::remove_dir_all(&sidecar.buckets_dir).unwrap();
         let duplicate_after_delete = ingest_hook_event(
             &home,
             Tool::Claude,
@@ -10482,26 +11224,41 @@ mod tests {
         .unwrap();
         assert!(!duplicate_after_delete.appended);
         assert_eq!(raw_line_count(&raw_path), 10_000);
-        assert_eq!(raw_line_count(&sidecar.keys), 10_000);
+        assert_eq!(dedupe_sidecar_entry_count(&sidecar), 10_000);
 
-        fs::write(&sidecar.keys, b"sha256:truncated").unwrap();
-        let duplicate_after_corruption = ingest_hook_event(
-            &home,
+        let corrupt_payload = json!({
+            "session_id": session_id,
+            "hook_event_name": "UserPromptSubmit",
+            "message_id": "large-sidecar-9876",
+            "sequence": 9876,
+            "cwd": "/tmp/nabu-fixture",
+            "project_root": "/tmp/nabu-fixture",
+            "prompt": "large sidecar marker 9876"
+        });
+        let corrupt_event = envelope_from_backfill_payload(
             Tool::Claude,
-            json!({
-                "session_id": session_id,
-                "hook_event_name": "UserPromptSubmit",
-                "message_id": "large-sidecar-9876",
-                "sequence": 9876,
-                "cwd": "/tmp/nabu-fixture",
-                "project_root": "/tmp/nabu-fixture",
-                "prompt": "large sidecar marker 9876"
-            }),
+            Path::new("/tmp/large-sidecar.jsonl"),
+            9876,
+            corrupt_payload.clone(),
+            &BackfillParseContext::default(),
         )
         .unwrap();
+        let corrupt_key = dedupe_key(DedupeParts {
+            tool: corrupt_event.tool,
+            session_id: &corrupt_event.session_id,
+            canonical_type: corrupt_event.canonical_type,
+            source_event_id: corrupt_event.source_event_id.as_deref(),
+            sequence: corrupt_event.sequence,
+            payload: &corrupt_event.payload,
+        })
+        .unwrap();
+        let corrupt_bucket = dedupe_bucket_index(&corrupt_key).unwrap();
+        fs::write(sidecar.bucket_path(corrupt_bucket), b"sha256:truncated").unwrap();
+        let duplicate_after_corruption =
+            ingest_hook_event(&home, Tool::Claude, corrupt_payload).unwrap();
         assert!(!duplicate_after_corruption.appended);
         assert_eq!(raw_line_count(&raw_path), 10_000);
-        assert_eq!(raw_line_count(&sidecar.keys), 10_000);
+        assert_eq!(dedupe_sidecar_entry_count(&sidecar), 10_000);
 
         index_once(&home).unwrap();
         let results = search_history(&home, "large sidecar marker 1234", 10).unwrap();
@@ -10543,8 +11300,7 @@ mod tests {
         let raw_path = canonical_raw_path(&home, Tool::Codex, session_id);
         let sidecar = DedupeSidecarFiles::for_raw_file(&home, &raw_path);
         assert_eq!(raw_line_count(&raw_path), 64);
-        assert_eq!(raw_line_count(&sidecar.keys), 64);
-        assert_eq!(raw_line_count(&sidecar.offsets), 64);
+        assert_eq!(dedupe_sidecar_entry_count(&sidecar), 64);
     }
 
     #[test]
@@ -11074,6 +11830,39 @@ mod tests {
 
         let third = index_once(&home).unwrap();
         assert_eq!(third.indexed_events, 1);
+    }
+
+    #[test]
+    fn fts_schema_migration_rebuilds_without_reindexing_raw_files() {
+        let temp = tempdir().unwrap();
+        let home = temp.path().join("home");
+        init_home(&home).unwrap();
+        ingest_hook_event(
+            &home,
+            Tool::Claude,
+            json!({
+                "session_id": "fts-migration-session",
+                "hook_event_name": "UserPromptSubmit",
+                "message_id": "fts-migration-1",
+                "prompt": "streaming fts rebuild marker"
+            }),
+        )
+        .unwrap();
+
+        assert_eq!(index_once(&home).unwrap().indexed_events, 1);
+        let db_path = home.join("index").join("harness.db");
+        Connection::open(&db_path)
+            .unwrap()
+            .execute_batch(
+                "DROP TABLE IF EXISTS events_fts;
+                 CREATE VIRTUAL TABLE events_fts USING fts5(searchable_text);",
+            )
+            .unwrap();
+
+        assert_eq!(index_once(&home).unwrap().indexed_events, 0);
+        let results = search_history(&home, "streaming fts rebuild marker", 10).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].session_id, "fts-migration-session");
     }
 
     #[test]
@@ -11828,6 +12617,100 @@ mod tests {
     }
 
     #[test]
+    fn payload_hydration_uses_raw_offset_and_falls_back_to_line_scan() {
+        let temp = tempdir().unwrap();
+        let home = temp.path().join("home");
+        init_home(&home).unwrap();
+
+        for line in 1..=4 {
+            ingest_hook_event(
+                &home,
+                Tool::Claude,
+                json!({
+                    "session_id": "offset-payload-session",
+                    "hook_event_name": "UserPromptSubmit",
+                    "message_id": format!("offset-payload-{line}"),
+                    "cwd": "/tmp/nabu-fixture",
+                    "project_root": "/tmp/nabu-fixture",
+                    "prompt": format!("offset payload marker {line}")
+                }),
+            )
+            .unwrap();
+        }
+        index_once(&home).unwrap();
+
+        let raw_path = canonical_raw_path(&home, Tool::Claude, "offset-payload-session");
+        let raw_file = raw_path.display().to_string();
+        let offset = raw_offset_for_line(&raw_path, 3) as i64;
+        let scanned = raw_envelope_for_line_scan(&raw_path, 4).unwrap();
+        let sought = raw_envelope_for_pointer(&raw_file, 4, Some(offset)).unwrap();
+        let fallback = raw_envelope_for_pointer(&raw_file, 4, Some(offset + 1)).unwrap();
+
+        assert_eq!(sought, scanned);
+        assert_eq!(fallback, scanned);
+        assert_eq!(
+            payload_for_raw_pointer(&raw_file, 4, Some(offset))
+                .unwrap()
+                .get("prompt"),
+            Some(&json!("offset payload marker 4"))
+        );
+    }
+
+    #[test]
+    fn search_payload_hydration_uses_grouped_raw_offsets() {
+        let temp = tempdir().unwrap();
+        let home = temp.path().join("home");
+        init_home(&home).unwrap();
+
+        for line in 1..=3 {
+            ingest_hook_event(
+                &home,
+                Tool::Claude,
+                json!({
+                    "session_id": "grouped-payload-session",
+                    "hook_event_name": "UserPromptSubmit",
+                    "message_id": format!("grouped-payload-{line}"),
+                    "cwd": "/tmp/nabu-fixture",
+                    "project_root": "/tmp/nabu-fixture",
+                    "prompt": format!("grouped payload shared marker {line}")
+                }),
+            )
+            .unwrap();
+        }
+        index_once(&home).unwrap();
+
+        let page = search_history_page(
+            &home,
+            "grouped payload shared marker",
+            SearchOptions {
+                include_payload: true,
+                limit: 3,
+                dedupe: false,
+                ..SearchOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(page.returned, 3);
+        let prompts = page
+            .results
+            .iter()
+            .map(|result| {
+                result
+                    .payload
+                    .get("prompt")
+                    .and_then(Value::as_str)
+                    .unwrap()
+                    .to_string()
+            })
+            .collect::<BTreeSet<_>>();
+        assert_eq!(prompts.len(), 3);
+        assert!(prompts.contains("grouped payload shared marker 1"));
+        assert!(prompts.contains("grouped payload shared marker 2"));
+        assert!(prompts.contains("grouped payload shared marker 3"));
+    }
+
+    #[test]
     fn search_auto_falls_back_to_lexical_and_forced_hybrid_errors_without_semantic_backend() {
         let temp = tempdir().unwrap();
         let home = temp.path().join("home");
@@ -12452,6 +13335,13 @@ mod tests {
 
     fn raw_line_count(path: &Path) -> usize {
         fs::read_to_string(path).unwrap().lines().count()
+    }
+
+    fn dedupe_sidecar_entry_count(sidecar: &DedupeSidecarFiles) -> usize {
+        fs::read_dir(&sidecar.buckets_dir)
+            .unwrap()
+            .map(|entry| raw_line_count(&entry.unwrap().path()))
+            .sum()
     }
 
     fn raw_envelopes(path: &Path) -> Vec<EventEnvelope> {

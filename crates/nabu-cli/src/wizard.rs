@@ -356,8 +356,9 @@ pub(crate) trait WizardActions {
     fn init_home(&mut self, home: &Path) -> Result<()>;
     fn install(&mut self, home: &Path, tool: Tool, dry_run: bool) -> Result<ConfigChangeReport>;
     fn uninstall(&mut self, home: &Path, tool: Tool, dry_run: bool) -> Result<ConfigChangeReport>;
-    fn backfill_preview(&mut self, home: &Path) -> Result<BackfillDryRunReport>;
-    fn backfill(&mut self, home: &Path) -> Result<BackfillReport>;
+    fn backfill_preview(&mut self, home: &Path, tool: BackfillTool)
+        -> Result<BackfillDryRunReport>;
+    fn backfill(&mut self, home: &Path, tool: BackfillTool) -> Result<BackfillReport>;
     /// Build the lexical (FTS) index so imported events are searchable. Returns
     /// the number of newly indexed events. Semantic embedding is intentionally
     /// excluded — it is the slow, opt-in path and must not block onboarding.
@@ -427,26 +428,18 @@ impl WizardActions for LiveActions {
         }
     }
 
-    fn backfill_preview(&mut self, home: &Path) -> Result<BackfillDryRunReport> {
+    fn backfill_preview(
+        &mut self,
+        home: &Path,
+        tool: BackfillTool,
+    ) -> Result<BackfillDryRunReport> {
         // Quiet emitter: the wizard renders its own progress through the
         // `Prompter` instead of letting the scan write telemetry to the screen.
-        run_backfill_dry_run_command(
-            home,
-            BackfillTool::All,
-            None,
-            None,
-            ProgressEmitter::quiet(),
-        )
+        run_backfill_dry_run_command(home, tool, None, None, ProgressEmitter::quiet())
     }
 
-    fn backfill(&mut self, home: &Path) -> Result<BackfillReport> {
-        run_backfill_command(
-            home,
-            BackfillTool::All,
-            None,
-            None,
-            ProgressEmitter::quiet(),
-        )
+    fn backfill(&mut self, home: &Path, tool: BackfillTool) -> Result<BackfillReport> {
+        run_backfill_command(home, tool, None, None, ProgressEmitter::quiet())
     }
 
     fn index(&mut self, home: &Path) -> Result<usize> {
@@ -726,8 +719,12 @@ fn backfill_step(
     actions: &mut dyn WizardActions,
     home: &Path,
 ) -> Result<()> {
-    prompter.note("Scanning past sessions…");
-    let preview = match actions.backfill_preview(home) {
+    let tool = select_backfill_tool(prompter)?;
+    prompter.note(&format!(
+        "Scanning {} past sessions…",
+        backfill_tool_scope_label(tool)
+    ));
+    let preview = match actions.backfill_preview(home, tool) {
         Ok(preview) => preview,
         Err(error) => {
             prompter.warn(&format!("Couldn’t scan past sessions: {error}"));
@@ -746,7 +743,7 @@ fn backfill_step(
         ),
         true,
     )? {
-        match actions.backfill(home) {
+        match actions.backfill(home, tool) {
             Ok(report) => {
                 prompter.success(&format!(
                     "Imported {} from {}",
@@ -774,6 +771,35 @@ fn backfill_step(
         prompter.skip("Skipped backfill");
     }
     Ok(())
+}
+
+fn select_backfill_tool(prompter: &mut dyn Prompter) -> Result<BackfillTool> {
+    match prompter.select(
+        "Backfill which history?",
+        &[
+            "All tools",
+            "Codex only",
+            "Claude Code only",
+            "OpenCode only",
+        ],
+    )? {
+        0 => Ok(BackfillTool::All),
+        1 => Ok(BackfillTool::Codex),
+        2 => Ok(BackfillTool::Claude),
+        3 => Ok(BackfillTool::Opencode),
+        _ => Err(Error::Validation(
+            "unsupported backfill selection".to_string(),
+        )),
+    }
+}
+
+fn backfill_tool_scope_label(tool: BackfillTool) -> &'static str {
+    match tool {
+        BackfillTool::All => "all",
+        BackfillTool::Codex => "Codex",
+        BackfillTool::Claude => "Claude Code",
+        BackfillTool::Opencode => "OpenCode",
+    }
 }
 
 /// Run `doctor` (fast) and report health. Read-only — no consent needed.
@@ -1229,7 +1255,8 @@ mod tests {
             self.calls
                 .iter()
                 .filter_map(|call| match call.as_str() {
-                    "init_home" | "backfill" => Some(call.clone()),
+                    "init_home" => Some(call.clone()),
+                    other if other.starts_with("backfill:") => Some(call.clone()),
                     other if other.ends_with(":dry=false") => {
                         Some(other.trim_end_matches(":dry=false").to_string())
                     }
@@ -1318,8 +1345,15 @@ mod tests {
             Ok(canned_report(tool, dry_run))
         }
 
-        fn backfill_preview(&mut self, _home: &Path) -> Result<BackfillDryRunReport> {
-            self.calls.push("backfill_preview".to_string());
+        fn backfill_preview(
+            &mut self,
+            _home: &Path,
+            tool: BackfillTool,
+        ) -> Result<BackfillDryRunReport> {
+            self.calls.push(format!(
+                "backfill_preview:{}",
+                backfill_tool_scope_label(tool)
+            ));
             Ok(BackfillDryRunReport {
                 source_files: 2,
                 on_disk_events: 10,
@@ -1330,8 +1364,9 @@ mod tests {
             })
         }
 
-        fn backfill(&mut self, _home: &Path) -> Result<BackfillReport> {
-            self.calls.push("backfill".to_string());
+        fn backfill(&mut self, _home: &Path, tool: BackfillTool) -> Result<BackfillReport> {
+            self.calls
+                .push(format!("backfill:{}", backfill_tool_scope_label(tool)));
             Ok(BackfillReport {
                 source_files: 2,
                 appended_events: 5,
@@ -1391,7 +1426,7 @@ mod tests {
     fn full_consent_get_started_matches_init_install_all_backfill_mcp() {
         // Get started, then Quit.
         let mut prompter = ScriptedPrompter::new()
-            .selects([TOP_GET_STARTED, TOP_QUIT])
+            .selects([TOP_GET_STARTED, 0, TOP_QUIT])
             // init, 3 installs, backfill, mcp register.
             .confirms([true, true, true, true, true, true]);
         let mut actions = SpyActions::all_present_unconfigured();
@@ -1405,7 +1440,7 @@ mod tests {
                 "install:codex",
                 "install:claude",
                 "install:opencode",
-                "backfill",
+                "backfill:all",
                 "mcp_install:codex",
                 "mcp_install:claude",
                 "mcp_install:opencode",
@@ -1416,7 +1451,7 @@ mod tests {
     #[test]
     fn declining_every_step_changes_nothing() {
         let mut prompter = ScriptedPrompter::new()
-            .selects([TOP_GET_STARTED, TOP_QUIT])
+            .selects([TOP_GET_STARTED, 0, TOP_QUIT])
             .confirms([false, false, false, false, false, false]);
         let mut actions = SpyActions::all_present_unconfigured();
 
@@ -1429,14 +1464,14 @@ mod tests {
         );
         // Read-only previews still ran.
         assert!(actions.calls.iter().any(|c| c == "install:codex:dry=true"));
-        assert!(actions.calls.iter().any(|c| c == "backfill_preview"));
+        assert!(actions.calls.iter().any(|c| c == "backfill_preview:all"));
         assert!(actions.calls.iter().any(|c| c == "doctor"));
     }
 
     #[test]
     fn rerun_on_configured_home_does_not_duplicate_installs() {
         let mut prompter = ScriptedPrompter::new()
-            .selects([TOP_GET_STARTED, TOP_QUIT])
+            .selects([TOP_GET_STARTED, 0, TOP_QUIT])
             // init + backfill are the only confirms reached when all tools are
             // already configured and MCP already registered.
             .confirms([true, true]);
@@ -1453,7 +1488,7 @@ mod tests {
             !mutating.iter().any(|c| c.starts_with("mcp_install:")),
             "already-registered MCP must not be re-registered, got {mutating:?}"
         );
-        assert_eq!(mutating, vec!["init_home", "backfill"]);
+        assert_eq!(mutating, vec!["init_home", "backfill:all"]);
     }
 
     #[test]
@@ -1484,14 +1519,15 @@ mod tests {
     #[test]
     fn backfill_menu_entry_runs_backfill_on_consent() {
         let mut prompter = ScriptedPrompter::new()
-            .selects([TOP_BACKFILL, TOP_QUIT])
+            .selects([TOP_BACKFILL, 0, TOP_QUIT])
             .confirms([true]);
         let mut actions = SpyActions::all_present_configured();
         run(&mut prompter, &mut actions, Path::new(HOME)).unwrap();
-        assert!(actions.calls.iter().any(|c| c == "backfill_preview"));
+        assert!(actions.calls.iter().any(|c| c == "backfill_preview:all"));
+        assert!(actions.calls.iter().any(|c| c == "backfill:all"));
         // Backfill must be followed by indexing, or imported events are not
         // searchable (the defect this auto-index closes).
-        let backfill_at = actions.calls.iter().position(|c| c == "backfill");
+        let backfill_at = actions.calls.iter().position(|c| c == "backfill:all");
         let index_at = actions.calls.iter().position(|c| c == "index");
         assert!(backfill_at.is_some(), "backfill should run on consent");
         assert!(
@@ -1499,6 +1535,21 @@ mod tests {
             "backfill must auto-index so results are searchable"
         );
         assert!(index_at > backfill_at, "indexing must follow the import");
+    }
+
+    #[test]
+    fn backfill_menu_can_run_codex_only() {
+        let mut prompter = ScriptedPrompter::new()
+            .selects([TOP_BACKFILL, 1, TOP_QUIT])
+            .confirms([true]);
+        let mut actions = SpyActions::all_present_configured();
+        run(&mut prompter, &mut actions, Path::new(HOME)).unwrap();
+
+        assert!(actions.calls.iter().any(|c| c == "backfill_preview:Codex"));
+        assert!(actions.calls.iter().any(|c| c == "backfill:Codex"));
+        assert!(!actions.calls.iter().any(|c| c == "backfill:all"));
+        // Scoped backfill must still auto-index.
+        assert!(actions.calls.iter().any(|c| c == "index"));
     }
 
     #[test]

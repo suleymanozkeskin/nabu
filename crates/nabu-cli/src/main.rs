@@ -33,6 +33,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 
+const OPENCODE_RECONCILE_FETCH_CONCURRENCY: usize = 8;
+
 #[derive(Debug, Parser)]
 #[command(name = "nabu", version, about = "Local coding-agent history keeper")]
 struct Cli {
@@ -1849,18 +1851,37 @@ fn backfill_opencode_server_api_if_configured(
 
     let _ = since;
     let mut report = empty_backfill_report();
-    for session_id in session_ids {
-        match fetch_opencode_session_messages(&server_url, &session_id) {
-            Ok(payload) => {
-                let ingest_report = ingest_opencode_server_messages(home, &session_id, payload)?;
-                report.source_files += 1;
-                report.appended_events += ingest_report.appended_events;
-            }
-            Err(error) => {
-                eprintln!(
-                    "warning: skipped OpenCode server reconciliation for session {}: {}",
-                    session_id, error
-                );
+    let session_ids = session_ids.into_iter().collect::<Vec<_>>();
+    for chunk in session_ids.chunks(OPENCODE_RECONCILE_FETCH_CONCURRENCY) {
+        let fetches = chunk
+            .iter()
+            .map(|session_id| {
+                let server_url = server_url.clone();
+                let session_id = session_id.clone();
+                std::thread::spawn(move || {
+                    let result = fetch_opencode_session_messages(&server_url, &session_id);
+                    (session_id, result)
+                })
+            })
+            .collect::<Vec<_>>();
+
+        for fetch in fetches {
+            let (session_id, result) = fetch.join().map_err(|_| {
+                Error::Validation("OpenCode server reconciliation worker panicked".to_string())
+            })?;
+            match result {
+                Ok(payload) => {
+                    let ingest_report =
+                        ingest_opencode_server_messages(home, &session_id, payload)?;
+                    report.source_files += 1;
+                    report.appended_events += ingest_report.appended_events;
+                }
+                Err(error) => {
+                    eprintln!(
+                        "warning: skipped OpenCode server reconciliation for session {}: {}",
+                        session_id, error
+                    );
+                }
             }
         }
     }
@@ -4169,7 +4190,7 @@ mod tests {
 
         // First run: full consent through Get started, then Quit.
         let mut prompter = wizard::ScriptedPrompter::new()
-            .selects([0usize, 6usize])
+            .selects([0usize, 0usize, 6usize])
             .confirms(std::iter::repeat_n(true, 12));
         let mut actions = wizard::LiveActions;
         wizard::run(&mut prompter, &mut actions, &harness_home).unwrap();
@@ -4234,7 +4255,7 @@ mod tests {
         // Re-run: idempotent — configured tools are not reinstalled, no new
         // agent-config backups, hooks unchanged.
         let mut prompter2 = wizard::ScriptedPrompter::new()
-            .selects([0usize, 6usize])
+            .selects([0usize, 0usize, 6usize])
             .confirms(std::iter::repeat_n(true, 12));
         let mut actions2 = wizard::LiveActions;
         wizard::run(&mut prompter2, &mut actions2, &harness_home).unwrap();
