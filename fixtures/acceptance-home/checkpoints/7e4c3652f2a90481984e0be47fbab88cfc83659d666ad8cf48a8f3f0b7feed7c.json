@@ -1,0 +1,10 @@
+{
+  "source_tool": "claude",
+  "source_kind": "transcript",
+  "source_path": "fixtures/claude-code/session_end.json",
+  "source_identity": null,
+  "session_id": "fixture-session",
+  "byte_offset": 279,
+  "last_line_hash": "d10b36aa74a59bcf4a88185837f658afaf3646eff2bb16c3928d0e9335e945d2",
+  "last_successful_import_timestamp": "2026-06-17T14:57:54.178764Z"
+}

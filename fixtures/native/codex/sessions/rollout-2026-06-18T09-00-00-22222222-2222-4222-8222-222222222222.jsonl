@@ -1,0 +1,4 @@
+{"timestamp":"2026-06-18T09:00:00.000Z","type":"session_meta","payload":{"id":"22222222-2222-4222-8222-222222222222","cwd":"/Users/example/project","cli_version":"0.0.0-sanitized"}}
+{"timestamp":"2026-06-18T09:00:01.000Z","type":"response_item","payload":{"id":"codex-native-user-1","type":"message","role":"user","content":[{"type":"input_text","text":"sanitized native codex user marker"}]}}
+{"timestamp":"2026-06-18T09:00:02.000Z","type":"response_item","payload":{"id":"codex-native-assistant-1","type":"message","role":"assistant","content":[{"type":"output_text","text":"sanitized native codex assistant marker"}]}}
+{"timestamp":"2026-06-18T09:00:03.000Z","type":"event_msg","payload":{"id":"codex-native-tool-1","type":"exec_command_begin","command":"echo sanitized native codex tool marker"}}

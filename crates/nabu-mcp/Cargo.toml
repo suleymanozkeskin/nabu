@@ -1,0 +1,26 @@
+[package]
+name = "nabu-mcp"
+description = "Read-only MCP server for nabu: exposes search_history, get_session, recall_answer, and related tools over stdio for coding agents."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
+exclude = ["/tests"]
+
+[features]
+default = []
+semantic = ["nabu-core/semantic"]
+
+[dependencies]
+nabu-core = { path = "../nabu-core", version = "0.1.0" }
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

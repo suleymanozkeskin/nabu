@@ -1,0 +1,13 @@
+{
+  "id": "opencode-native-message-1",
+  "sessionID": "33333333-3333-4333-8333-333333333333",
+  "role": "assistant",
+  "time": {
+    "created": 1781773200000
+  },
+  "path": {
+    "cwd": "/Users/example/project",
+    "root": "/Users/example/project"
+  },
+  "text": "sanitized native opencode assistant marker"
+}

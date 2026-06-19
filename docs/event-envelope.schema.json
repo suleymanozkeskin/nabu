@@ -1,0 +1,123 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nabu.local/schemas/event-envelope.schema.json",
+  "title": "Harness Raven Event Envelope",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "captured_at",
+    "tool",
+    "tool_version",
+    "session_id",
+    "filename_session_id",
+    "turn_id",
+    "message_id",
+    "project_root",
+    "cwd",
+    "source",
+    "source_event_type",
+    "canonical_type",
+    "source_event_id",
+    "dedupe_key",
+    "sequence",
+    "raw_file",
+    "raw_offset",
+    "payload"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "const": 1
+    },
+    "captured_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "tool": {
+      "type": "string",
+      "enum": ["codex", "claude", "opencode"]
+    },
+    "tool_version": {
+      "type": ["string", "null"]
+    },
+    "session_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "filename_session_id": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9._-]+$"
+    },
+    "turn_id": {
+      "type": ["string", "null"]
+    },
+    "message_id": {
+      "type": ["string", "null"]
+    },
+    "project_root": {
+      "type": ["string", "null"]
+    },
+    "cwd": {
+      "type": ["string", "null"]
+    },
+    "source": {
+      "type": "string",
+      "enum": [
+        "hook",
+        "event_stream",
+        "transcript_tail",
+        "sdk_session_store",
+        "backfill",
+        "exec_json",
+        "app_server"
+      ]
+    },
+    "source_event_type": {
+      "type": "string",
+      "minLength": 1
+    },
+    "canonical_type": {
+      "type": "string",
+      "enum": [
+        "session.started",
+        "session.resumed",
+        "session.ended",
+        "user.message",
+        "assistant.delta",
+        "assistant.message",
+        "tool.call",
+        "tool.result",
+        "permission.requested",
+        "permission.replied",
+        "file.changed",
+        "compaction.before",
+        "compaction.after",
+        "source.discontinuity",
+        "error"
+      ]
+    },
+    "source_event_id": {
+      "type": ["string", "null"]
+    },
+    "dedupe_key": {
+      "type": "string",
+      "pattern": "^sha256:[a-f0-9]{64}$"
+    },
+    "sequence": {
+      "type": ["integer", "null"]
+    },
+    "raw_file": {
+      "type": ["string", "null"]
+    },
+    "raw_offset": {
+      "type": ["integer", "null"],
+      "minimum": 0
+    },
+    "payload": true,
+    "payload_ref": {
+      "type": ["string", "null"]
+    }
+  }
+}

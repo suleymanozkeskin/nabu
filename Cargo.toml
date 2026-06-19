@@ -1,0 +1,39 @@
+[workspace]
+members = [
+  "crates/nabu-core",
+  "crates/nabu-adapters",
+  "crates/nabu-mcp",
+  "crates/nabu-cli",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88.0"
+authors = ["Suleyman Ozkeskin"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/suleymanozkeskin/nabu"
+homepage = "https://github.com/suleymanozkeskin/nabu"
+keywords = ["agent", "history", "search", "mcp", "cli"]
+categories = ["command-line-utilities", "development-tools"]
+
+[workspace.dependencies]
+clap = { version = "4", features = ["derive"] }
+console = "0.15"
+dialoguer = { version = "0.11", default-features = false }
+fs2 = "0.4"
+fastembed = { version = "=5.17.2", default-features = false, features = ["ort-download-binaries-native-tls"] }
+hf-hub = { version = "=0.5.0", default-features = false, features = ["ureq", "native-tls"] }
+hex = "0.4"
+libc = "0.2"
+regex = "1"
+rayon = "1"
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+sqlite-vec = "=0.1.9"
+tempfile = "3"
+thiserror = "2"
+time = { version = "=0.3.44", features = ["formatting", "parsing"] }

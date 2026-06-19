@@ -1,0 +1,7 @@
+{
+  "session_id": "fixture-session",
+  "cwd": "/tmp/harness-raven-fixture",
+  "project_root": "/tmp/harness-raven-fixture",
+  "hook_event_name": "session.idle",
+  "id": "opencode-session-idle-1"
+}

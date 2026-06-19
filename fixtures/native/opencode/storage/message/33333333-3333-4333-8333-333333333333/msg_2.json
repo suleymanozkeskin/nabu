@@ -1,0 +1,13 @@
+{
+  "id": "opencode-native-message-2",
+  "sessionID": "33333333-3333-4333-8333-333333333333",
+  "role": "user",
+  "time": {
+    "created": 1781773201000
+  },
+  "path": {
+    "cwd": "/Users/example/project",
+    "root": "/Users/example/project"
+  },
+  "text": "sanitized native opencode user marker"
+}

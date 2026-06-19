@@ -1,0 +1,40 @@
+# Rust build artifacts
+/target/
+**/*.rs.bk
+
+# Backtraces
+*.rs.bk
+
+# macOS
+.DS_Store
+
+# Local runtime stores created during manual testing
+/.nabu/
+/.harness-raven/
+*.tmp
+
+# Per-session flock artifacts (runtime only; never source).
+# Specific pattern so it never matches Cargo.lock.
+*.jsonl.lock
+
+# Derived SQLite index — rebuildable from raw via
+# `nabu index --once --home fixtures/acceptance-home`. Untracked so tests/bench
+# (which regenerate it) do not churn git status.
+fixtures/acceptance-home/index/harness.db
+
+# Transient SQLite WAL/SHM sidecars.
+*.db-wal
+*.db-shm
+
+# Editor/IDE
+.idea/
+.vscode/
+*.swp
+
+goals/
+
+# Demo: only the rendered deliverables are tracked; the production tooling and
+# its regeneration artifacts (venv, seeded store, intermediate clips) are not.
+demo/*
+!demo/demo-full.gif
+!demo/demo-full.mp4

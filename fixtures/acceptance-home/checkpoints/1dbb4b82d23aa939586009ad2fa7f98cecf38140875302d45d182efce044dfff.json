@@ -1,0 +1,10 @@
+{
+  "source_tool": "codex",
+  "source_kind": "transcript",
+  "source_path": "fixtures/codex/sessions/session_fixture.jsonl",
+  "source_identity": null,
+  "session_id": "fixture-session",
+  "byte_offset": 547,
+  "last_line_hash": "ba4382cbd20c704138021369eed7d5e467a1260a21257f97820da75ec54fe20c",
+  "last_successful_import_timestamp": "2026-06-17T14:57:54.171178Z"
+}

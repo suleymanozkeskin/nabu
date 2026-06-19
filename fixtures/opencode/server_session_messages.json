@@ -1,0 +1,13 @@
+{
+  "session_id": "fixture-session",
+  "messages": [
+    {
+      "session_id": "fixture-session",
+      "cwd": "/tmp/harness-raven-fixture",
+      "project_root": "/tmp/harness-raven-fixture",
+      "type": "message.updated",
+      "id": "opencode-reconciled-message-1",
+      "text": "Reconciled omitted message part includes the opencode fixture marker."
+    }
+  ]
+}

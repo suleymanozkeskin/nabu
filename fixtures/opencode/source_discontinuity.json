@@ -1,0 +1,10 @@
+{
+  "session_id": "fixture-session",
+  "cwd": "/tmp/harness-raven-fixture",
+  "project_root": "/tmp/harness-raven-fixture",
+  "type": "source.deleted",
+  "canonical_type": "source.discontinuity",
+  "event_id": "opencode-source-discontinuity-1",
+  "reason": "fixture source disappeared",
+  "text": "source discontinuity fixture marker"
+}

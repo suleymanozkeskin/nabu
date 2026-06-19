@@ -1,0 +1,14 @@
+{
+  "session_id": "fixture-session",
+  "messages": [
+    {
+      "session_id": "fixture-session",
+      "cwd": "/tmp/harness-raven-fixture",
+      "project_root": "/tmp/harness-raven-fixture",
+      "type": "message.updated",
+      "canonical_type": "assistant.message",
+      "id": "opencode-backfill-1",
+      "text": "OpenCode API response includes the backfill fixture marker."
+    }
+  ]
+}

@@ -1,0 +1,5 @@
+{"timestamp":"2026-06-18T09:00:00Z","type":"thread.started","id":"codex-exec-thread-started-1","thread_id":"codex-exec-stream-session","cwd":"/tmp/tupsharrum-fixture","project_root":"/tmp/tupsharrum-fixture","model":"gpt-5"}
+{"timestamp":"2026-06-18T09:00:01Z","type":"turn.started","id":"codex-exec-turn-started-1","thread_id":"codex-exec-stream-session","turn_id":"turn-fixture"}
+{"timestamp":"2026-06-18T09:00:02Z","type":"item/agentMessage/delta","thread_id":"codex-exec-stream-session","turn_id":"turn-fixture","message_id":"codex-stream-message-1","sequence":0,"delta":"codex streaming fixture marker delta one"}
+{"timestamp":"2026-06-18T09:00:03Z","type":"item/agentMessage/delta","thread_id":"codex-exec-stream-session","turn_id":"turn-fixture","message_id":"codex-stream-message-1","sequence":1,"delta":"codex streaming fixture marker delta two"}
+{"timestamp":"2026-06-18T09:00:04Z","type":"turn.completed","id":"codex-exec-turn-completed-1","thread_id":"codex-exec-stream-session","turn_id":"turn-fixture","usage":{"input_tokens":10,"output_tokens":32,"total_tokens":42}}

@@ -1,0 +1,28 @@
+[package]
+name = "nabu-adapters"
+description = "Capture adapters for nabu: install/uninstall hooks and the OpenCode plugin for Codex, Claude Code, and OpenCode."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
+
+[features]
+default = []
+semantic = ["nabu-core/semantic"]
+
+[dependencies]
+nabu-core = { path = "../nabu-core", version = "0.1.0" }
+hex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+time.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
