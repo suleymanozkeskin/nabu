@@ -4504,6 +4504,14 @@ pub fn backfill_since(
     backfill_since_with_progress(home, selection, source_root, since, |_| {})
 }
 
+/// A source file discovered during the native-store scan can be deleted or
+/// rotated by the live tool before backfill reads it (`os error 2`). Such a
+/// vanished file must be skipped, never treated as fatal — one missing session
+/// must not abort a backfill over the whole store.
+fn is_vanished_source(error: &Error) -> bool {
+    matches!(error, Error::Io { source, .. } if source.kind() == std::io::ErrorKind::NotFound)
+}
+
 pub fn backfill_since_with_progress<F>(
     home: &Path,
     selection: Option<Tool>,
@@ -4549,14 +4557,22 @@ where
         let file_reports: Vec<Result<Option<SourceBackfillReport>>> = files
             .par_iter()
             .map(|file| {
-                let result = if should_skip_source_file(file, since_threshold)? {
-                    Ok(None)
-                } else {
-                    backfill_source_file(home, tool, file, &parse_context).map(Some)
-                };
+                let outcome = should_skip_source_file(file, since_threshold).and_then(|skip| {
+                    if skip {
+                        Ok(None)
+                    } else {
+                        backfill_source_file(home, tool, file, &parse_context).map(Some)
+                    }
+                });
+                let vanished = matches!(&outcome, Err(error) if is_vanished_source(error));
+                let result = if vanished { Ok(None) } else { outcome };
                 let processed = processed_files.fetch_add(1, Ordering::SeqCst) + 1;
                 progress(BackfillProgress {
-                    operation: "backfill.file".to_string(),
+                    operation: if vanished {
+                        "backfill.skip_missing".to_string()
+                    } else {
+                        "backfill.file".to_string()
+                    },
                     tool,
                     source_root: tool_root.display().to_string(),
                     processed_files: processed,
@@ -4631,14 +4647,22 @@ where
         let file_reports: Vec<Result<Vec<BackfillCoverageSession>>> = files
             .par_iter()
             .map(|file| {
-                let result = if should_skip_source_file(file, since_threshold)? {
-                    Ok(Vec::new())
-                } else {
-                    backfill_dry_run_file(home, tool, file, &parse_context)
-                };
+                let outcome = should_skip_source_file(file, since_threshold).and_then(|skip| {
+                    if skip {
+                        Ok(Vec::new())
+                    } else {
+                        backfill_dry_run_file(home, tool, file, &parse_context)
+                    }
+                });
+                let vanished = matches!(&outcome, Err(error) if is_vanished_source(error));
+                let result = if vanished { Ok(Vec::new()) } else { outcome };
                 let processed = processed_files.fetch_add(1, Ordering::SeqCst) + 1;
                 progress(BackfillProgress {
-                    operation: "backfill.dry_run.file".to_string(),
+                    operation: if vanished {
+                        "backfill.dry_run.skip_missing".to_string()
+                    } else {
+                        "backfill.dry_run.file".to_string()
+                    },
                     tool,
                     source_root: tool_root.display().to_string(),
                     processed_files: processed,
@@ -10725,6 +10749,46 @@ mod tests {
         assert_eq!(results[0].tool, Tool::Codex);
         assert_eq!(results[0].session_id, session_id);
         assert_eq!(results[0].canonical_type, "user.message");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn backfill_skips_source_file_that_vanishes_before_read() {
+        // A session file discovered during the scan can be deleted/rotated by the
+        // live tool before backfill reads it (os error 2). One vanished file must
+        // not abort the whole backfill. A dangling symlink reproduces a candidate
+        // that passes discovery but fails with NotFound on read.
+        let temp = tempdir().unwrap();
+        let home = temp.path().join("home");
+        let source = temp.path().join("codex-sessions");
+        init_home(&home).unwrap();
+        fs::create_dir_all(&source).unwrap();
+
+        let session_id = "019a4f57-3d5f-7f52-96cc-cb2e1eacb7a9";
+        fs::write(
+            source.join(format!("rollout-2025-11-04T15-48-28-{session_id}.jsonl")),
+            "{\"timestamp\":\"2025-11-04T14:48:28.000Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"surviving codex marker\"}]}}\n",
+        )
+        .unwrap();
+        // Discovered by extension, but reading it yields NotFound.
+        std::os::unix::fs::symlink(
+            temp.path().join("does-not-exist.jsonl"),
+            source.join("rollout-2025-11-04T16-00-00-vanished.jsonl"),
+        )
+        .unwrap();
+
+        // Dry run (the wizard's "Scanning past sessions…") must not fail.
+        let dry = backfill_dry_run(&home, Some(Tool::Codex), &source, None).unwrap();
+        assert_eq!(dry.source_files, 1);
+
+        // The real backfill must skip the vanished file and import the valid one.
+        let report = backfill_since(&home, Some(Tool::Codex), &source, None).unwrap();
+        assert_eq!(report.source_files, 1);
+        assert_eq!(report.appended_events, 1);
+
+        index_once(&home).unwrap();
+        let results = search_history(&home, "surviving codex marker", 10).unwrap();
+        assert_eq!(results.len(), 1);
     }
 
     #[test]
