@@ -2134,6 +2134,19 @@ fn mcp_apply_codex(
     })
 }
 
+/// Run a `claude` CLI subcommand and capture its output. The claude CLI owns its
+/// own MCP server registry, so registration goes through it rather than a file we
+/// write ourselves.
+fn run_claude_cli(args: &[&str]) -> nabu_core::Result<std::process::Output> {
+    ProcessCommand::new("claude")
+        .args(args)
+        .output()
+        .map_err(|source| Error::Io {
+            path: PathBuf::from("claude"),
+            source,
+        })
+}
+
 fn mcp_apply_claude(
     home: &Path,
     action: McpConfigAction,
@@ -2168,23 +2181,33 @@ fn mcp_apply_claude(
     };
 
     if !dry_run {
-        if changed && target_path.exists() {
-            backup_cli_config(home, Tool::Claude, mcp_operation_name(action), &target_path)?;
-        }
         if use_native {
-            if changed {
-                let mut parts = command.split_whitespace();
-                let executable = parts.next().unwrap_or("claude");
-                // Capture the native CLI's own stdout/stderr instead of letting
-                // it print into our output (keeps the wizard in one voice); on
-                // failure, surface its stderr in the error.
-                let output = ProcessCommand::new(executable)
-                    .args(parts)
-                    .output()
-                    .map_err(|source| Error::Io {
-                        path: target_path.clone(),
-                        source,
-                    })?;
+            // The `claude` CLI owns its MCP registry; back up its config, then
+            // upsert idempotently. `claude mcp add` errors if the server already
+            // exists, and our file-based change detection can disagree with the
+            // CLI's own store — so always remove-then-add. Also drop the legacy
+            // `tupsharrum` registration so an upgrade leaves no broken entry.
+            if target_path.exists() {
+                backup_cli_config(home, Tool::Claude, mcp_operation_name(action), &target_path)?;
+            }
+            let _ = run_claude_cli(&["mcp", "remove", "--scope", "user", "nabu"]);
+            let _ = run_claude_cli(&["mcp", "remove", "--scope", "user", "tupsharrum"]);
+            if matches!(action, McpConfigAction::Install) {
+                let output = run_claude_cli(&[
+                    "mcp",
+                    "add",
+                    "--scope",
+                    "user",
+                    "--transport",
+                    "stdio",
+                    "nabu",
+                    "--",
+                    "nabu",
+                    "mcp",
+                    "serve",
+                    "--transport",
+                    "stdio",
+                ])?;
                 if !output.status.success() {
                     let stderr = String::from_utf8_lossy(&output.stderr);
                     let detail = stderr.trim();
@@ -2199,6 +2222,9 @@ fn mcp_apply_claude(
                 }
             }
         } else if changed {
+            if target_path.exists() {
+                backup_cli_config(home, Tool::Claude, mcp_operation_name(action), &target_path)?;
+            }
             write_text_config(&target_path, &after_text, 0o600)?;
         }
     }
@@ -2656,17 +2682,17 @@ fn add_claude_mcp(mut config: Value) -> Value {
     let object = config.as_object_mut().expect("config object");
     let mcp_servers = object.entry("mcpServers").or_insert_with(|| json!({}));
     ensure_object(mcp_servers);
-    mcp_servers
-        .as_object_mut()
-        .expect("mcpServers object")
-        .insert(
-            "nabu".to_string(),
-            json!({
-                "type": "stdio",
-                "command": "nabu",
-                "args": ["mcp", "serve", "--transport", "stdio"]
-            }),
-        );
+    let servers = mcp_servers.as_object_mut().expect("mcpServers object");
+    // No orphans: drop the pre-rename server while installing the current one.
+    servers.remove("tupsharrum");
+    servers.insert(
+        "nabu".to_string(),
+        json!({
+            "type": "stdio",
+            "command": "nabu",
+            "args": ["mcp", "serve", "--transport", "stdio"]
+        }),
+    );
     config
 }
 
@@ -2715,7 +2741,11 @@ fn add_opencode_mcp(mut config: Value) -> Value {
     let object = config.as_object_mut().expect("config object");
     let mcp = object.entry("mcp").or_insert_with(|| json!({}));
     ensure_object(mcp);
-    mcp.as_object_mut().expect("mcp object").insert(
+    let mcp_obj = mcp.as_object_mut().expect("mcp object");
+    // No orphans: drop the pre-rename server while installing the current one, so
+    // an upgrade (or re-install) leaves no entry pointing at a removed binary.
+    mcp_obj.remove("tupsharrum");
+    mcp_obj.insert(
         "nabu".to_string(),
         json!({
             "type": "local",
@@ -3931,6 +3961,33 @@ mod tests {
             Tool::Opencode
         );
         drop(env_guard);
+    }
+
+    #[test]
+    fn mcp_install_removes_legacy_tupsharrum_entry_no_orphans() {
+        // Installing the current server over a config that still holds the
+        // pre-rename `tupsharrum` entry must drop it — an upgrade leaves no
+        // server pointing at a removed binary. (Regression: install previously
+        // only added `nabu` and, when already present, wrote nothing.)
+        let opencode = add_opencode_mcp(json!({
+            "mcp": { "tupsharrum": { "command": ["tupsharrum", "mcp", "serve"] } }
+        }));
+        let mcp = opencode.get("mcp").unwrap().as_object().unwrap();
+        assert!(mcp.contains_key("nabu"));
+        assert!(!mcp.contains_key("tupsharrum"));
+
+        let claude = add_claude_mcp(json!({
+            "mcpServers": { "tupsharrum": { "command": "tupsharrum" } }
+        }));
+        let servers = claude.get("mcpServers").unwrap().as_object().unwrap();
+        assert!(servers.contains_key("nabu"));
+        assert!(!servers.contains_key("tupsharrum"));
+
+        let codex = add_codex_mcp_block(
+            "[mcp_servers.tupsharrum]\ncommand = \"tupsharrum\"\nenabled = true\n",
+        );
+        assert!(codex.contains("[mcp_servers.nabu]"));
+        assert!(!codex.contains("tupsharrum"));
     }
 
     #[test]
