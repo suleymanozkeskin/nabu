@@ -83,8 +83,13 @@ First run, on full consent, reaches the same end state as:
 nabu init
 nabu install all
 nabu backfill --tool all
+nabu index --once          # imported events are not searchable until indexed
 nabu mcp install all
 ```
+
+After importing history the wizard builds the lexical index automatically, so
+search works immediately. Semantic embedding stays opt-in (it is the slow path);
+run a later `nabu index --once` to embed once the model is installed.
 
 Properties:
 

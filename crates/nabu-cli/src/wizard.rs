@@ -20,9 +20,9 @@ use nabu_adapters::{
     uninstall_claude, uninstall_codex, uninstall_opencode, ConfigChangeReport,
 };
 use nabu_core::{
-    doctor_with_options, embedding_model_status, init_home, opencode_server_url,
-    search_history_page, BackfillDryRunReport, BackfillReport, DoctorReport, Error, Result,
-    SearchOptions, Tool,
+    doctor_with_options, embedding_model_status, index_once_with_options, init_home,
+    opencode_server_url, search_history_page, BackfillDryRunReport, BackfillReport, DoctorReport,
+    Error, IndexOptions, Result, SearchOptions, Tool,
 };
 
 use crate::{
@@ -55,6 +55,7 @@ Run the explicit commands instead (preview any step with --dry-run):\n\
   nabu init\n\
   nabu install all\n\
   nabu backfill --tool all\n\
+  nabu index --once\n\
   nabu mcp install all\n\
   nabu doctor";
 
@@ -357,6 +358,10 @@ pub(crate) trait WizardActions {
     fn uninstall(&mut self, home: &Path, tool: Tool, dry_run: bool) -> Result<ConfigChangeReport>;
     fn backfill_preview(&mut self, home: &Path) -> Result<BackfillDryRunReport>;
     fn backfill(&mut self, home: &Path) -> Result<BackfillReport>;
+    /// Build the lexical (FTS) index so imported events are searchable. Returns
+    /// the number of newly indexed events. Semantic embedding is intentionally
+    /// excluded — it is the slow, opt-in path and must not block onboarding.
+    fn index(&mut self, home: &Path) -> Result<usize>;
     fn doctor(&mut self, home: &Path) -> Result<DoctorReport>;
     fn mcp_install(&mut self, home: &Path, tool: Tool, dry_run: bool)
         -> Result<ConfigChangeReport>;
@@ -442,6 +447,13 @@ impl WizardActions for LiveActions {
             None,
             ProgressEmitter::quiet(),
         )
+    }
+
+    fn index(&mut self, home: &Path) -> Result<usize> {
+        // FTS only: makes imported events searchable immediately. Embedding is
+        // the slow, opt-in path and is left to an explicit `nabu index`.
+        index_once_with_options(home, IndexOptions { embed: false })
+            .map(|report| report.indexed_events)
     }
 
     fn doctor(&mut self, home: &Path) -> Result<DoctorReport> {
@@ -735,11 +747,27 @@ fn backfill_step(
         true,
     )? {
         match actions.backfill(home) {
-            Ok(report) => prompter.success(&format!(
-                "Imported {} from {}",
-                plural(report.appended_events, "event"),
-                plural(report.source_files, "session"),
-            )),
+            Ok(report) => {
+                prompter.success(&format!(
+                    "Imported {} from {}",
+                    plural(report.appended_events, "event"),
+                    plural(report.source_files, "session"),
+                ));
+                // Imported events live in raw JSONL but are not searchable until
+                // they are indexed. Build the lexical index now so search works
+                // right after import; without this the import looks done but
+                // every search returns nothing.
+                prompter.status(true, "Indexing for search…");
+                match actions.index(home) {
+                    Ok(indexed) => prompter.success(&format!(
+                        "Indexed {} — your history is searchable now",
+                        plural(indexed, "event"),
+                    )),
+                    Err(error) => prompter.warn(&format!(
+                        "Imported, but indexing failed: {error}. Run `nabu index --once` to make it searchable."
+                    )),
+                }
+            }
             Err(error) => prompter.failure(&format!("Backfill failed: {error}")),
         }
     } else {
@@ -1312,6 +1340,11 @@ mod tests {
             })
         }
 
+        fn index(&mut self, _home: &Path) -> Result<usize> {
+            self.calls.push("index".to_string());
+            Ok(5)
+        }
+
         fn doctor(&mut self, _home: &Path) -> Result<DoctorReport> {
             self.calls.push("doctor".to_string());
             Ok(canned_doctor())
@@ -1456,7 +1489,16 @@ mod tests {
         let mut actions = SpyActions::all_present_configured();
         run(&mut prompter, &mut actions, Path::new(HOME)).unwrap();
         assert!(actions.calls.iter().any(|c| c == "backfill_preview"));
-        assert!(actions.calls.iter().any(|c| c == "backfill"));
+        // Backfill must be followed by indexing, or imported events are not
+        // searchable (the defect this auto-index closes).
+        let backfill_at = actions.calls.iter().position(|c| c == "backfill");
+        let index_at = actions.calls.iter().position(|c| c == "index");
+        assert!(backfill_at.is_some(), "backfill should run on consent");
+        assert!(
+            index_at.is_some(),
+            "backfill must auto-index so results are searchable"
+        );
+        assert!(index_at > backfill_at, "indexing must follow the import");
     }
 
     #[test]
