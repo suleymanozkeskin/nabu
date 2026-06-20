@@ -7,7 +7,7 @@
 //! split from the emit_* methods so they can be asserted in tests. `Eta` and
 //! `EmbeddingPlanMessage` are private Display newtypes used by those renderers.
 
-use crate::ByteSize;
+use crate::render::ByteSize;
 use nabu_core::{BackfillProgress, EmbeddingIndexProgress, EmbeddingModelDisclosure};
 use serde_json::json;
 use std::borrow::Cow;
