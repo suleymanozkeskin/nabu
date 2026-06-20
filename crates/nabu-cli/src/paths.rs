@@ -90,12 +90,12 @@ fn codex_home_dir() -> nabu_core::Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testsupport::{EnvGuard, ENV_LOCK};
+    use crate::testsupport::{env_lock, EnvGuard};
     use tempfile::tempdir;
 
     #[test]
     fn codex_layout_shares_one_codex_home_base() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = env_lock();
         let temp = tempdir().unwrap();
         let codex_home = temp.path().join("codex");
         let env = EnvGuard::set([
@@ -121,7 +121,7 @@ mod tests {
 
     #[test]
     fn claude_config_path_is_home_dotfile_independent_of_config_dir() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = env_lock();
         let temp = tempdir().unwrap();
         let config_dir = temp.path().join("claude-config");
         let env = EnvGuard::set([
@@ -144,7 +144,7 @@ mod tests {
 
     #[test]
     fn opencode_config_path_prefers_config_dir_then_xdg() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = env_lock();
         let temp = tempdir().unwrap();
         let config_dir = temp.path().join("oc");
         let env = EnvGuard::set([

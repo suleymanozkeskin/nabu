@@ -1576,8 +1576,11 @@ fn dedupe_sidecar_covers_large_session_and_self_heals() {
     assert_eq!(dedupe_sidecar_entry_count(&sidecar), 10_000);
 
     index_once(&home).unwrap();
+    // Under OR semantics the shared "large sidecar marker" terms match every
+    // seeded event; the unique "1234" term is rare, so bm25 ranks that event
+    // first. Assert the targeted event is the top hit rather than the sole one.
     let results = search_history(&home, "large sidecar marker 1234", 10).unwrap();
-    assert_eq!(results.len(), 1);
+    assert!(results[0].snippet.contains("large sidecar marker 1234"));
 }
 
 #[test]
@@ -2778,18 +2781,66 @@ fn date_or_duration_filters_and_purge_before_use_normalized_thresholds() {
 
     let report = purge_before(&home, "2021-01-01").unwrap();
     assert_eq!(report.indexed_events_removed, 1);
-    assert_eq!(
-        search_history(&home, "datefilter old marker", 10)
-            .unwrap()
-            .len(),
-        0
+    // Purge dropped the old event; only the new one survives. Under OR
+    // semantics the shared "datefilter"/"marker" terms match the survivor, so
+    // assert on the surviving session rather than an AND-coupled zero count.
+    let surviving = search_history(&home, "datefilter marker", 10).unwrap();
+    assert_eq!(surviving.len(), 1);
+    assert_eq!(surviving[0].session_id, "new-session");
+}
+
+// P0 bug #1: a more-specific multi-word query must not collapse recall to
+// zero. Controlled by varying only term count with no session filter.
+#[test]
+fn search_multi_word_query_keeps_recall_with_or_semantics() {
+    let temp = tempdir().unwrap();
+    let home = temp.path().join("home");
+    init_home(&home).unwrap();
+
+    // Target matches four of the long query's six terms; the distractor
+    // matches only two. Neither matches all six.
+    ingest_hook_event(
+        &home,
+        Tool::Claude,
+        json!({
+            "session_id": "recall-target",
+            "hook_event_name": "UserPromptSubmit",
+            "message_id": "recall-target-1",
+            "prompt": "nabu reduce memory usage while profiling the index"
+        }),
+    )
+    .unwrap();
+    ingest_hook_event(
+        &home,
+        Tool::Claude,
+        json!({
+            "session_id": "recall-distractor",
+            "hook_event_name": "UserPromptSubmit",
+            "message_id": "recall-distractor-1",
+            "prompt": "nabu memory note"
+        }),
+    )
+    .unwrap();
+    index_once(&home).unwrap();
+
+    // Two terms: both events surface.
+    let short = search_history(&home, "nabu memory", 10).unwrap();
+    assert_eq!(short.len(), 2);
+
+    // Six terms, more specific. AND semantics required every term in one event
+    // and returned zero; OR keeps recall and bm25 ranks the event satisfying
+    // more terms first.
+    let long = search_history(
+        &home,
+        "nabu reduce memory usage performance optimization",
+        10,
+    )
+    .unwrap();
+    assert!(
+        !long.is_empty(),
+        "more-specific query must not collapse recall to zero"
     );
-    assert_eq!(
-        search_history(&home, "datefilter new marker", 10)
-            .unwrap()
-            .len(),
-        1
-    );
+    assert_eq!(long[0].session_id, "recall-target");
 }
 
 #[test]
@@ -2869,6 +2920,88 @@ fn search_filters_apply_session_type_file_and_command() {
     .unwrap();
     assert_eq!(file_results.len(), 1);
     assert_eq!(file_results[0].session_id, "file-session");
+}
+
+// P0 bug #2: a session-scoped search must fail open. Controlled by varying
+// only session_id while holding the query fixed. Also covers invariant #13
+// (every hit carries raw_file, raw_line, raw_offset, session_id) and that the
+// filter never silently requires a tool arg.
+#[test]
+fn search_session_filter_fails_open_on_prefix_and_filename() {
+    let temp = tempdir().unwrap();
+    let home = temp.path().join("home");
+    init_home(&home).unwrap();
+
+    // A full UUIDv7-style id (sanitizes to itself) and a session whose
+    // filename-sanitized form differs from its canonical id.
+    let full_id = "019d40b2-5250-7e40-9dc7-f2fb593bc2a8";
+    let slashed_id = "team/raven-session";
+    ingest_hook_event(
+        &home,
+        Tool::Claude,
+        json!({
+            "session_id": full_id,
+            "hook_event_name": "UserPromptSubmit",
+            "message_id": "scope-alpha-1",
+            "prompt": "session scope marker alpha"
+        }),
+    )
+    .unwrap();
+    ingest_hook_event(
+        &home,
+        Tool::Claude,
+        json!({
+            "session_id": slashed_id,
+            "hook_event_name": "UserPromptSubmit",
+            "message_id": "scope-beta-1",
+            "prompt": "session scope marker beta"
+        }),
+    )
+    .unwrap();
+    index_once(&home).unwrap();
+
+    let query = "session scope marker";
+    let scoped = |session: &str| {
+        search_history_filtered(
+            &home,
+            query,
+            SearchOptions {
+                session_id: Some(session.to_string()),
+                limit: 10,
+                ..SearchOptions::default()
+            },
+        )
+        .unwrap()
+    };
+
+    // No session filter: both events are present.
+    assert_eq!(search_history(&home, query, 10).unwrap().len(), 2);
+
+    // Exact canonical id.
+    let exact = scoped(full_id);
+    assert_eq!(exact.len(), 1);
+    assert_eq!(exact[0].session_id, full_id);
+
+    // Short id prefix — the failing case from the issue (a present session that
+    // returned empty under exact match). No tool arg supplied.
+    let by_prefix = scoped("019d40b2");
+    assert_eq!(by_prefix.len(), 1);
+    assert_eq!(by_prefix[0].session_id, full_id);
+
+    // Filename-sanitized form resolves back to the canonical id.
+    let by_filename = scoped("team_raven-session");
+    assert_eq!(by_filename.len(), 1);
+    assert_eq!(by_filename[0].session_id, slashed_id);
+
+    // A genuinely absent session still returns empty — correct, not false-empty.
+    assert!(scoped("ffffffff-0000-0000-0000-000000000000").is_empty());
+
+    // Invariant #13: every hit carries the full coordinate contract.
+    let hit = &exact[0];
+    assert!(!hit.raw_file.is_empty());
+    assert!(hit.raw_line > 0);
+    assert!(hit.raw_offset.is_some());
+    assert!(!hit.session_id.is_empty());
 }
 
 #[test]
@@ -3139,9 +3272,13 @@ fn search_and_session_exclude_deltas_by_default_and_restore_on_opt_in() {
     .unwrap();
     index_once(&home).unwrap();
 
-    assert!(search_history(&home, "delta-only fixture marker", 10)
-        .unwrap()
-        .is_empty());
+    // Default search excludes deltas. Under OR semantics the shared
+    // "fixture"/"marker" terms also surface the non-delta final message, so
+    // assert the delta is absent rather than an AND-coupled empty result.
+    let default_search = search_history(&home, "delta-only fixture marker", 10).unwrap();
+    assert!(default_search
+        .iter()
+        .all(|result| result.canonical_type != "assistant.delta"));
     let delta_search = search_history_page(
         &home,
         "delta-only fixture marker",

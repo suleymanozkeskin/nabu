@@ -706,8 +706,12 @@ fn vector_search_results_for_k(
         params.push(SqlValue::Text(tool.as_str().to_string()));
     }
     if let Some(session_id) = options.session_id.as_deref() {
-        sql.push_str(" AND e.session_id = ?");
-        params.push(SqlValue::Text(session_id.to_string()));
+        let resolved = crate::resolve_session_filter_ids(conn, db_path, options.tool, session_id)?;
+        let placeholders = vec!["?"; resolved.len()].join(", ");
+        sql.push_str(&format!(" AND e.session_id IN ({placeholders})"));
+        for id in resolved {
+            params.push(SqlValue::Text(id));
+        }
     }
     if let Some(cwd) = options.cwd.as_deref() {
         sql.push_str(" AND e.cwd = ?");
