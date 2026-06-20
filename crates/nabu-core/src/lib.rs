@@ -164,42 +164,9 @@ pub fn sanitize_session_id(session_id: &str) -> String {
     }
 }
 
-pub fn canonical_raw_path(home: &Path, tool: Tool, session_id: &str) -> PathBuf {
-    let filename_session_id = sanitize_session_id(session_id);
-    home.join("raw").join(tool.as_str()).join(format!(
-        "{}_{}.jsonl",
-        tool.as_str(),
-        filename_session_id
-    ))
-}
-
-pub fn resolve_home(cli_home: Option<PathBuf>) -> Result<PathBuf> {
-    if let Some(home) = cli_home {
-        return Ok(home);
-    }
-    if let Some(home) = env::var_os("NABU_HOME") {
-        return Ok(PathBuf::from(home));
-    }
-    // Deprecated pre-rename env var; accepted so existing setups keep working.
-    if let Some(home) = env::var_os("TUPSHARRUM_HOME") {
-        return Ok(PathBuf::from(home));
-    }
-    default_home()
-}
-
-pub fn default_home() -> Result<PathBuf> {
-    let base = env::var_os("HOME")
-        .map(PathBuf::from)
-        .ok_or(Error::HomeUnavailable)?;
-    let current = base.join(".nabu");
-    // Back-compat: if the store has not been migrated yet, keep using the
-    // pre-rename location so existing captured history is not orphaned.
-    let legacy = base.join(".tupsharrum");
-    if !current.exists() && legacy.exists() {
-        return Ok(legacy);
-    }
-    Ok(current)
-}
+mod paths;
+pub use paths::{canonical_raw_path, default_home, resolve_home};
+pub(crate) use paths::{chmod, create_dir_0700, harness_home_for_raw_file, lock_path_for_raw_file};
 
 pub fn opencode_server_url(home: &Path) -> Result<Option<String>> {
     for key in ["NABU_OPENCODE_URL", "TUPSHARRUM_OPENCODE_URL"] {
@@ -7081,14 +7048,6 @@ fn directory_size_inner(path: &Path, depth: usize) -> Result<u64> {
     Ok(total)
 }
 
-fn create_dir_0700(path: &Path) -> Result<()> {
-    fs::create_dir_all(path).map_err(|source| Error::Io {
-        path: path.to_path_buf(),
-        source,
-    })?;
-    chmod(path, 0o700)
-}
-
 fn create_config_if_missing(path: &Path) -> Result<()> {
     match OpenOptions::new().write(true).create_new(true).open(path) {
         Ok(mut file) => {
@@ -9273,10 +9232,6 @@ fn sequence_for_payload(
     backfill_offset.and_then(|offset| i64::try_from(offset).ok())
 }
 
-fn lock_path_for_raw_file(raw_file: &Path) -> PathBuf {
-    raw_file.with_extension("jsonl.lock")
-}
-
 fn resolved_payload_for_envelope(raw_file: &Path, envelope: &EventEnvelope) -> Result<Value> {
     let Some(payload_ref) = envelope.payload_ref.as_deref() else {
         return Ok(envelope.payload.clone());
@@ -9295,15 +9250,6 @@ fn resolved_payload_for_envelope(raw_file: &Path, envelope: &EventEnvelope) -> R
         source,
     })?;
     Ok(serde_json::from_str(&content)?)
-}
-
-fn harness_home_for_raw_file(raw_file: &Path) -> PathBuf {
-    raw_file
-        .parent()
-        .and_then(Path::parent)
-        .and_then(Path::parent)
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| PathBuf::from("."))
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -9670,28 +9616,6 @@ fn set_if_exists(path: &Path, mode: u32) -> Result<()> {
     Ok(())
 }
 
-#[cfg(unix)]
-fn chmod(path: &Path, mode: u32) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-
-    let mut permissions = fs::metadata(path)
-        .map_err(|source| Error::Io {
-            path: path.to_path_buf(),
-            source,
-        })?
-        .permissions();
-    permissions.set_mode(mode);
-    fs::set_permissions(path, permissions).map_err(|source| Error::Io {
-        path: path.to_path_buf(),
-        source,
-    })
-}
-
-#[cfg(not(unix))]
-fn chmod(_path: &Path, _mode: u32) -> Result<()> {
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -9793,16 +9717,6 @@ mod tests {
         assert!(first
             .chars()
             .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-')));
-    }
-
-    #[test]
-    fn canonical_raw_path_uses_tool_and_sanitized_session_id() {
-        let path = canonical_raw_path(Path::new("/tmp/harness"), Tool::Claude, "a/b c");
-
-        assert_eq!(
-            path,
-            PathBuf::from("/tmp/harness/raw/claude/claude_a_b_c.jsonl")
-        );
     }
 
     #[test]
