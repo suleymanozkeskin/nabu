@@ -5562,7 +5562,7 @@ pub fn doctor_with_options(home: &Path, deep: bool) -> DoctorReport {
     let index_ok = if deep {
         index_integrity_is_healthy(home)
     } else {
-        index_quick_is_healthy(home)
+        index_structure_is_healthy(home)
     };
     let backfill_ok = backfill_is_healthy(home);
     let latest_captured_events = latest_events_for_doctor(home);
@@ -5572,7 +5572,7 @@ pub fn doctor_with_options(home: &Path, deep: bool) -> DoctorReport {
 
     DoctorReport {
         level: if deep { "deep" } else { "fast" }.to_string(),
-        integrity: if deep { "full" } else { "quick" }.to_string(),
+        integrity: if deep { "full" } else { "structural" }.to_string(),
         storage: DoctorCheck {
             ok: storage_ok,
             message: if storage_ok {
@@ -5587,7 +5587,7 @@ pub fn doctor_with_options(home: &Path, deep: bool) -> DoctorReport {
                 if deep {
                     "sqlite integrity_check returned ok".to_string()
                 } else {
-                    "sqlite quick_check returned ok".to_string()
+                    "index opens and core tables are present".to_string()
                 }
             } else {
                 "sqlite index is missing or unhealthy".to_string()
@@ -7325,7 +7325,15 @@ fn storage_is_healthy(home: &Path) -> bool {
     .all(|path| path.is_dir())
 }
 
-fn index_quick_is_healthy(home: &Path) -> bool {
+/// Fast structural liveness check, O(1) in database size.
+///
+/// Proves the index file opens, is a schema-initialized nabu database, and has
+/// its core tables — without scanning every page. This is the right cost for the
+/// default `doctor`, the wizard health screen, and the MCP `history_doctor`
+/// default: those need "is the index present and usable", answered in
+/// milliseconds. Page-level integrity (`PRAGMA integrity_check`, O(database
+/// size) — minutes on a multi-GB index) is reserved for the explicit deep tier.
+fn index_structure_is_healthy(home: &Path) -> bool {
     let db_path = home.join("index").join("harness.db");
     if !db_path.is_file() {
         return false;
@@ -7333,8 +7341,16 @@ fn index_quick_is_healthy(home: &Path) -> bool {
     let Ok(conn) = open_index(&db_path) else {
         return false;
     };
-    let integrity = conn.query_row("PRAGMA quick_check;", [], |row| row.get::<_, String>(0));
-    matches!(integrity, Ok(value) if value == "ok")
+    // `schema_version` reads only the database header (page 1); a value of 0
+    // means the file is not a schema-initialized database.
+    let schema_version = conn.query_row("PRAGMA schema_version;", [], |row| row.get::<_, i64>(0));
+    if !matches!(schema_version, Ok(version) if version > 0) {
+        return false;
+    }
+    // Core tables resolve from sqlite_master (no row scan).
+    ["events", "sessions", "checkpoints"]
+        .into_iter()
+        .all(|table| matches!(table_exists(&conn, &db_path, table), Ok(true)))
 }
 
 fn index_integrity_is_healthy(home: &Path) -> bool {
@@ -13135,8 +13151,9 @@ mod tests {
 
         let fast = doctor_with_options(&home, false);
         assert_eq!(fast.level, "fast");
-        assert_eq!(fast.integrity, "quick");
-        assert!(fast.index.message.contains("quick_check"));
+        assert_eq!(fast.integrity, "structural");
+        assert!(fast.index.ok);
+        assert!(fast.index.message.contains("core tables"));
         assert!(fast.stats.is_none());
         assert!(fast.latest_captured_events["claude"].is_some());
 

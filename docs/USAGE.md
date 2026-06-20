@@ -397,7 +397,7 @@ nabu doctor --json
 
 `doctor --json` includes `storage_footprint` so users can see local raw, index, vector, spool, blob, model, canonical, derived, and total byte usage.
 
-Doctor is fast by default and reports `integrity=quick`; use `--deep` for full SQLite integrity and counts.
+Doctor is fast by default and reports `integrity=structural` — an O(1) check that the index opens and its core tables are present, independent of database size. Use `--deep` for full SQLite `integrity_check` (scans the whole index) and counts.
 
 ### `nabu install` / `nabu uninstall` — manage live capture hooks
 

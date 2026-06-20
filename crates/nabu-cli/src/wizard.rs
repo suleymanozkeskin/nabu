@@ -808,6 +808,10 @@ fn health_step(
     actions: &mut dyn WizardActions,
     home: &Path,
 ) -> Result<()> {
+    // The fast doctor is O(1) in index size, but a cold disk read can still take
+    // a beat on a large store; print immediate feedback so the screen is never
+    // blank while it runs.
+    prompter.status(true, "Checking storage, index, and backfill…");
     match actions.doctor(home) {
         Ok(report) => {
             let line = format!(

@@ -281,7 +281,7 @@ fn tool_descriptions() -> Value {
         },
         {
             "name": "history_doctor",
-            "description": "Report fast local health by default using quick integrity checks and latest-event citations; pass deep=true for full SQLite integrity and counts.",
+            "description": "Report fast local health by default using an O(1) structural index check and latest-event citations; pass deep=true for full SQLite integrity (scans the whole index) and counts.",
             "inputSchema": tool_schema("history_doctor")
         },
         {
