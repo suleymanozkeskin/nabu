@@ -2922,6 +2922,88 @@ fn search_filters_apply_session_type_file_and_command() {
     assert_eq!(file_results[0].session_id, "file-session");
 }
 
+// P0 bug #2: a session-scoped search must fail open. Controlled by varying
+// only session_id while holding the query fixed. Also covers invariant #13
+// (every hit carries raw_file, raw_line, raw_offset, session_id) and that the
+// filter never silently requires a tool arg.
+#[test]
+fn search_session_filter_fails_open_on_prefix_and_filename() {
+    let temp = tempdir().unwrap();
+    let home = temp.path().join("home");
+    init_home(&home).unwrap();
+
+    // A full UUIDv7-style id (sanitizes to itself) and a session whose
+    // filename-sanitized form differs from its canonical id.
+    let full_id = "019d40b2-5250-7e40-9dc7-f2fb593bc2a8";
+    let slashed_id = "team/raven-session";
+    ingest_hook_event(
+        &home,
+        Tool::Claude,
+        json!({
+            "session_id": full_id,
+            "hook_event_name": "UserPromptSubmit",
+            "message_id": "scope-alpha-1",
+            "prompt": "session scope marker alpha"
+        }),
+    )
+    .unwrap();
+    ingest_hook_event(
+        &home,
+        Tool::Claude,
+        json!({
+            "session_id": slashed_id,
+            "hook_event_name": "UserPromptSubmit",
+            "message_id": "scope-beta-1",
+            "prompt": "session scope marker beta"
+        }),
+    )
+    .unwrap();
+    index_once(&home).unwrap();
+
+    let query = "session scope marker";
+    let scoped = |session: &str| {
+        search_history_filtered(
+            &home,
+            query,
+            SearchOptions {
+                session_id: Some(session.to_string()),
+                limit: 10,
+                ..SearchOptions::default()
+            },
+        )
+        .unwrap()
+    };
+
+    // No session filter: both events are present.
+    assert_eq!(search_history(&home, query, 10).unwrap().len(), 2);
+
+    // Exact canonical id.
+    let exact = scoped(full_id);
+    assert_eq!(exact.len(), 1);
+    assert_eq!(exact[0].session_id, full_id);
+
+    // Short id prefix — the failing case from the issue (a present session that
+    // returned empty under exact match). No tool arg supplied.
+    let by_prefix = scoped("019d40b2");
+    assert_eq!(by_prefix.len(), 1);
+    assert_eq!(by_prefix[0].session_id, full_id);
+
+    // Filename-sanitized form resolves back to the canonical id.
+    let by_filename = scoped("team_raven-session");
+    assert_eq!(by_filename.len(), 1);
+    assert_eq!(by_filename[0].session_id, slashed_id);
+
+    // A genuinely absent session still returns empty — correct, not false-empty.
+    assert!(scoped("ffffffff-0000-0000-0000-000000000000").is_empty());
+
+    // Invariant #13: every hit carries the full coordinate contract.
+    let hit = &exact[0];
+    assert!(!hit.raw_file.is_empty());
+    assert!(hit.raw_line > 0);
+    assert!(hit.raw_offset.is_some());
+    assert!(!hit.session_id.is_empty());
+}
+
 #[test]
 fn search_defaults_are_citation_first_and_full_payload_is_opt_in() {
     let temp = tempdir().unwrap();

@@ -15,6 +15,7 @@ use crate::{
 pub(crate) use corroborate::corroborate_text;
 use rusqlite::params_from_iter;
 use rusqlite::types::Value as SqlValue;
+use rusqlite::Connection;
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -165,8 +166,12 @@ fn lexical_search_ranked_results(
         params.push(SqlValue::Text(tool.as_str().to_string()));
     }
     if let Some(session_id) = options.session_id.as_deref() {
-        sql.push_str(" AND e.session_id = ?");
-        params.push(SqlValue::Text(session_id.to_string()));
+        let resolved = resolve_session_filter_ids(&conn, &db_path, options.tool, session_id)?;
+        let placeholders = vec!["?"; resolved.len()].join(", ");
+        sql.push_str(&format!(" AND e.session_id IN ({placeholders})"));
+        for id in resolved {
+            params.push(SqlValue::Text(id));
+        }
     }
     if let Some(cwd) = options.cwd.as_deref() {
         sql.push_str(" AND e.cwd = ?");
@@ -563,4 +568,90 @@ fn hydrate_search_result_payloads(results: &mut [SearchResult]) -> Result<()> {
         }
     }
     Ok(())
+}
+
+// Resolve a caller-supplied session identifier to the canonical stored
+// session_id(s) so the filter fails open instead of closed. An exact
+// `session_id = ?` filter returned empty whenever a session was referenced by
+// anything other than its full id — most commonly a short id prefix (the
+// natural handle, like a short git SHA) or the filename-sanitized form. Those
+// are present sessions, so empty was a confidently-wrong answer.
+//
+// Resolution is tiered, most-specific first: exact session_id, then
+// filename_session_id, then unique id prefix. The first non-empty tier wins.
+// `tool` is optional — when absent, resolution spans every tool, so the filter
+// never silently requires a tool arg. When nothing resolves the literal input
+// is returned unchanged: a genuinely-absent session then yields an empty
+// result, which is correct rather than false-empty.
+pub(crate) fn resolve_session_filter_ids(
+    conn: &Connection,
+    db_path: &Path,
+    tool: Option<Tool>,
+    session_id: &str,
+) -> Result<Vec<String>> {
+    let tiers: [(&str, String); 3] = [
+        (
+            "SELECT session_id FROM sessions WHERE session_id = ?1",
+            session_id.to_string(),
+        ),
+        (
+            "SELECT session_id FROM sessions WHERE filename_session_id = ?1",
+            session_id.to_string(),
+        ),
+        (
+            "SELECT session_id FROM sessions WHERE session_id LIKE ?1 ESCAPE '\\'",
+            format!("{}%", escape_like(session_id)),
+        ),
+    ];
+
+    for (base_sql, needle) in tiers {
+        let mut sql = base_sql.to_string();
+        let mut params = vec![SqlValue::Text(needle)];
+        if let Some(tool) = tool {
+            sql.push_str(" AND tool = ?2");
+            params.push(SqlValue::Text(tool.as_str().to_string()));
+        }
+        let mut statement = conn.prepare(&sql).map_err(|source| Error::Sqlite {
+            path: db_path.to_path_buf(),
+            source,
+        })?;
+        let mut ids = Vec::new();
+        let mut seen = HashSet::new();
+        let rows = statement
+            .query_map(params_from_iter(params), |row| row.get::<_, String>(0))
+            .map_err(|source| Error::Sqlite {
+                path: db_path.to_path_buf(),
+                source,
+            })?;
+        for row in rows {
+            let id = row.map_err(|source| Error::Sqlite {
+                path: db_path.to_path_buf(),
+                source,
+            })?;
+            if seen.insert(id.clone()) {
+                ids.push(id);
+            }
+        }
+        if !ids.is_empty() {
+            return Ok(ids);
+        }
+    }
+
+    Ok(vec![session_id.to_string()])
+}
+
+// Escape SQL LIKE metacharacters so a prefix match treats `%` and `_` in a
+// session id literally (paired with `ESCAPE '\'` on the query).
+fn escape_like(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        match character {
+            '\\' | '%' | '_' => {
+                escaped.push('\\');
+                escaped.push(character);
+            }
+            _ => escaped.push(character),
+        }
+    }
+    escaped
 }
