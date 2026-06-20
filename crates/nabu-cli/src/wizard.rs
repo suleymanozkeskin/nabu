@@ -25,10 +25,11 @@ use nabu_core::{
     BackfillReport, DoctorReport, DoctorStage, Error, IndexOptions, Result, SearchOptions, Tool,
 };
 
+use crate::progress::ProgressEmitter;
 use crate::{
     claude_mcp_entry_installed, codex_mcp_entry_installed, mcp_apply_one,
     opencode_mcp_entry_installed, run_backfill_command, run_backfill_dry_run_command, AgentTool,
-    BackfillTool, McpConfigAction, ProgressEmitter,
+    BackfillTool, McpConfigAction,
 };
 
 /// The top-level menu, in display order. Indices are stable so tests can script

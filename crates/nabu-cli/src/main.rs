@@ -1,12 +1,14 @@
 mod backup;
 mod jsonc_edit;
 mod opencode_http;
+mod progress;
 mod wizard;
 
 #[cfg(test)]
 mod testsupport;
 
 use crate::backup::{backup_cli_config, read_text_or_empty, text_diff, write_text_config};
+use crate::progress::ProgressEmitter;
 use clap::{Parser, Subcommand, ValueEnum};
 use nabu_adapters::{
     claude_status, codex_status, install_claude, install_codex, install_opencode, opencode_status,
@@ -21,13 +23,12 @@ use nabu_core::{
     export_session_markdown_with_options, index_once_with_options_and_progress, ingest_file,
     ingest_hook_event, ingest_opencode_server_messages, init_home, latest_event,
     opencode_server_url, prune_embedding_cache, purge_all, purge_before, purge_session,
-    resolve_home, sanitize_session_id, search_history_page, BackfillProgress, BackfillReport,
-    CanonicalType, Corroboration, DedupeParts, EmbeddingIndexProgress, EmbeddingModelDisclosure,
-    Error, EventEnvelope, IndexOptions, PurgeAction, PurgeAllOptions, PurgeAllReport, PurgeTier,
-    SearchMode, SearchOptions, SessionOptions, Source, Tool, SCHEMA_VERSION,
+    resolve_home, sanitize_session_id, search_history_page, BackfillReport, CanonicalType,
+    Corroboration, DedupeParts, Error, EventEnvelope, IndexOptions, PurgeAction, PurgeAllOptions,
+    PurgeAllReport, PurgeTier, SearchMode, SearchOptions, SessionOptions, Source, Tool,
+    SCHEMA_VERSION,
 };
 use serde_json::{json, Value};
-use std::borrow::Cow;
 use std::collections::BTreeSet;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Cursor, IsTerminal, Read, Seek, SeekFrom, Write};
@@ -35,8 +36,6 @@ use std::path::{Path, PathBuf};
 use std::process::{Command as ProcessCommand, Stdio};
 use std::str::FromStr;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use time::format_description::well_known::Rfc3339;
-use time::OffsetDateTime;
 
 const OPENCODE_RECONCILE_FETCH_CONCURRENCY: usize = 8;
 
@@ -1223,319 +1222,6 @@ fn parse_session_selector(selector: &str) -> nabu_core::Result<(Tool, &str)> {
     Ok((Tool::from_str(tool)?, session_id))
 }
 
-#[derive(Debug, Clone, Copy)]
-struct ProgressEmitter {
-    json: bool,
-    /// Suppress all output. The wizard drives its own progress UI through the
-    /// `Prompter`, so it passes a quiet emitter to the shared backfill helpers
-    /// instead of letting them write telemetry straight to the terminal.
-    quiet: bool,
-}
-
-impl ProgressEmitter {
-    fn new(json: bool) -> Self {
-        Self { json, quiet: false }
-    }
-
-    /// An emitter that writes nothing. Used by the wizard.
-    fn quiet() -> Self {
-        Self {
-            json: false,
-            quiet: true,
-        }
-    }
-
-    fn render(
-        self,
-        operation: &str,
-        phase: &str,
-        status: &str,
-        processed: usize,
-        total: Option<usize>,
-        message: &str,
-    ) -> String {
-        if self.json {
-            let timestamp = OffsetDateTime::now_utc()
-                .format(&Rfc3339)
-                .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string());
-            json!({
-                "schema_version": 1,
-                "operation": operation,
-                "phase": phase,
-                "status": status,
-                "processed": processed,
-                "total": total,
-                "unit": "items",
-                "message": message,
-                "timestamp": timestamp
-            })
-            .to_string()
-        } else {
-            match total {
-                Some(total) => format!(
-                    "progress operation={} phase={} status={} items={}/{} message={}",
-                    operation, phase, status, processed, total, message
-                ),
-                None => format!(
-                    "progress operation={} phase={} status={} items={} message={}",
-                    operation, phase, status, processed, message
-                ),
-            }
-        }
-    }
-
-    fn render_message(
-        self,
-        operation: &str,
-        phase: &str,
-        status: &str,
-        processed: usize,
-        total: Option<usize>,
-        message: impl std::fmt::Display,
-    ) -> String {
-        if self.json {
-            let message = message.to_string();
-            let timestamp = OffsetDateTime::now_utc()
-                .format(&Rfc3339)
-                .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string());
-            json!({
-                "schema_version": 1,
-                "operation": operation,
-                "phase": phase,
-                "status": status,
-                "processed": processed,
-                "total": total,
-                "unit": "items",
-                "message": message,
-                "timestamp": timestamp
-            })
-            .to_string()
-        } else {
-            match total {
-                Some(total) => format!(
-                    "progress operation={} phase={} status={} items={}/{} message={}",
-                    operation, phase, status, processed, total, message
-                ),
-                None => format!(
-                    "progress operation={} phase={} status={} items={} message={}",
-                    operation, phase, status, processed, message
-                ),
-            }
-        }
-    }
-
-    fn emit(
-        self,
-        operation: &str,
-        phase: &str,
-        status: &str,
-        processed: usize,
-        total: Option<usize>,
-        message: &str,
-    ) {
-        if self.quiet {
-            return;
-        }
-        eprintln!(
-            "{}",
-            self.render(operation, phase, status, processed, total, message)
-        );
-    }
-
-    fn emit_backfill(self, progress: BackfillProgress) {
-        if self.quiet {
-            return;
-        }
-        if progress.processed_files != 0
-            && progress.processed_files != progress.total_files
-            && !progress.processed_files.is_multiple_of(50)
-        {
-            return;
-        }
-        if self.json {
-            let timestamp = OffsetDateTime::now_utc()
-                .format(&Rfc3339)
-                .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string());
-            eprintln!(
-                "{}",
-                json!({
-                    "schema_version": 1,
-                    "operation": progress.operation,
-                    "phase": "backfill",
-                    "status": if progress.processed_files == progress.total_files { "completed" } else { "running" },
-                    "processed": progress.processed_files,
-                    "total": progress.total_files,
-                    "unit": "files",
-                    "message": "backfill progress",
-                    "timestamp": timestamp,
-                    "tool": progress.tool,
-                    "source_path": progress.source_path,
-                    "source_root": progress.source_root
-                })
-            );
-        } else {
-            if let Some(path) = progress.source_path.as_deref() {
-                eprintln!(
-                    "progress operation={} tool={} files={}/{} root={} path={}",
-                    progress.operation,
-                    progress.tool,
-                    progress.processed_files,
-                    progress.total_files,
-                    progress.source_root,
-                    path
-                );
-            } else {
-                eprintln!(
-                    "progress operation={} tool={} files={}/{} root={}",
-                    progress.operation,
-                    progress.tool,
-                    progress.processed_files,
-                    progress.total_files,
-                    progress.source_root
-                );
-            }
-        }
-    }
-
-    fn render_embedding_index(self, progress: &EmbeddingIndexProgress) -> String {
-        let status = progress.status.as_str();
-        let is_plan = progress.phase == "embedding_plan";
-        if self.json {
-            let message: Cow<'static, str> = if is_plan {
-                Cow::Owned(format!("{}", EmbeddingPlanMessage(progress.total_units)))
-            } else {
-                Cow::Borrowed("embedding index progress")
-            };
-            let timestamp = OffsetDateTime::now_utc()
-                .format(&Rfc3339)
-                .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string());
-            json!({
-                "schema_version": 1,
-                "operation": "embed.index",
-                "phase": progress.phase,
-                "status": status,
-                "processed": progress.embedded_units,
-                "total": progress.total_units,
-                "unit": "units",
-                "message": message,
-                "timestamp": timestamp,
-                "units_per_second": progress.units_per_second,
-                "eta_seconds": progress.eta_seconds,
-                "batch_size": progress.batch_size,
-                "write_chunk_size": progress.write_chunk_size,
-                "intra_threads": progress.intra_threads
-            })
-            .to_string()
-        } else {
-            let rendered = format!(
-                "progress operation=embed.index phase={} status={} units={}/{} rate={:.1}/s eta={} threads={} batch={} write_chunk={}",
-                progress.phase,
-                status,
-                progress.embedded_units,
-                progress.total_units,
-                progress.units_per_second,
-                Eta(progress.eta_seconds),
-                progress.intra_threads,
-                progress.batch_size,
-                progress.write_chunk_size
-            );
-            if is_plan {
-                format!(
-                    "{rendered} message={}",
-                    EmbeddingPlanMessage(progress.total_units)
-                )
-            } else {
-                rendered
-            }
-        }
-    }
-
-    fn emit_embedding_index(self, progress: EmbeddingIndexProgress) {
-        if self.quiet {
-            return;
-        }
-        eprintln!("{}", self.render_embedding_index(&progress));
-    }
-
-    fn render_embedding_download_disclosure(
-        self,
-        disclosure: &EmbeddingModelDisclosure,
-    ) -> Vec<String> {
-        let mut rendered = Vec::with_capacity(3);
-        rendered.push(self.render_message(
-            "embed.download",
-            "model_disclosure",
-            "info",
-            usize::from(disclosure.model_present),
-            Some(disclosure.total_files),
-            format_args!(
-                "model {} from {}",
-                disclosure.model_id, disclosure.repository
-            ),
-        ));
-        rendered.push(self.render(
-            "embed.download",
-            "model_disclosure",
-            "info",
-            usize::from(disclosure.model_present),
-            Some(disclosure.total_files),
-            &disclosure.license_summary,
-        ));
-        rendered.push(self.render_message(
-            "embed.download",
-            "model_disclosure",
-            "info",
-            usize::from(disclosure.model_present),
-            Some(disclosure.total_files),
-            format_args!(
-                "measured local footprint at {}: {} across {} expected files",
-                disclosure.cache_path,
-                ByteSize(disclosure.current_on_disk_bytes),
-                disclosure.total_files
-            ),
-        ));
-        rendered
-    }
-
-    fn emit_embedding_download_disclosure(self, disclosure: &EmbeddingModelDisclosure) {
-        if self.quiet {
-            return;
-        }
-        for line in self.render_embedding_download_disclosure(disclosure) {
-            eprintln!("{line}");
-        }
-    }
-}
-
-struct EmbeddingPlanMessage(usize);
-
-impl std::fmt::Display for EmbeddingPlanMessage {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            formatter,
-            "embedding will process {} unembedded units; one-time CPU-intensive local pass; use --no-embed to build FTS only",
-            self.0
-        )
-    }
-}
-
-struct Eta(Option<u64>);
-
-impl std::fmt::Display for Eta {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let Some(seconds) = self.0 else {
-            return formatter.write_str("unknown");
-        };
-        let minutes = seconds / 60;
-        let seconds = seconds % 60;
-        if minutes == 0 {
-            write!(formatter, "{seconds}s")
-        } else {
-            write!(formatter, "{minutes}m{seconds:02}s")
-        }
-    }
-}
-
 fn uninstall_all(home: &Path, dry_run: bool) -> nabu_core::Result<[ConfigChangeReport; 3]> {
     Ok([
         uninstall_codex(home, dry_run)?,
@@ -1620,7 +1306,7 @@ fn run_purge_all(
     Ok(())
 }
 
-struct ByteSize(u64);
+pub(crate) struct ByteSize(u64);
 
 impl std::fmt::Display for ByteSize {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -3287,7 +2973,7 @@ mod tests {
     use super::*;
     use crate::jsonc_edit::jsonc_to_json_value;
     use crate::testsupport::{file_mode, set_mode, EnvGuard, ENV_LOCK};
-    use nabu_core::search_history;
+    use nabu_core::{search_history, EmbeddingIndexProgress, EmbeddingModelDisclosure};
     use tempfile::tempdir;
 
     #[test]
