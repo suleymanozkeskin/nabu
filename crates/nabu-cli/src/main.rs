@@ -1,5 +1,8 @@
 mod wizard;
 
+#[cfg(test)]
+mod testsupport;
+
 use clap::{Parser, Subcommand, ValueEnum};
 use nabu_adapters::{
     claude_status, codex_status, install_claude, install_codex, install_opencode, opencode_status,
@@ -4067,11 +4070,9 @@ fn percentile(sorted_values: &[f64], percentile: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testsupport::{file_mode, set_mode, EnvGuard, ENV_LOCK};
     use nabu_core::search_history;
-    use std::sync::Mutex;
     use tempfile::tempdir;
-
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn parsed_command_controls_json_error_rendering_not_raw_argv() {
@@ -5042,58 +5043,5 @@ mod tests {
         );
 
         drop(env_guard);
-    }
-
-    #[cfg(unix)]
-    fn set_mode(path: &Path, mode: u32) {
-        use std::os::unix::fs::PermissionsExt;
-
-        let mut permissions = fs::metadata(path).unwrap().permissions();
-        permissions.set_mode(mode);
-        fs::set_permissions(path, permissions).unwrap();
-    }
-
-    #[cfg(not(unix))]
-    fn set_mode(_path: &Path, _mode: u32) {}
-
-    #[cfg(unix)]
-    fn file_mode(path: &Path) -> u32 {
-        use std::os::unix::fs::PermissionsExt;
-
-        fs::metadata(path).unwrap().permissions().mode() & 0o777
-    }
-
-    #[cfg(not(unix))]
-    fn file_mode(_path: &Path) -> u32 {
-        0
-    }
-
-    struct EnvGuard {
-        previous: Vec<(&'static str, Option<std::ffi::OsString>)>,
-    }
-
-    impl EnvGuard {
-        fn set<const N: usize>(values: [(&'static str, &std::ffi::OsStr); N]) -> Self {
-            let previous = values
-                .iter()
-                .map(|(key, _)| (*key, std::env::var_os(key)))
-                .collect::<Vec<_>>();
-            for (key, value) in values {
-                std::env::set_var(key, value);
-            }
-            Self { previous }
-        }
-    }
-
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            for (key, value) in self.previous.drain(..) {
-                if let Some(value) = value {
-                    std::env::set_var(key, value);
-                } else {
-                    std::env::remove_var(key);
-                }
-            }
-        }
     }
 }
