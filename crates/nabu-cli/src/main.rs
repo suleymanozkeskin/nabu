@@ -4188,9 +4188,12 @@ mod tests {
             ("TUPSHARRUM_OPENCODE_URL", std::ffi::OsStr::new("")),
         ]);
 
-        // First run: full consent through Get started, then Quit.
+        // First run: full consent through Get started, then Quit. Capture,
+        // backfill, and connect are checklists that default to all tools, so the
+        // multi-select queue is left empty (= accept all); only menu pick and
+        // Quit are scripted as selects.
         let mut prompter = wizard::ScriptedPrompter::new()
-            .selects([0usize, 0usize, 6usize])
+            .selects([0usize, 6usize])
             .confirms(std::iter::repeat_n(true, 12));
         let mut actions = wizard::LiveActions;
         wizard::run(&mut prompter, &mut actions, &harness_home).unwrap();
@@ -4255,7 +4258,7 @@ mod tests {
         // Re-run: idempotent — configured tools are not reinstalled, no new
         // agent-config backups, hooks unchanged.
         let mut prompter2 = wizard::ScriptedPrompter::new()
-            .selects([0usize, 0usize, 6usize])
+            .selects([0usize, 6usize])
             .confirms(std::iter::repeat_n(true, 12));
         let mut actions2 = wizard::LiveActions;
         wizard::run(&mut prompter2, &mut actions2, &harness_home).unwrap();

@@ -5557,17 +5557,56 @@ pub fn doctor(home: &Path) -> DoctorReport {
     doctor_with_options(home, false)
 }
 
+/// The sub-checks a doctor run performs, in display order. Emitted to the
+/// progress callback so callers (e.g. the wizard) can show a live checklist
+/// instead of one opaque pause.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DoctorStage {
+    Storage,
+    Index,
+    Backfill,
+    Coverage,
+    Footprint,
+    LatestEvents,
+}
+
 pub fn doctor_with_options(home: &Path, deep: bool) -> DoctorReport {
+    doctor_with_progress(home, deep, &mut |_, _| {})
+}
+
+/// Like [`doctor_with_options`], but invokes `on_stage(stage, ok)` after each
+/// sub-check completes, in display order. The `ok` bit is the pass/fail of the
+/// boolean checks (Storage/Index/Backfill); the derived stages
+/// (Coverage/Footprint/LatestEvents) always report `true` since they have no
+/// pass/fail bit. Behaviour and the returned report are identical to
+/// `doctor_with_options`.
+pub fn doctor_with_progress(
+    home: &Path,
+    deep: bool,
+    on_stage: &mut dyn FnMut(DoctorStage, bool),
+) -> DoctorReport {
     let storage_ok = storage_is_healthy(home);
+    on_stage(DoctorStage::Storage, storage_ok);
+
     let index_ok = if deep {
         index_integrity_is_healthy(home)
     } else {
         index_structure_is_healthy(home)
     };
+    on_stage(DoctorStage::Index, index_ok);
+
     let backfill_ok = backfill_is_healthy(home);
-    let latest_captured_events = latest_events_for_doctor(home);
+    on_stage(DoctorStage::Backfill, backfill_ok);
+
     let coverage = coverage_summary(home);
+    on_stage(DoctorStage::Coverage, true);
+
     let storage_footprint = storage_footprint(home);
+    on_stage(DoctorStage::Footprint, true);
+
+    let latest_captured_events = latest_events_for_doctor(home);
+    on_stage(DoctorStage::LatestEvents, true);
+
     let stats = if deep { index_stats(home).ok() } else { None };
 
     DoctorReport {
@@ -7561,6 +7600,114 @@ fn read_opencode_server_url_from_config(path: &Path) -> Result<Option<String>> {
         return Ok(Some(value));
     }
     Ok(None)
+}
+
+/// Set (`Some`) or clear (`None`) the `[opencode] server_url` in the user's
+/// `config.toml`, preserving every other line, key, and comment byte-for-byte.
+/// Writes atomically (temp file + rename, 0o600) and is idempotent — when the
+/// resulting content is unchanged it does not touch the file. This is the only
+/// config write path the wizard uses; it must never reset unrelated settings.
+pub fn set_opencode_server_url(home: &Path, url: Option<&str>) -> Result<()> {
+    let path = home.join("config.toml");
+    create_config_if_missing(&path)?;
+    let content = fs::read_to_string(&path).map_err(|source| Error::Io {
+        path: path.clone(),
+        source,
+    })?;
+    let updated = rewrite_opencode_server_url(&content, url);
+    if updated == content {
+        return Ok(());
+    }
+    let tmp = home.join("config.toml.tmp");
+    fs::write(&tmp, &updated).map_err(|source| Error::Io {
+        path: tmp.clone(),
+        source,
+    })?;
+    chmod(&tmp, 0o600)?;
+    fs::rename(&tmp, &path).map_err(|source| Error::Io {
+        path: path.clone(),
+        source,
+    })?;
+    Ok(())
+}
+
+/// Pure rewrite used by [`set_opencode_server_url`]. Replaces or inserts the
+/// `server_url` line inside `[opencode]` when `url` is `Some`, or removes an
+/// active (uncommented) `server_url` line when `None`; all other content is
+/// preserved verbatim.
+fn rewrite_opencode_server_url(content: &str, url: Option<&str>) -> String {
+    let new_line = url.map(|value| format!("server_url = \"{value}\""));
+    let mut out: Vec<String> = Vec::new();
+    let mut in_opencode = false;
+    let mut handled = false;
+
+    for raw in content.lines() {
+        let trimmed = raw.trim();
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            // Leaving the [opencode] section: a pending set is inserted here; a
+            // clear with nothing to remove is simply marked handled.
+            if in_opencode && !handled {
+                if let Some(line) = &new_line {
+                    out.push(line.clone());
+                }
+                handled = true;
+            }
+            in_opencode = trimmed == "[opencode]";
+            out.push(raw.to_string());
+            continue;
+        }
+        if in_opencode && !handled {
+            let is_comment = trimmed.starts_with('#');
+            let body = trimmed.trim_start_matches('#').trim();
+            let is_server_url = body
+                .split_once('=')
+                .map(|(key, _)| key.trim() == "server_url")
+                .unwrap_or(false);
+            if is_server_url {
+                match (&new_line, is_comment) {
+                    // Set: replace this line (whether it was the commented seed
+                    // hint or a live value).
+                    (Some(line), _) => {
+                        out.push(line.clone());
+                        handled = true;
+                        continue;
+                    }
+                    // Clear: drop the active line.
+                    (None, false) => {
+                        handled = true;
+                        continue;
+                    }
+                    // Clear: leave a commented hint untouched; keep scanning.
+                    (None, true) => {}
+                }
+            }
+        }
+        out.push(raw.to_string());
+    }
+
+    // EOF still inside [opencode]: append a pending set under the section.
+    if in_opencode && !handled {
+        if let Some(line) = &new_line {
+            out.push(line.clone());
+        }
+        handled = true;
+    }
+    // No [opencode] section at all: append one (only when setting).
+    if !handled {
+        if let Some(line) = &new_line {
+            if out.last().is_some_and(|last| !last.is_empty()) {
+                out.push(String::new());
+            }
+            out.push("[opencode]".to_string());
+            out.push(line.clone());
+        }
+    }
+
+    let mut result = out.join("\n");
+    if content.ends_with('\n') {
+        result.push('\n');
+    }
+    result
 }
 
 fn initialize_database(path: &Path) -> Result<()> {
@@ -13178,6 +13325,62 @@ mod tests {
             )
             .unwrap();
         assert!(plan.contains("idx_events_tool_captured"), "{plan}");
+    }
+
+    #[test]
+    fn set_opencode_server_url_round_trips_and_preserves_other_settings() {
+        let temp = tempdir().unwrap();
+        let home = temp.path().join("home");
+        init_home(&home).unwrap();
+        let config = home.join("config.toml");
+
+        // A config with an unrelated key and a comment that must survive edits.
+        fs::write(
+            &config,
+            "schema_version = 1\n# keep me\n\n[opencode]\n# server_url = \"http://127.0.0.1:4096\"\n",
+        )
+        .unwrap();
+
+        // Set activates the commented seed and is readable through the reader.
+        // Read via the config parser directly so ambient env vars can't shadow it.
+        set_opencode_server_url(&home, Some("http://localhost:9999")).unwrap();
+        assert_eq!(
+            read_opencode_server_url_from_config(&config)
+                .unwrap()
+                .as_deref(),
+            Some("http://localhost:9999")
+        );
+        let after_set = fs::read_to_string(&config).unwrap();
+        assert!(after_set.contains("schema_version = 1"));
+        assert!(after_set.contains("# keep me"));
+        assert!(after_set.contains("server_url = \"http://localhost:9999\""));
+
+        // Idempotent: setting the same value does not rewrite the file.
+        set_opencode_server_url(&home, Some("http://localhost:9999")).unwrap();
+        assert_eq!(fs::read_to_string(&config).unwrap(), after_set);
+
+        // Clear removes the active line but keeps the rest.
+        set_opencode_server_url(&home, None).unwrap();
+        assert_eq!(read_opencode_server_url_from_config(&config).unwrap(), None);
+        let after_clear = fs::read_to_string(&config).unwrap();
+        assert!(after_clear.contains("schema_version = 1"));
+        assert!(after_clear.contains("# keep me"));
+        assert!(!after_clear.contains("server_url = \"http://localhost:9999\""));
+    }
+
+    #[test]
+    fn set_opencode_server_url_appends_section_when_absent() {
+        let temp = tempdir().unwrap();
+        let home = temp.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        // No config.toml yet — writer must create it and append the section.
+        set_opencode_server_url(&home, Some("http://127.0.0.1:4096")).unwrap();
+        assert_eq!(
+            read_opencode_server_url_from_config(&home.join("config.toml"))
+                .unwrap()
+                .as_deref(),
+            Some("http://127.0.0.1:4096")
+        );
     }
 
     #[test]

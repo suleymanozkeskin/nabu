@@ -20,9 +20,9 @@ use nabu_adapters::{
     uninstall_claude, uninstall_codex, uninstall_opencode, ConfigChangeReport,
 };
 use nabu_core::{
-    doctor_with_options, embedding_model_status, index_once_with_options, init_home,
-    opencode_server_url, search_history_page, BackfillDryRunReport, BackfillReport, DoctorReport,
-    Error, IndexOptions, Result, SearchOptions, Tool,
+    doctor_with_progress, embedding_model_status, index_once_with_options, init_home,
+    opencode_server_url, search_history_page, set_opencode_server_url, BackfillDryRunReport,
+    BackfillReport, DoctorReport, DoctorStage, Error, IndexOptions, Result, SearchOptions, Tool,
 };
 
 use crate::{
@@ -81,6 +81,24 @@ pub(crate) trait Prompter {
     fn select(&mut self, prompt: &str, options: &[&str]) -> Result<usize>;
     /// Yes/no question with a default.
     fn confirm(&mut self, prompt: &str, default: bool) -> Result<bool>;
+
+    // --- Esc-capable variants. `Ok(None)` means the user pressed Esc, which the
+    // `get_started` step-cursor reads as "step back one prompt". Confined to the
+    // linear get-started flow; the hub and sub-hubs use the infallible variants
+    // above plus an explicit "Back" menu item, so there is exactly one way back
+    // per screen. ---
+
+    /// Yes/no that supports Esc=back. `Ok(None)` = Esc.
+    fn confirm_opt(&mut self, prompt: &str, default: bool) -> Result<Option<bool>>;
+    /// Checklist over `options`; `checked` gives the initial per-option state.
+    /// Space toggles, Enter confirms, Esc=back. `Ok(None)` = Esc; otherwise the
+    /// chosen zero-based indices (possibly empty).
+    fn multi_select(
+        &mut self,
+        prompt: &str,
+        options: &[&str],
+        checked: &[bool],
+    ) -> Result<Option<Vec<usize>>>;
     /// Free-text input with a default shown to the user. Part of the mandated
     /// `Prompter` interface; reserved for interactive value entry (the settings
     /// step is a read-only inspector today, so it is not yet called).
@@ -216,6 +234,30 @@ impl Prompter for TtyPrompter {
             .default(default)
             .report(false)
             .interact()
+            .map_err(prompt_error)
+    }
+
+    fn confirm_opt(&mut self, prompt: &str, default: bool) -> Result<Option<bool>> {
+        dialoguer::Confirm::with_theme(&self.theme)
+            .with_prompt(prompt)
+            .default(default)
+            .report(false)
+            .interact_opt()
+            .map_err(prompt_error)
+    }
+
+    fn multi_select(
+        &mut self,
+        prompt: &str,
+        options: &[&str],
+        checked: &[bool],
+    ) -> Result<Option<Vec<usize>>> {
+        dialoguer::MultiSelect::with_theme(&self.theme)
+            .with_prompt(prompt)
+            .items(options)
+            .defaults(checked)
+            .report(false)
+            .interact_opt()
             .map_err(prompt_error)
     }
 
@@ -363,9 +405,17 @@ pub(crate) trait WizardActions {
     /// the number of newly indexed events. Semantic embedding is intentionally
     /// excluded — it is the slow, opt-in path and must not block onboarding.
     fn index(&mut self, home: &Path) -> Result<usize>;
-    fn doctor(&mut self, home: &Path) -> Result<DoctorReport>;
+    /// Run the fast doctor, invoking `on_stage` after each sub-check so the caller
+    /// can render a live checklist.
+    fn doctor(
+        &mut self,
+        home: &Path,
+        on_stage: &mut dyn FnMut(DoctorStage, bool),
+    ) -> Result<DoctorReport>;
     fn mcp_install(&mut self, home: &Path, tool: Tool, dry_run: bool)
         -> Result<ConfigChangeReport>;
+    /// Set (`Some`) or clear (`None`) the OpenCode reconciliation server URL.
+    fn set_opencode_url(&mut self, home: &Path, url: Option<&str>) -> Result<()>;
     fn sample_search(&mut self, home: &Path, query: &str) -> Result<usize>;
     fn settings(&mut self, home: &Path) -> Result<SettingsView>;
 }
@@ -449,8 +499,12 @@ impl WizardActions for LiveActions {
             .map(|report| report.indexed_events)
     }
 
-    fn doctor(&mut self, home: &Path) -> Result<DoctorReport> {
-        Ok(doctor_with_options(home, false))
+    fn doctor(
+        &mut self,
+        home: &Path,
+        on_stage: &mut dyn FnMut(DoctorStage, bool),
+    ) -> Result<DoctorReport> {
+        Ok(doctor_with_progress(home, false, on_stage))
     }
 
     fn mcp_install(
@@ -460,6 +514,10 @@ impl WizardActions for LiveActions {
         dry_run: bool,
     ) -> Result<ConfigChangeReport> {
         mcp_apply_one(home, agent_tool(tool), McpConfigAction::Install, dry_run)
+    }
+
+    fn set_opencode_url(&mut self, home: &Path, url: Option<&str>) -> Result<()> {
+        set_opencode_server_url(home, url)
     }
 
     fn sample_search(&mut self, home: &Path, query: &str) -> Result<usize> {
@@ -536,7 +594,7 @@ pub(crate) fn run(
             TOP_BACKFILL => {
                 action_screen(prompter, actions, home, "Backfill history", backfill_step)?
             }
-            TOP_SETTINGS => action_screen(prompter, actions, home, "Settings", settings_body)?,
+            TOP_SETTINGS => settings_menu(prompter, actions, home)?,
             TOP_HEALTH => action_screen(prompter, actions, home, "Health check", health_step)?,
             TOP_CONNECT => {
                 draw_chrome(prompter, actions, home)?;
@@ -617,63 +675,409 @@ fn quit_screen(
 
 /// The ordered first-run flow. Each step is skippable and mutates nothing
 /// without an explicit confirm.
+/// Whether a get-started step advances or steps back. Esc at any prompt yields
+/// `Back`; `Back` at the first step exits to the main menu.
+enum StepOutcome {
+    Forward,
+    Back,
+}
+
+/// Decisions made so far in `get_started`, used to render a recap of completed
+/// steps and to restore a revisited step's prior answer as its default. Carries
+/// no disk state — Esc is purely navigational and never reverts an applied
+/// install/backfill/connect (those are idempotent and re-run on each forward
+/// pass).
+#[derive(Default)]
+struct GsState {
+    storage: Option<String>,
+    capture: Option<String>,
+    backfill: Option<String>,
+    connect: Option<String>,
+    storage_default: bool,
+    capture_checked: Option<Vec<bool>>,
+    backfill_checked: Option<Vec<bool>>,
+    connect_checked: Option<Vec<bool>>,
+}
+
+const GS_STEPS: i32 = 4;
+
+/// The ordered first-run flow as a step cursor. Each step is one decision; Esc
+/// steps back one prompt (and back past the first step returns to the menu).
+/// Every cursor move redraws the whole frame from the top so forward and
+/// backward movement repaint identically with no scrollback residue.
 fn get_started(
     prompter: &mut dyn Prompter,
     actions: &mut dyn WizardActions,
     home: &Path,
 ) -> Result<()> {
-    // One cleared frame for the whole linear flow: the numbered steps read
-    // top-to-bottom (accumulation is correct here — it's a sequence, not a hub),
-    // and a final `↵` returns to the redrawn menu.
+    let mut state = GsState {
+        storage_default: true,
+        ..GsState::default()
+    };
+    let mut cursor: i32 = 0;
+    loop {
+        if cursor < 0 {
+            return Ok(()); // Esc at the first step → back to the main menu.
+        }
+        if cursor >= GS_STEPS {
+            break; // Past the last step → health + summary.
+        }
+        draw_chrome(prompter, actions, home)?;
+        prompter.screen_title("Get started");
+        render_recap(prompter, &state, cursor);
+        let outcome = match cursor {
+            0 => gs_storage_step(prompter, actions, home, &mut state)?,
+            1 => gs_capture_step(prompter, actions, home, &mut state)?,
+            2 => gs_backfill_step(prompter, actions, home, &mut state)?,
+            3 => gs_connect_step(prompter, actions, home, &mut state)?,
+            _ => unreachable!("cursor is bounded to 0..GS_STEPS"),
+        };
+        cursor += match outcome {
+            StepOutcome::Forward => 1,
+            StepOutcome::Back => -1,
+        };
+    }
+
+    // Health (read-only) and the summary close the flow on a fresh frame.
     draw_chrome(prompter, actions, home)?;
     prompter.screen_title("Get started");
-    prompter.info("Four steps. Each asks before it changes anything and backs up");
-    prompter.info("any file it touches. Skip any step; re-run anytime.");
-
-    // 1. Storage home.
-    prompter.step("1", "Storage");
-    if prompter.confirm(
-        &format!("Create your history store at {}?", home.display()),
-        true,
-    )? {
-        actions.init_home(home)?;
-        prompter.success("Storage ready");
-    } else {
-        prompter.skip("Skipped — later steps need a store; re-run to create it.");
-    }
-
-    // 2. Detect tools, then per-tool capture.
-    let detected = actions.detect(home)?;
-    prompter.step("2", "Capture");
-    if !detected.iter().any(|t| t.present) {
-        prompter.skip("No Codex, Claude Code, or OpenCode install found — nothing to capture.");
-    } else {
-        prompter.info(&format!(
-            "Found {}.",
-            joined_tool_labels(detected.iter().filter(|t| t.present).map(|t| t.tool), ", ")
-        ));
-        prompter.info("Each install adds nabu capture hooks and backs the file up first.");
-        prompter.info("See the exact change anytime:  nabu install <tool> --dry-run");
-        for state in detected.iter().filter(|t| t.present) {
-            install_step(prompter, actions, home, state)?;
-        }
-    }
-
-    // 3. Backfill past history.
-    prompter.step("3", "Backfill");
-    backfill_step(prompter, actions, home)?;
-
-    // Health check (read-only) — folded in, no own prompt.
+    render_recap(prompter, &state, GS_STEPS);
     health_step(prompter, actions, home)?;
-
-    // 4. MCP registration so agents can query history.
-    prompter.step("4", "Connect");
-    mcp_register(prompter, actions, home, &detected)?;
-
-    // Sample search + "you're set" summary (re-detect for the true end state).
     summary(prompter, actions, home)?;
     prompter.pause("↵ back to menu");
     Ok(())
+}
+
+/// Dim one-line recap of every step before `cursor`, so a revisited frame still
+/// shows what was already decided.
+fn render_recap(prompter: &mut dyn Prompter, state: &GsState, cursor: i32) {
+    let lines = [
+        &state.storage,
+        &state.capture,
+        &state.backfill,
+        &state.connect,
+    ];
+    for (index, line) in lines.iter().enumerate() {
+        if (index as i32) < cursor {
+            if let Some(text) = line {
+                prompter.note(text);
+            }
+        }
+    }
+}
+
+/// Numbered step header plus the back-affordance hint.
+fn step_header(prompter: &mut dyn Prompter, number: i32, title: &str) {
+    prompter.step(&number.to_string(), title);
+    prompter.note(&format!("step {number} of {GS_STEPS} · Esc to go back"));
+}
+
+fn gs_storage_step(
+    prompter: &mut dyn Prompter,
+    actions: &mut dyn WizardActions,
+    home: &Path,
+    state: &mut GsState,
+) -> Result<StepOutcome> {
+    step_header(prompter, 1, "Storage");
+    let Some(create) = prompter.confirm_opt(
+        &format!("Create your history store at {}?", home.display()),
+        state.storage_default,
+    )?
+    else {
+        return Ok(StepOutcome::Back);
+    };
+    state.storage_default = create;
+    if create {
+        actions.init_home(home)?;
+        prompter.success("Storage ready");
+        state.storage = Some("Storage ✓ ready".to_string());
+    } else {
+        prompter.skip("Skipped — later steps need a store; re-run to create it.");
+        state.storage = Some("Storage · skipped".to_string());
+    }
+    Ok(StepOutcome::Forward)
+}
+
+fn gs_capture_step(
+    prompter: &mut dyn Prompter,
+    actions: &mut dyn WizardActions,
+    home: &Path,
+    state: &mut GsState,
+) -> Result<StepOutcome> {
+    step_header(prompter, 2, "Capture");
+    let present: Vec<ToolState> = actions
+        .detect(home)?
+        .into_iter()
+        .filter(|t| t.present)
+        .collect();
+    if present.is_empty() {
+        prompter.skip("No Codex, Claude Code, or OpenCode install found — nothing to capture.");
+        state.capture = Some("Capture · none detected".to_string());
+        return Ok(StepOutcome::Forward);
+    }
+    prompter.info("Adds nabu capture hooks; each file is backed up first.");
+    // Surface every target path up front so the choice is informed.
+    let mut previews: Vec<(Tool, String, bool)> = Vec::new();
+    for tool_state in &present {
+        let label = tool_label(tool_state.tool);
+        if tool_state.configured {
+            prompter.success(&format!("{label} already configured"));
+        } else {
+            let preview = actions.install(home, tool_state.tool, true)?;
+            prompter.field(label, &preview.target_path.display().to_string());
+        }
+        previews.push((tool_state.tool, label.to_string(), tool_state.configured));
+    }
+    let labels: Vec<&str> = present.iter().map(|t| tool_label(t.tool)).collect();
+    // Default to the not-yet-configured tools (or the user's prior toggle).
+    let checked = state
+        .capture_checked
+        .clone()
+        .unwrap_or_else(|| present.iter().map(|t| !t.configured).collect());
+    let Some(chosen) =
+        prompter.multi_select("Install capture for which agents?", &labels, &checked)?
+    else {
+        return Ok(StepOutcome::Back);
+    };
+    state.capture_checked = Some(checked_from_indices(present.len(), &chosen));
+    let selected: Vec<&ToolState> = chosen.iter().filter_map(|&i| present.get(i)).collect();
+    install_selected(prompter, actions, home, &selected);
+    state.capture = Some(recap_line("Capture", selected.iter().map(|s| s.tool)));
+    Ok(StepOutcome::Forward)
+}
+
+fn gs_backfill_step(
+    prompter: &mut dyn Prompter,
+    actions: &mut dyn WizardActions,
+    home: &Path,
+    state: &mut GsState,
+) -> Result<StepOutcome> {
+    step_header(prompter, 3, "Backfill");
+    let all = Tool::all();
+    let labels: Vec<&str> = all.iter().map(|&t| tool_label(t)).collect();
+    let checked = state
+        .backfill_checked
+        .clone()
+        .unwrap_or_else(|| vec![true; all.len()]);
+    let Some(chosen) = prompter.multi_select("Backfill which history?", &labels, &checked)? else {
+        return Ok(StepOutcome::Back);
+    };
+    state.backfill_checked = Some(checked_from_indices(all.len(), &chosen));
+    let tools: Vec<Tool> = chosen.iter().filter_map(|&i| all.get(i).copied()).collect();
+    if tools.is_empty() {
+        prompter.skip("Skipped backfill");
+        state.backfill = Some("Backfill · skipped".to_string());
+        return Ok(StepOutcome::Forward);
+    }
+    run_backfill_for(prompter, actions, home, &tools)?;
+    state.backfill = Some(recap_line("Backfill", tools.iter().copied()));
+    Ok(StepOutcome::Forward)
+}
+
+fn gs_connect_step(
+    prompter: &mut dyn Prompter,
+    actions: &mut dyn WizardActions,
+    home: &Path,
+    state: &mut GsState,
+) -> Result<StepOutcome> {
+    step_header(prompter, 4, "Connect");
+    let detected = actions.detect(home)?;
+    let already = joined_tool_labels(
+        detected
+            .iter()
+            .filter(|t| t.present && t.mcp_configured)
+            .map(|t| t.tool),
+        " · ",
+    );
+    if !already.is_empty() {
+        prompter.success(&format!("Already connected: {already}"));
+    }
+    let pending: Vec<ToolState> = detected
+        .into_iter()
+        .filter(|t| t.present && !t.mcp_configured)
+        .collect();
+    if pending.is_empty() {
+        if already.is_empty() {
+            prompter.skip("No detected agents to connect.");
+        }
+        state.connect = Some("Connect · nothing to do".to_string());
+        return Ok(StepOutcome::Forward);
+    }
+    prompter.info("Register nabu as an MCP server so agents can search your history.");
+    let labels: Vec<&str> = pending.iter().map(|t| tool_label(t.tool)).collect();
+    let checked = state
+        .connect_checked
+        .clone()
+        .unwrap_or_else(|| vec![true; pending.len()]);
+    let Some(chosen) = prompter.multi_select("Connect which agents?", &labels, &checked)? else {
+        return Ok(StepOutcome::Back);
+    };
+    state.connect_checked = Some(checked_from_indices(pending.len(), &chosen));
+    let selected: Vec<&ToolState> = chosen.iter().filter_map(|&i| pending.get(i)).collect();
+    connect_selected(prompter, actions, home, &selected);
+    state.connect = Some(recap_line("Connect", selected.iter().map(|s| s.tool)));
+    Ok(StepOutcome::Forward)
+}
+
+/// `Vec<bool>` of length `len` with `indices` set true — remembers a checklist
+/// answer so a revisited step restores it.
+fn checked_from_indices(len: usize, indices: &[usize]) -> Vec<bool> {
+    let mut checked = vec![false; len];
+    for &index in indices {
+        if index < len {
+            checked[index] = true;
+        }
+    }
+    checked
+}
+
+/// A recap line like `Capture ✓ Codex, Claude Code` or `Capture · skipped`.
+fn recap_line(label: &str, tools: impl IntoIterator<Item = Tool>) -> String {
+    let joined = joined_tool_labels(tools, ", ");
+    if joined.is_empty() {
+        format!("{label} · skipped")
+    } else {
+        format!("{label} ✓ {joined}")
+    }
+}
+
+/// Install capture for the chosen tools. The checklist selection is the consent;
+/// already-configured tools are reported and left untouched.
+fn install_selected(
+    prompter: &mut dyn Prompter,
+    actions: &mut dyn WizardActions,
+    home: &Path,
+    states: &[&ToolState],
+) {
+    for state in states {
+        let label = tool_label(state.tool);
+        if state.configured {
+            continue;
+        }
+        match actions.install(home, state.tool, false) {
+            Ok(_) => prompter.success(&format!("{label} capture installed")),
+            Err(error) => {
+                prompter.failure(&format!("{label} capture failed: {error}"));
+                prompter.note("Other steps continue; fix and re-run to repair.");
+            }
+        }
+    }
+}
+
+/// Register MCP for the chosen tools. The checklist selection is the consent.
+fn connect_selected(
+    prompter: &mut dyn Prompter,
+    actions: &mut dyn WizardActions,
+    home: &Path,
+    states: &[&ToolState],
+) {
+    let mut connected = String::new();
+    for state in states {
+        match actions.mcp_install(home, state.tool, false) {
+            Ok(_) => push_joined_tool_label(&mut connected, state.tool, " · "),
+            Err(error) => prompter.failure(&format!(
+                "{} connect failed: {error}",
+                tool_label(state.tool)
+            )),
+        }
+    }
+    if !connected.is_empty() {
+        prompter.success(&format!("Connected {connected}"));
+    }
+}
+
+/// Preview the chosen scopes, ask one import consent, then import and index.
+/// Collapses an all-tools selection to `BackfillTool::All` (one scan), else
+/// scans per tool. Shared by the get-started step and the hub Backfill screen.
+fn run_backfill_for(
+    prompter: &mut dyn Prompter,
+    actions: &mut dyn WizardActions,
+    home: &Path,
+    tools: &[Tool],
+) -> Result<()> {
+    let scopes: Vec<BackfillTool> = if tools.len() == Tool::all().len() {
+        vec![BackfillTool::All]
+    } else {
+        tools.iter().map(|&t| backfill_tool_of(t)).collect()
+    };
+
+    let mut total_events = 0usize;
+    let mut total_sources = 0usize;
+    let mut with_work: Vec<BackfillTool> = Vec::new();
+    for scope in scopes {
+        prompter.status(
+            true,
+            &format!(
+                "Scanning {} past sessions…",
+                backfill_tool_scope_label(scope)
+            ),
+        );
+        match actions.backfill_preview(home, scope) {
+            Ok(preview) => {
+                if preview.source_files > 0 && preview.missing_events > 0 {
+                    total_events += preview.missing_events;
+                    total_sources += preview.source_files;
+                    with_work.push(scope);
+                }
+            }
+            Err(error) => prompter.warn(&format!("Couldn’t scan past sessions: {error}")),
+        }
+    }
+
+    if with_work.is_empty() {
+        prompter.skip("No past sessions to import — already up to date.");
+        return Ok(());
+    }
+    if !prompter.confirm(
+        &format!(
+            "Import {} from {} now?",
+            plural(total_events, "event"),
+            plural(total_sources, "past session"),
+        ),
+        true,
+    )? {
+        prompter.skip("Skipped backfill");
+        return Ok(());
+    }
+
+    let mut imported_events = 0usize;
+    let mut imported_sources = 0usize;
+    for scope in with_work {
+        match actions.backfill(home, scope) {
+            Ok(report) => {
+                imported_events += report.appended_events;
+                imported_sources += report.source_files;
+            }
+            Err(error) => prompter.failure(&format!("Backfill failed: {error}")),
+        }
+    }
+    prompter.success(&format!(
+        "Imported {} from {}",
+        plural(imported_events, "event"),
+        plural(imported_sources, "session"),
+    ));
+
+    // Imported events are not searchable until indexed; build the lexical index
+    // now so search works immediately after import.
+    prompter.status(true, "Indexing for search…");
+    match actions.index(home) {
+        Ok(indexed) => prompter.success(&format!(
+            "Indexed {} — your history is searchable now",
+            plural(indexed, "event"),
+        )),
+        Err(error) => prompter.warn(&format!(
+            "Imported, but indexing failed: {error}. Run `nabu index --once` to make it searchable."
+        )),
+    }
+    Ok(())
+}
+
+fn backfill_tool_of(tool: Tool) -> BackfillTool {
+    match tool {
+        Tool::Codex => BackfillTool::Codex,
+        Tool::Claude => BackfillTool::Claude,
+        Tool::Opencode => BackfillTool::Opencode,
+    }
 }
 
 /// Preview + consent + install for a single tool. Already-configured tools are
@@ -714,83 +1118,24 @@ fn install_step(
 }
 
 /// Coverage-diff preview, then optional real backfill on consent.
+/// Hub "Backfill history" screen: pick any combination of tools, then import.
 fn backfill_step(
     prompter: &mut dyn Prompter,
     actions: &mut dyn WizardActions,
     home: &Path,
 ) -> Result<()> {
-    let tool = select_backfill_tool(prompter)?;
-    prompter.note(&format!(
-        "Scanning {} past sessions…",
-        backfill_tool_scope_label(tool)
-    ));
-    let preview = match actions.backfill_preview(home, tool) {
-        Ok(preview) => preview,
-        Err(error) => {
-            prompter.warn(&format!("Couldn’t scan past sessions: {error}"));
-            return Ok(());
-        }
+    let all = Tool::all();
+    let labels: Vec<&str> = all.iter().map(|&t| tool_label(t)).collect();
+    let checked = vec![true; all.len()];
+    let Some(chosen) = prompter.multi_select("Backfill which history?", &labels, &checked)? else {
+        return Ok(());
     };
-    if preview.source_files == 0 || preview.missing_events == 0 {
-        prompter.skip("No past sessions to import — already up to date.");
+    let tools: Vec<Tool> = chosen.iter().filter_map(|&i| all.get(i).copied()).collect();
+    if tools.is_empty() {
+        prompter.skip("Nothing selected — skipped backfill.");
         return Ok(());
     }
-    if prompter.confirm(
-        &format!(
-            "Import {} from {} now?",
-            plural(preview.missing_events, "event"),
-            plural(preview.source_files, "past session"),
-        ),
-        true,
-    )? {
-        match actions.backfill(home, tool) {
-            Ok(report) => {
-                prompter.success(&format!(
-                    "Imported {} from {}",
-                    plural(report.appended_events, "event"),
-                    plural(report.source_files, "session"),
-                ));
-                // Imported events live in raw JSONL but are not searchable until
-                // they are indexed. Build the lexical index now so search works
-                // right after import; without this the import looks done but
-                // every search returns nothing.
-                prompter.status(true, "Indexing for search…");
-                match actions.index(home) {
-                    Ok(indexed) => prompter.success(&format!(
-                        "Indexed {} — your history is searchable now",
-                        plural(indexed, "event"),
-                    )),
-                    Err(error) => prompter.warn(&format!(
-                        "Imported, but indexing failed: {error}. Run `nabu index --once` to make it searchable."
-                    )),
-                }
-            }
-            Err(error) => prompter.failure(&format!("Backfill failed: {error}")),
-        }
-    } else {
-        prompter.skip("Skipped backfill");
-    }
-    Ok(())
-}
-
-fn select_backfill_tool(prompter: &mut dyn Prompter) -> Result<BackfillTool> {
-    match prompter.select(
-        "Backfill which history?",
-        &[
-            "All tools",
-            "Codex only",
-            "Claude Code only",
-            "OpenCode only",
-        ],
-    )? {
-        0 => Ok(BackfillTool::All),
-        1 => Ok(BackfillTool::Codex),
-        2 => Ok(BackfillTool::Claude),
-        3 => Ok(BackfillTool::Opencode),
-        _ => Err(Error::Validation(
-            "unsupported backfill selection".to_string(),
-        )),
-    }
+    run_backfill_for(prompter, actions, home, &tools)
 }
 
 fn backfill_tool_scope_label(tool: BackfillTool) -> &'static str {
@@ -802,25 +1147,34 @@ fn backfill_tool_scope_label(tool: BackfillTool) -> &'static str {
     }
 }
 
-/// Run `doctor` (fast) and report health. Read-only — no consent needed.
+/// Run the fast doctor as a live, aligned checklist — one line per sub-check as
+/// it completes — then an aggregate verdict. Read-only; no consent needed.
 fn health_step(
     prompter: &mut dyn Prompter,
     actions: &mut dyn WizardActions,
     home: &Path,
 ) -> Result<()> {
-    // The fast doctor is O(1) in index size, but a cold disk read can still take
-    // a beat on a large store; print immediate feedback so the screen is never
-    // blank while it runs.
-    prompter.status(true, "Checking storage, index, and backfill…");
-    match actions.doctor(home) {
+    prompter.heading("Health check");
+    // `on_stage` borrows `prompter` while `actions.doctor` borrows `actions` —
+    // disjoint mutable borrows. The block ends the closure borrow before the
+    // aggregate verdict reuses `prompter`.
+    let report = {
+        let mut on_stage = |stage: DoctorStage, ok: bool| {
+            prompter.status(ok, doctor_stage_label(stage));
+        };
+        actions.doctor(home, &mut on_stage)
+    };
+    match report {
         Ok(report) => {
+            let healthy = report.storage.ok && report.index.ok && report.backfill.ok;
             let line = format!(
-                "Health: storage {} · index {} · backfill {}",
+                "storage {} · index {} · backfill {}",
                 ok_label(report.storage.ok),
                 ok_label(report.index.ok),
                 ok_label(report.backfill.ok),
             );
-            if report.storage.ok && report.index.ok && report.backfill.ok {
+            prompter.blank();
+            if healthy {
                 prompter.success(&line);
             } else {
                 prompter.warn(&line);
@@ -832,8 +1186,19 @@ fn health_step(
     Ok(())
 }
 
-/// Offer MCP registration for the given tools with a single combined consent.
-/// Tools already registered are skipped (no duplicate install).
+fn doctor_stage_label(stage: DoctorStage) -> &'static str {
+    match stage {
+        DoctorStage::Storage => "Storage",
+        DoctorStage::Index => "Index",
+        DoctorStage::Backfill => "Backfill",
+        DoctorStage::Coverage => "Coverage",
+        DoctorStage::Footprint => "Footprint",
+        DoctorStage::LatestEvents => "Latest events",
+    }
+}
+
+/// Hub "Connect agents (MCP)" screen: pick any combination of pending tools.
+/// Tools already registered are reported and skipped.
 fn mcp_register(
     prompter: &mut dyn Prompter,
     actions: &mut dyn WizardActions,
@@ -850,13 +1215,10 @@ fn mcp_register(
     if !already.is_empty() {
         prompter.success(&format!("Already connected: {already}"));
     }
-    let pending = joined_tool_labels(
-        tools
-            .iter()
-            .filter(|t| t.present && !t.mcp_configured)
-            .map(|t| t.tool),
-        ", ",
-    );
+    let pending: Vec<&ToolState> = tools
+        .iter()
+        .filter(|t| t.present && !t.mcp_configured)
+        .collect();
     if pending.is_empty() {
         if already.is_empty() {
             prompter.skip("No detected agents to connect.");
@@ -864,23 +1226,20 @@ fn mcp_register(
         return Ok(());
     }
     prompter.info("Register nabu as an MCP server so agents can search your history.");
-    if prompter.confirm(&format!("Connect {pending}?"), true)? {
-        let mut connected = String::new();
-        for state in tools.iter().filter(|t| t.present && !t.mcp_configured) {
-            match actions.mcp_install(home, state.tool, false) {
-                Ok(_) => push_joined_tool_label(&mut connected, state.tool, " · "),
-                Err(error) => prompter.failure(&format!(
-                    "{} connect failed: {error}",
-                    tool_label(state.tool)
-                )),
-            }
-        }
-        if !connected.is_empty() {
-            prompter.success(&format!("Connected {connected}"));
-        }
-    } else {
+    let labels: Vec<&str> = pending.iter().map(|t| tool_label(t.tool)).collect();
+    let checked = vec![true; pending.len()];
+    let Some(chosen) = prompter.multi_select("Connect which agents?", &labels, &checked)? else {
+        return Ok(());
+    };
+    if chosen.is_empty() {
         prompter.skip("Skipped — agents won’t search history until connected.");
+        return Ok(());
     }
+    let selected: Vec<&ToolState> = chosen
+        .iter()
+        .filter_map(|&i| pending.get(i).copied())
+        .collect();
+    connect_selected(prompter, actions, home, &selected);
     Ok(())
 }
 
@@ -1020,45 +1379,111 @@ fn uninstall_step(
 /// how to change each value. Writes nothing — it never flips redaction and adds
 /// no new config write path. The screen title/chrome are supplied by
 /// `action_screen`; this renders only the body.
-fn settings_body(
+/// What a chosen Settings action does.
+enum SettingsAction {
+    SetOpencodeUrl,
+    ClearOpencodeUrl,
+    SemanticHelp,
+}
+
+/// Settings as a sub-hub: a clean grouped display (every value rendered as an
+/// aligned row or status dot — never a wall of text) plus actions for the values
+/// that are editable at runtime. Storage home and redaction are read-only by
+/// design and shown as labeled info; redaction stays opt-in/per-command. Loops
+/// until "Back", redrawing its own frame each turn like `manage_integrations`.
+fn settings_menu(
     prompter: &mut dyn Prompter,
     actions: &mut dyn WizardActions,
     home: &Path,
 ) -> Result<()> {
-    prompter.note("read-only — shows where to change each value");
-    let view = actions.settings(home)?;
+    loop {
+        draw_chrome(prompter, actions, home)?;
+        prompter.screen_title("Settings");
+        let view = actions.settings(home)?;
 
-    prompter.field("Storage home", &view.home.display().to_string());
-    prompter.note("--home <path>  or  NABU_HOME");
+        // Store — read-only, aligned label/value rows.
+        prompter.heading("Store");
+        prompter.field("Home", &view.home.display().to_string());
+        prompter.note("change with --home <path> or NABU_HOME");
+        prompter.field("Redaction", "opt-in — never on by default");
+        prompter.note("--redact on export, or redact=true via MCP");
 
-    match &view.opencode_server_url {
-        Some(url) => prompter.field("OpenCode sync", &format!("on ({url})")),
-        None => prompter.field("OpenCode sync", "off"),
-    }
-    prompter.note(&format!(
-        "set [opencode] server_url in {}",
-        home.join("config.toml").display()
-    ));
+        // Integrations — status dots convey on/off at a glance.
+        prompter.heading("Integrations");
+        match &view.opencode_server_url {
+            Some(url) => prompter.status(true, &format!("OpenCode sync   {url}")),
+            None => prompter.status(false, "OpenCode sync   off"),
+        }
+        let (semantic_on, semantic_value) =
+            match (view.semantic_feature_enabled, view.model_present) {
+                (false, _) => (
+                    false,
+                    "not built (rebuild with --features semantic)".to_string(),
+                ),
+                (true, false) => (false, "built · model not downloaded".to_string()),
+                (true, true) => (
+                    view.semantic_available,
+                    format!("ready (available={})", view.semantic_available),
+                ),
+            };
+        prompter.status(semantic_on, &format!("Semantic        {semantic_value}"));
 
-    prompter.field("Redaction", "opt-in — never on by default");
-    prompter.note("--redact on export, or redact=true via MCP");
+        // Build the action menu from what is actually editable now.
+        prompter.blank();
+        let mut labels: Vec<String> = Vec::new();
+        let mut menu: Vec<SettingsAction> = Vec::new();
+        match view.opencode_server_url {
+            Some(_) => {
+                labels.push("Change OpenCode sync URL…".to_string());
+                menu.push(SettingsAction::SetOpencodeUrl);
+                labels.push("Clear OpenCode sync URL".to_string());
+                menu.push(SettingsAction::ClearOpencodeUrl);
+            }
+            None => {
+                labels.push("Set OpenCode sync URL…".to_string());
+                menu.push(SettingsAction::SetOpencodeUrl);
+            }
+        }
+        if view.semantic_feature_enabled && !view.model_present {
+            labels.push("How to enable semantic search".to_string());
+            menu.push(SettingsAction::SemanticHelp);
+        }
+        labels.push("Back".to_string());
+        let label_refs: Vec<&str> = labels.iter().map(String::as_str).collect();
 
-    match (view.semantic_feature_enabled, view.model_present) {
-        (false, _) => prompter.field(
-            "Semantic search",
-            "not built (rebuild with --features semantic)",
-        ),
-        (true, false) => prompter.field("Semantic search", "built · model not downloaded"),
-        (true, true) => {
-            let semantic = format!("ready (available={})", view.semantic_available);
-            prompter.field("Semantic search", &semantic);
+        let choice = prompter.select("What next?", &label_refs)?;
+        if choice >= menu.len() {
+            return Ok(()); // Back
+        }
+        match menu[choice] {
+            SettingsAction::SetOpencodeUrl => {
+                let prior = view.opencode_server_url.clone().unwrap_or_default();
+                let url = prompter.input("OpenCode server URL", &prior)?;
+                let url = url.trim();
+                if url.is_empty() {
+                    prompter.skip("No URL entered — unchanged.");
+                } else {
+                    match actions.set_opencode_url(home, Some(url)) {
+                        Ok(()) => prompter.success(&format!("OpenCode sync set to {url}")),
+                        Err(error) => prompter.failure(&format!("Couldn’t update config: {error}")),
+                    }
+                }
+                prompter.pause("↵ back");
+            }
+            SettingsAction::ClearOpencodeUrl => {
+                match actions.set_opencode_url(home, None) {
+                    Ok(()) => prompter.success("OpenCode sync cleared"),
+                    Err(error) => prompter.failure(&format!("Couldn’t update config: {error}")),
+                }
+                prompter.pause("↵ back");
+            }
+            SettingsAction::SemanticHelp => {
+                prompter.info("Enable semantic search (one-time model download, CPU-heavy):");
+                prompter.command("nabu embed download --yes");
+                prompter.pause("↵ back");
+            }
         }
     }
-    if view.semantic_feature_enabled && !view.model_present {
-        prompter.note("better fuzzy recall; one-time model download plus CPU-heavy embedding");
-        prompter.note("nabu embed download --yes");
-    }
-    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -1150,8 +1575,14 @@ mod tests {
     pub(crate) struct ScriptedPrompter {
         selects: VecDeque<usize>,
         confirms: VecDeque<bool>,
-        #[allow(dead_code)]
         inputs: VecDeque<String>,
+        /// Esc-capable confirm answers. When empty, `confirm_opt` falls back to
+        /// the `confirms` queue wrapped in `Some` so existing tests keep working;
+        /// populate this only to script an Esc (`None`).
+        opt_confirms: VecDeque<Option<bool>>,
+        /// Checklist answers. When empty, `multi_select` returns the
+        /// default-checked indices so tests that don't toggle still pass.
+        multi: VecDeque<Option<Vec<usize>>>,
         pub info_log: Vec<String>,
         /// How many times the wizard cleared the screen to start a fresh frame.
         pub clears: usize,
@@ -1163,6 +1594,8 @@ mod tests {
                 selects: VecDeque::new(),
                 confirms: VecDeque::new(),
                 inputs: VecDeque::new(),
+                opt_confirms: VecDeque::new(),
+                multi: VecDeque::new(),
                 info_log: Vec::new(),
                 clears: 0,
             }
@@ -1175,6 +1608,29 @@ mod tests {
 
         pub(crate) fn confirms(mut self, values: impl IntoIterator<Item = bool>) -> Self {
             self.confirms = values.into_iter().collect();
+            self
+        }
+
+        #[allow(dead_code)]
+        pub(crate) fn inputs(mut self, values: impl IntoIterator<Item = String>) -> Self {
+            self.inputs = values.into_iter().collect();
+            self
+        }
+
+        #[allow(dead_code)]
+        pub(crate) fn opt_confirms(
+            mut self,
+            values: impl IntoIterator<Item = Option<bool>>,
+        ) -> Self {
+            self.opt_confirms = values.into_iter().collect();
+            self
+        }
+
+        pub(crate) fn multi_selects(
+            mut self,
+            values: impl IntoIterator<Item = Option<Vec<usize>>>,
+        ) -> Self {
+            self.multi = values.into_iter().collect();
             self
         }
     }
@@ -1194,6 +1650,46 @@ mod tests {
                 .confirms
                 .pop_front()
                 .expect("scripted prompter ran out of confirm answers"))
+        }
+
+        fn confirm_opt(&mut self, _prompt: &str, _default: bool) -> Result<Option<bool>> {
+            let answer = match self.opt_confirms.pop_front() {
+                Some(answer) => answer,
+                None => self
+                    .confirms
+                    .pop_front()
+                    .map(Some)
+                    .expect("scripted prompter ran out of confirm answers (confirm_opt)"),
+            };
+            Ok(answer)
+        }
+
+        fn multi_select(
+            &mut self,
+            _prompt: &str,
+            options: &[&str],
+            checked: &[bool],
+        ) -> Result<Option<Vec<usize>>> {
+            // Default (no scripted answer): accept the pre-checked indices, which
+            // the wizard sets to all detected tools.
+            let answer = self.multi.pop_front().unwrap_or_else(|| {
+                Some(
+                    checked
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(index, &on)| on.then_some(index))
+                        .collect(),
+                )
+            });
+            if let Some(indices) = &answer {
+                for &index in indices {
+                    assert!(
+                        index < options.len(),
+                        "scripted multi-select index out of range"
+                    );
+                }
+            }
+            Ok(answer)
         }
 
         fn input(&mut self, _prompt: &str, default: &str) -> Result<String> {
@@ -1384,8 +1880,23 @@ mod tests {
             Ok(5)
         }
 
-        fn doctor(&mut self, _home: &Path) -> Result<DoctorReport> {
+        fn doctor(
+            &mut self,
+            _home: &Path,
+            on_stage: &mut dyn FnMut(DoctorStage, bool),
+        ) -> Result<DoctorReport> {
             self.calls.push("doctor".to_string());
+            // Drive the checklist-rendering path the wizard exercises.
+            for stage in [
+                DoctorStage::Storage,
+                DoctorStage::Index,
+                DoctorStage::Backfill,
+                DoctorStage::Coverage,
+                DoctorStage::Footprint,
+                DoctorStage::LatestEvents,
+            ] {
+                on_stage(stage, true);
+            }
             Ok(canned_doctor())
         }
 
@@ -1397,6 +1908,12 @@ mod tests {
         ) -> Result<ConfigChangeReport> {
             self.calls.push(format!("mcp_install:{tool}:dry={dry_run}"));
             Ok(canned_report(tool, dry_run))
+        }
+
+        fn set_opencode_url(&mut self, _home: &Path, url: Option<&str>) -> Result<()> {
+            let kind = if url.is_some() { "set" } else { "clear" };
+            self.calls.push(format!("set_opencode_url:{kind}"));
+            Ok(())
         }
 
         fn sample_search(&mut self, _home: &Path, _query: &str) -> Result<usize> {
@@ -1428,11 +1945,12 @@ mod tests {
 
     #[test]
     fn full_consent_get_started_matches_init_install_all_backfill_mcp() {
-        // Get started, then Quit.
+        // Get started, then Quit. Capture/backfill/connect are checklists that
+        // default to all tools checked, so leaving the multi-select queue empty
+        // accepts all three. The two confirms are storage-create and import.
         let mut prompter = ScriptedPrompter::new()
-            .selects([TOP_GET_STARTED, 0, TOP_QUIT])
-            // init, 3 installs, backfill, mcp register.
-            .confirms([true, true, true, true, true, true]);
+            .selects([TOP_GET_STARTED, TOP_QUIT])
+            .confirms([true, true]);
         let mut actions = SpyActions::all_present_unconfigured();
 
         run(&mut prompter, &mut actions, Path::new(HOME)).unwrap();
@@ -1454,9 +1972,11 @@ mod tests {
 
     #[test]
     fn declining_every_step_changes_nothing() {
+        // Decline storage; select no tools in capture/backfill/connect.
         let mut prompter = ScriptedPrompter::new()
-            .selects([TOP_GET_STARTED, 0, TOP_QUIT])
-            .confirms([false, false, false, false, false, false]);
+            .selects([TOP_GET_STARTED, TOP_QUIT])
+            .confirms([false])
+            .multi_selects([Some(vec![]), Some(vec![]), Some(vec![])]);
         let mut actions = SpyActions::all_present_unconfigured();
 
         run(&mut prompter, &mut actions, Path::new(HOME)).unwrap();
@@ -1466,18 +1986,19 @@ mod tests {
             "no mutating calls expected, got {:?}",
             actions.mutating_calls()
         );
-        // Read-only previews still ran.
+        // The capture step previews each tool's target path before the choice,
+        // and the health check still runs — both read-only.
         assert!(actions.calls.iter().any(|c| c == "install:codex:dry=true"));
-        assert!(actions.calls.iter().any(|c| c == "backfill_preview:all"));
         assert!(actions.calls.iter().any(|c| c == "doctor"));
     }
 
     #[test]
     fn rerun_on_configured_home_does_not_duplicate_installs() {
         let mut prompter = ScriptedPrompter::new()
-            .selects([TOP_GET_STARTED, 0, TOP_QUIT])
-            // init + backfill are the only confirms reached when all tools are
-            // already configured and MCP already registered.
+            .selects([TOP_GET_STARTED, TOP_QUIT])
+            // Storage-create + backfill-import are the only confirms reached when
+            // all tools are already configured (capture checklist defaults to
+            // none) and MCP is already registered (connect has no pending tools).
             .confirms([true, true]);
         let mut actions = SpyActions::all_present_configured();
 
@@ -1522,8 +2043,9 @@ mod tests {
 
     #[test]
     fn backfill_menu_entry_runs_backfill_on_consent() {
+        // Backfill checklist defaults to all tools checked → scope "all".
         let mut prompter = ScriptedPrompter::new()
-            .selects([TOP_BACKFILL, 0, TOP_QUIT])
+            .selects([TOP_BACKFILL, TOP_QUIT])
             .confirms([true]);
         let mut actions = SpyActions::all_present_configured();
         run(&mut prompter, &mut actions, Path::new(HOME)).unwrap();
@@ -1543,9 +2065,11 @@ mod tests {
 
     #[test]
     fn backfill_menu_can_run_codex_only() {
+        // Toggle the checklist to Codex only (index 0 in Tool::all()).
         let mut prompter = ScriptedPrompter::new()
-            .selects([TOP_BACKFILL, 1, TOP_QUIT])
-            .confirms([true]);
+            .selects([TOP_BACKFILL, TOP_QUIT])
+            .confirms([true])
+            .multi_selects([Some(vec![0])]);
         let mut actions = SpyActions::all_present_configured();
         run(&mut prompter, &mut actions, Path::new(HOME)).unwrap();
 
@@ -1574,15 +2098,32 @@ mod tests {
     }
 
     #[test]
-    fn settings_menu_entry_is_read_only() {
-        let mut prompter = ScriptedPrompter::new().selects([TOP_SETTINGS, TOP_QUIT]);
+    fn settings_menu_back_does_not_mutate() {
+        // Settings is a sub-hub: with no OpenCode URL set the action menu is
+        // [Set URL…, Back]; choosing Back (index 1) returns without writing.
+        let mut prompter = ScriptedPrompter::new().selects([TOP_SETTINGS, 1, TOP_QUIT]);
         let mut actions = SpyActions::all_present_configured();
         run(&mut prompter, &mut actions, Path::new(HOME)).unwrap();
         assert!(actions.calls.iter().any(|c| c == "settings"));
         assert!(
             actions.mutating_calls().is_empty(),
-            "settings inspector must not mutate, got {:?}",
+            "choosing Back must not mutate, got {:?}",
             actions.mutating_calls()
+        );
+    }
+
+    #[test]
+    fn settings_menu_can_set_opencode_url() {
+        // [Set URL…(0), Back] → choose Set URL, supply input, then Back, then Quit.
+        let mut prompter = ScriptedPrompter::new()
+            .selects([TOP_SETTINGS, 0, 1, TOP_QUIT])
+            .inputs(["http://127.0.0.1:4096".to_string()]);
+        let mut actions = SpyActions::all_present_configured();
+        run(&mut prompter, &mut actions, Path::new(HOME)).unwrap();
+        assert!(
+            actions.calls.iter().any(|c| c == "set_opencode_url:set"),
+            "expected an OpenCode URL write, got {:?}",
+            actions.calls
         );
     }
 
