@@ -25,8 +25,9 @@ result.
 
 - **Local-first.** No telemetry, no cloud, no central database. Your history stays
   on your machine.
-- **Full fidelity.** Raw JSONL is the source of truth; the index is derived and
-  rebuildable. Nothing is summarized away.
+- **Full fidelity of what each tool exposes.** Raw JSONL is the source of truth;
+  the index is derived and rebuildable. nabu preserves upstream payloads before
+  best-effort normalization.
 - **Cross-agent.** One normalized event model over Codex, Claude Code, and
   OpenCode.
 - **Agent-first.** A read-only MCP server (`search_history`, `get_session`, …) so a

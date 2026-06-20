@@ -2320,17 +2320,8 @@ fn mcp_apply_opencode(
         });
     }
     let before_text = read_text_or_empty(&target_path)?;
-    let before: Value = if before_text.trim().is_empty() {
-        json!({})
-    } else {
-        serde_json::from_str(&before_text)?
-    };
-    let after = match action {
-        McpConfigAction::Install => add_opencode_mcp(before.clone()),
-        McpConfigAction::Uninstall => remove_opencode_mcp(before.clone()),
-    };
-    let changed = before != after;
-    let after_text = serde_json::to_string_pretty(&after)?;
+    let after_text = rewrite_opencode_mcp_text(&before_text, action)?;
+    let changed = before_text != after_text;
     let diff = text_diff(&before_text, &after_text);
 
     if changed && !dry_run {
@@ -2643,9 +2634,14 @@ fn opencode_mcp_entry_installed() -> bool {
     opencode_mcp_config_path()
         .ok()
         .and_then(|path| read_text_or_empty(&path).ok())
-        .and_then(|content| serde_json::from_str::<Value>(&content).ok())
-        .and_then(|config| config.pointer("/mcp/nabu").cloned())
-        .is_some()
+        .map(|content| {
+            serde_json::from_str::<Value>(&content)
+                .ok()
+                .and_then(|config| config.pointer("/mcp/nabu").cloned())
+                .is_some()
+                || opencode_mcp_text_entry_installed(&content)
+        })
+        .unwrap_or(false)
 }
 
 fn codex_mcp_config_path() -> nabu_core::Result<PathBuf> {
@@ -2756,6 +2752,558 @@ fn remove_toml_table(content: &str, table_header: &str) -> String {
     }
     output
 }
+
+fn rewrite_opencode_mcp_text(content: &str, action: McpConfigAction) -> nabu_core::Result<String> {
+    if content.trim().is_empty() {
+        let value = match action {
+            McpConfigAction::Install => add_opencode_mcp(json!({})),
+            McpConfigAction::Uninstall => json!({}),
+        };
+        return Ok(serde_json::to_string_pretty(&value)?);
+    }
+
+    if let Some(rewritten) = rewrite_opencode_mcp_text_preserving_layout(content, action)? {
+        return Ok(rewritten);
+    }
+
+    let before: Value = serde_json::from_str(content)?;
+    let after = match action {
+        McpConfigAction::Install => add_opencode_mcp(before),
+        McpConfigAction::Uninstall => remove_opencode_mcp(before),
+    };
+    Ok(serde_json::to_string_pretty(&after)?)
+}
+
+fn rewrite_opencode_mcp_text_preserving_layout(
+    content: &str,
+    action: McpConfigAction,
+) -> nabu_core::Result<Option<String>> {
+    let Some(root_start) = json_root_object_start(content) else {
+        return Ok(None);
+    };
+    if find_matching_json_delimiter(content, root_start).is_none() {
+        return Ok(None);
+    }
+    let Some(mcp_count) = json_object_property_count(content, root_start, "mcp") else {
+        return Ok(None);
+    };
+    if mcp_count > 1 {
+        return Err(Error::Validation(
+            "OpenCode config has duplicate top-level mcp keys".to_string(),
+        ));
+    }
+
+    match action {
+        McpConfigAction::Install => {
+            if opencode_mcp_text_entry_installed(content) {
+                return Ok(Some(content.to_string()));
+            }
+            let rewritten = if let Some(mcp) = find_json_object_property(content, root_start, "mcp")
+            {
+                if content.as_bytes().get(mcp.value_start).copied() != Some(b'{') {
+                    return Ok(None);
+                }
+                let Some(nabu_count) = json_object_property_count(content, mcp.value_start, "nabu")
+                else {
+                    return Ok(None);
+                };
+                if nabu_count > 1 {
+                    return Err(Error::Validation(
+                        "OpenCode config has duplicate mcp.nabu keys".to_string(),
+                    ));
+                }
+                insert_json_object_property(content, mcp.value_start, OPENCODE_NABU_MCP_PROPERTY)?
+            } else {
+                insert_json_object_property(content, root_start, OPENCODE_MCP_PROPERTY)?
+            };
+            Ok(Some(rewritten))
+        }
+        McpConfigAction::Uninstall => {
+            let Some((mcp, nabu)) = find_opencode_nabu_text_entry(content) else {
+                return Ok(Some(content.to_string()));
+            };
+            let Some(nabu_count) = json_object_property_count(content, mcp.value_start, "nabu")
+            else {
+                return Ok(None);
+            };
+            if nabu_count > 1 {
+                return Err(Error::Validation(
+                    "OpenCode config has duplicate mcp.nabu keys".to_string(),
+                ));
+            }
+            let mut rewritten = remove_json_object_property(content, nabu);
+            if let Some(root_start) = json_root_object_start(&rewritten) {
+                if let Some(mcp) = find_json_object_property(&rewritten, root_start, "mcp") {
+                    if rewritten.as_bytes().get(mcp.value_start).copied() == Some(b'{')
+                        && json_object_is_whitespace_empty(&rewritten, mcp.value_start)
+                    {
+                        rewritten = remove_json_object_property(&rewritten, mcp);
+                    }
+                }
+            }
+            Ok(Some(rewritten))
+        }
+    }
+}
+
+fn opencode_mcp_text_entry_installed(content: &str) -> bool {
+    find_opencode_nabu_text_entry(content).is_some()
+}
+
+fn find_opencode_nabu_text_entry(content: &str) -> Option<(JsonPropertyRange, JsonPropertyRange)> {
+    let root_start = json_root_object_start(content)?;
+    let mcp = find_json_object_property(content, root_start, "mcp")?;
+    if content.as_bytes().get(mcp.value_start).copied() != Some(b'{') {
+        return None;
+    }
+    let nabu = find_json_object_property(content, mcp.value_start, "nabu")?;
+    Some((mcp, nabu))
+}
+
+#[derive(Clone, Copy)]
+struct JsonPropertyRange {
+    property_start: usize,
+    value_start: usize,
+    value_end: usize,
+}
+
+fn json_root_object_start(content: &str) -> Option<usize> {
+    let index = skip_json_ws_and_comments(content, 0);
+    (content.as_bytes().get(index).copied() == Some(b'{')).then_some(index)
+}
+
+fn find_json_object_property(
+    content: &str,
+    object_start: usize,
+    key: &str,
+) -> Option<JsonPropertyRange> {
+    if content.as_bytes().get(object_start).copied() != Some(b'{') {
+        return None;
+    }
+    let object_end = find_matching_json_delimiter(content, object_start)?;
+    let mut index = object_start + 1;
+    while index < object_end {
+        index = skip_json_ws_and_comments(content, index);
+        if index >= object_end || content.as_bytes().get(index).copied() == Some(b'}') {
+            break;
+        }
+        let property_start = index;
+        let (property_key, after_key) = parse_json_string_key(content, index)?;
+        index = skip_json_ws_and_comments(content, after_key);
+        if content.as_bytes().get(index).copied() != Some(b':') {
+            return None;
+        }
+        let value_start = skip_json_ws_and_comments(content, index + 1);
+        let value_end = scan_json_value_end(content, value_start)?;
+        if property_key == key {
+            return Some(JsonPropertyRange {
+                property_start,
+                value_start,
+                value_end,
+            });
+        }
+        index = skip_json_ws_and_comments(content, value_end);
+        if content.as_bytes().get(index).copied() == Some(b',') {
+            index += 1;
+        }
+    }
+    None
+}
+
+fn json_object_property_count(content: &str, object_start: usize, key: &str) -> Option<usize> {
+    if content.as_bytes().get(object_start).copied() != Some(b'{') {
+        return None;
+    }
+    let object_end = find_matching_json_delimiter(content, object_start)?;
+    let mut index = object_start + 1;
+    let mut count = 0usize;
+    while index < object_end {
+        index = skip_json_ws_and_comments(content, index);
+        if index >= object_end || content.as_bytes().get(index).copied() == Some(b'}') {
+            break;
+        }
+        let (property_key, after_key) = parse_json_string_key(content, index)?;
+        index = skip_json_ws_and_comments(content, after_key);
+        if content.as_bytes().get(index).copied() != Some(b':') {
+            return None;
+        }
+        let value_start = skip_json_ws_and_comments(content, index + 1);
+        let value_end = scan_json_value_end(content, value_start)?;
+        if property_key == key {
+            count += 1;
+        }
+        index = skip_json_ws_and_comments(content, value_end);
+        if content.as_bytes().get(index).copied() == Some(b',') {
+            index += 1;
+        }
+    }
+    Some(count)
+}
+
+fn insert_json_object_property(
+    content: &str,
+    object_start: usize,
+    property: &str,
+) -> nabu_core::Result<String> {
+    let Some(object_end) = find_matching_json_delimiter(content, object_start) else {
+        return Err(Error::Validation(
+            "OpenCode config must be a JSON/JSONC object".to_string(),
+        ));
+    };
+    let newline = detect_newline(content);
+    let close_indent = line_indent_before(content, object_end);
+    let property_indent = format!("{close_indent}  ");
+    let property = indent_json_property(property, &property_indent, newline);
+    let mut output = String::with_capacity(content.len() + property.len() + 4);
+
+    if let Some(last_property) = last_json_object_property(content, object_start) {
+        let after_value = skip_json_ws_and_comments(content, last_property.value_end);
+        let has_trailing_comma =
+            after_value < object_end && content.as_bytes().get(after_value).copied() == Some(b',');
+        output.push_str(&content[..last_property.value_end]);
+        if !has_trailing_comma {
+            output.push(',');
+        }
+        output.push_str(content[last_property.value_end..object_end].trim_end());
+    } else {
+        output.push_str(content[..object_end].trim_end());
+    }
+    output.push_str(newline);
+    output.push_str(&property);
+    output.push_str(newline);
+    output.push_str(&close_indent);
+    output.push_str(&content[object_end..]);
+    Ok(output)
+}
+
+fn remove_json_object_property(content: &str, property: JsonPropertyRange) -> String {
+    let bytes = content.as_bytes();
+    let after_inline_ws = skip_inline_ws(content, property.value_end);
+    let has_trailing_comma = bytes.get(after_inline_ws).copied() == Some(b',');
+    let end = removable_property_end(content, property.value_end);
+    let line_start = removable_line_start(content, property.property_start);
+    let start = if has_trailing_comma {
+        line_start
+    } else if let Some(previous_comma) = previous_non_ws_byte(content, property.property_start)
+        .filter(|(_, byte)| *byte == b',')
+        .map(|(index, _)| index)
+    {
+        previous_comma
+    } else {
+        line_start
+    };
+    let mut output = String::with_capacity(content.len().saturating_sub(end - start));
+    output.push_str(&content[..start]);
+    output.push_str(&content[end..]);
+    output
+}
+
+fn last_json_object_property(content: &str, object_start: usize) -> Option<JsonPropertyRange> {
+    if content.as_bytes().get(object_start).copied() != Some(b'{') {
+        return None;
+    }
+    let object_end = find_matching_json_delimiter(content, object_start)?;
+    let mut index = object_start + 1;
+    let mut last = None;
+    while index < object_end {
+        index = skip_json_ws_and_comments(content, index);
+        if index >= object_end || content.as_bytes().get(index).copied() == Some(b'}') {
+            break;
+        }
+        let property_start = index;
+        let (_, after_key) = parse_json_string_key(content, index)?;
+        index = skip_json_ws_and_comments(content, after_key);
+        if content.as_bytes().get(index).copied() != Some(b':') {
+            return None;
+        }
+        let value_start = skip_json_ws_and_comments(content, index + 1);
+        let value_end = scan_json_value_end(content, value_start)?;
+        last = Some(JsonPropertyRange {
+            property_start,
+            value_start,
+            value_end,
+        });
+        index = skip_json_ws_and_comments(content, value_end);
+        if content.as_bytes().get(index).copied() == Some(b',') {
+            index += 1;
+        }
+    }
+    last
+}
+
+fn json_object_is_whitespace_empty(content: &str, object_start: usize) -> bool {
+    find_matching_json_delimiter(content, object_start)
+        .map(|object_end| content[object_start + 1..object_end].trim().is_empty())
+        .unwrap_or(false)
+}
+
+fn skip_json_ws_and_comments(content: &str, mut index: usize) -> usize {
+    let bytes = content.as_bytes();
+    if index == 0 && bytes.starts_with(b"\xEF\xBB\xBF") {
+        index = 3;
+    }
+    loop {
+        while bytes
+            .get(index)
+            .is_some_and(|byte| matches!(byte, b' ' | b'\n' | b'\r' | b'\t'))
+        {
+            index += 1;
+        }
+        if bytes.get(index).copied() == Some(b'/') && bytes.get(index + 1).copied() == Some(b'/') {
+            index += 2;
+            while bytes
+                .get(index)
+                .is_some_and(|byte| !matches!(byte, b'\n' | b'\r'))
+            {
+                index += 1;
+            }
+            continue;
+        }
+        if bytes.get(index).copied() == Some(b'/') && bytes.get(index + 1).copied() == Some(b'*') {
+            index += 2;
+            while index + 1 < bytes.len()
+                && !(bytes[index] == b'*' && bytes.get(index + 1).copied() == Some(b'/'))
+            {
+                index += 1;
+            }
+            index = (index + 2).min(bytes.len());
+            continue;
+        }
+        return index;
+    }
+}
+
+fn skip_inline_ws(content: &str, mut index: usize) -> usize {
+    let bytes = content.as_bytes();
+    while bytes
+        .get(index)
+        .is_some_and(|byte| matches!(byte, b' ' | b'\t'))
+    {
+        index += 1;
+    }
+    index
+}
+
+fn removable_property_end(content: &str, value_end: usize) -> usize {
+    let bytes = content.as_bytes();
+    let mut end = skip_inline_ws(content, value_end);
+    if bytes.get(end).copied() == Some(b',') {
+        end += 1;
+        end = skip_inline_ws(content, end);
+    }
+    if bytes.get(end).copied() == Some(b'/') && bytes.get(end + 1).copied() == Some(b'/') {
+        end += 2;
+        while bytes
+            .get(end)
+            .is_some_and(|byte| !matches!(byte, b'\n' | b'\r'))
+        {
+            end += 1;
+        }
+    } else if bytes.get(end).copied() == Some(b'/') && bytes.get(end + 1).copied() == Some(b'*') {
+        end += 2;
+        while end + 1 < bytes.len() && !(bytes[end] == b'*' && bytes[end + 1] == b'/') {
+            end += 1;
+        }
+        end = (end + 2).min(bytes.len());
+        end = skip_inline_ws(content, end);
+    }
+    if content[end..].starts_with("\r\n") {
+        end + 2
+    } else if content[end..].starts_with('\n') {
+        end + 1
+    } else {
+        end
+    }
+}
+
+fn parse_json_string_key(content: &str, index: usize) -> Option<(String, usize)> {
+    if content.as_bytes().get(index).copied() != Some(b'"') {
+        return None;
+    }
+    let end = skip_json_string(content, index)?;
+    let raw = &content[index + 1..end - 1];
+    if raw.contains('\\') {
+        serde_json::from_str(&content[index..end])
+            .ok()
+            .map(|key| (key, end))
+    } else {
+        Some((raw.to_string(), end))
+    }
+}
+
+fn skip_json_string(content: &str, mut index: usize) -> Option<usize> {
+    let bytes = content.as_bytes();
+    if bytes.get(index).copied() != Some(b'"') {
+        return None;
+    }
+    index += 1;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\\' => index = index.saturating_add(2),
+            b'"' => return Some(index + 1),
+            _ => index += 1,
+        }
+    }
+    None
+}
+
+fn scan_json_value_end(content: &str, index: usize) -> Option<usize> {
+    match content.as_bytes().get(index).copied()? {
+        b'{' | b'[' => find_matching_json_delimiter(content, index).map(|end| end + 1),
+        b'"' => skip_json_string(content, index),
+        _ => {
+            let bytes = content.as_bytes();
+            let mut end = index;
+            while end < bytes.len() && !matches!(bytes[end], b',' | b'}' | b']') {
+                if bytes[end] == b'/'
+                    && matches!(bytes.get(end + 1).copied(), Some(b'/') | Some(b'*'))
+                {
+                    break;
+                }
+                end += 1;
+            }
+            let mut trimmed_end = end;
+            while trimmed_end > index
+                && matches!(bytes[trimmed_end - 1], b' ' | b'\n' | b'\r' | b'\t')
+            {
+                trimmed_end -= 1;
+            }
+            Some(trimmed_end)
+        }
+    }
+}
+
+fn find_matching_json_delimiter(content: &str, open_index: usize) -> Option<usize> {
+    let bytes = content.as_bytes();
+    let mut stack = vec![match bytes.get(open_index).copied()? {
+        b'{' => b'}',
+        b'[' => b']',
+        _ => return None,
+    }];
+    let mut index = open_index + 1;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'"' => index = skip_json_string(content, index)?,
+            b'/' if bytes.get(index + 1).copied() == Some(b'/') => {
+                index += 2;
+                while bytes
+                    .get(index)
+                    .is_some_and(|byte| !matches!(byte, b'\n' | b'\r'))
+                {
+                    index += 1;
+                }
+            }
+            b'/' if bytes.get(index + 1).copied() == Some(b'*') => {
+                index += 2;
+                while index + 1 < bytes.len() && !(bytes[index] == b'*' && bytes[index + 1] == b'/')
+                {
+                    index += 1;
+                }
+                index = (index + 2).min(bytes.len());
+            }
+            b'{' => {
+                stack.push(b'}');
+                index += 1;
+            }
+            b'[' => {
+                stack.push(b']');
+                index += 1;
+            }
+            b'}' | b']' => {
+                if stack.pop()? != bytes[index] {
+                    return None;
+                }
+                if stack.is_empty() {
+                    return Some(index);
+                }
+                index += 1;
+            }
+            _ => index += 1,
+        }
+    }
+    None
+}
+
+fn line_indent_before(content: &str, index: usize) -> String {
+    let line_start = content[..index]
+        .rfind('\n')
+        .map(|offset| offset + 1)
+        .unwrap_or(0);
+    content[line_start..index]
+        .chars()
+        .take_while(|character| matches!(character, ' ' | '\t'))
+        .collect()
+}
+
+fn detect_newline(content: &str) -> &'static str {
+    if content.contains("\r\n") {
+        "\r\n"
+    } else {
+        "\n"
+    }
+}
+
+fn indent_json_property(property: &str, indent: &str, newline: &str) -> String {
+    let mut output = String::new();
+    for (index, line) in property.lines().enumerate() {
+        if index > 0 {
+            output.push_str(newline);
+        }
+        output.push_str(indent);
+        output.push_str(line);
+    }
+    output
+}
+
+fn removable_line_start(content: &str, property_start: usize) -> usize {
+    let line_start = content[..property_start]
+        .rfind('\n')
+        .map(|offset| offset + 1)
+        .unwrap_or(0);
+    if content[line_start..property_start].trim().is_empty() {
+        line_start
+    } else {
+        property_start
+    }
+}
+
+fn previous_non_ws_byte(content: &str, before: usize) -> Option<(usize, u8)> {
+    let bytes = content.as_bytes();
+    let mut index = before;
+    while index > 0 {
+        index -= 1;
+        if !matches!(bytes[index], b' ' | b'\n' | b'\r' | b'\t') {
+            return Some((index, bytes[index]));
+        }
+    }
+    None
+}
+
+const OPENCODE_MCP_PROPERTY: &str = r#""mcp": {
+  "nabu": {
+    "type": "local",
+    "command": [
+      "nabu",
+      "mcp",
+      "serve",
+      "--transport",
+      "stdio"
+    ],
+    "enabled": true
+  }
+}"#;
+
+const OPENCODE_NABU_MCP_PROPERTY: &str = r#""nabu": {
+  "type": "local",
+  "command": [
+    "nabu",
+    "mcp",
+    "serve",
+    "--transport",
+    "stdio"
+  ],
+  "enabled": true
+}"#;
 
 fn add_opencode_mcp(mut config: Value) -> Value {
     ensure_object(&mut config);
@@ -4125,6 +4673,175 @@ mod tests {
             6
         );
         drop(env_guard);
+    }
+
+    #[test]
+    fn opencode_mcp_install_preserves_jsonc_comments_without_reformatting() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let temp = tempdir().unwrap();
+        let harness_home = temp.path().join("harness-home");
+        let opencode_config = temp.path().join("opencode");
+        fs::create_dir_all(&opencode_config).unwrap();
+        init_home(&harness_home).unwrap();
+
+        let opencode_json = opencode_config.join("opencode.json");
+        fs::write(
+            &opencode_json,
+            "{\n  // keep this comment\n  \"theme\": \"dark\"\n}\n",
+        )
+        .unwrap();
+        let env_guard = EnvGuard::set([("OPENCODE_CONFIG_DIR", opencode_config.as_os_str())]);
+
+        let report = mcp_apply_opencode(&harness_home, McpConfigAction::Install, false).unwrap();
+        assert!(report.changed);
+        let after = fs::read_to_string(&opencode_json).unwrap();
+        assert!(after.contains("// keep this comment"));
+        assert!(after.contains("\"theme\": \"dark\""));
+        assert!(after.contains("\"mcp\""));
+        assert!(after.contains("\"nabu\""));
+        assert!(after.contains("\"command\""));
+        assert!(jsonc_to_json_value(&after).pointer("/mcp/nabu").is_some());
+        assert!(opencode_mcp_entry_installed());
+
+        let idempotent =
+            mcp_apply_opencode(&harness_home, McpConfigAction::Install, false).unwrap();
+        assert!(!idempotent.changed);
+        assert_eq!(fs::read_to_string(&opencode_json).unwrap(), after);
+        drop(env_guard);
+    }
+
+    #[test]
+    fn opencode_mcp_install_updates_existing_jsonc_mcp_without_reformatting() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let temp = tempdir().unwrap();
+        let harness_home = temp.path().join("harness-home");
+        let opencode_config = temp.path().join("opencode");
+        fs::create_dir_all(&opencode_config).unwrap();
+        init_home(&harness_home).unwrap();
+
+        let opencode_json = opencode_config.join("opencode.json");
+        fs::write(
+            &opencode_json,
+            "{\n  // keep this comment\n  \"theme\": \"dark\",\n  \"mcp\": {\n    // keep other server\n    \"other\": { \"type\": \"local\", \"command\": [\"other\"] }\n  }\n}\n",
+        )
+        .unwrap();
+        let env_guard = EnvGuard::set([("OPENCODE_CONFIG_DIR", opencode_config.as_os_str())]);
+
+        let report = mcp_apply_opencode(&harness_home, McpConfigAction::Install, false).unwrap();
+        assert!(report.changed);
+        let after_install = fs::read_to_string(&opencode_json).unwrap();
+        assert!(after_install.contains("// keep this comment"));
+        assert!(after_install.contains("// keep other server"));
+        assert!(after_install.contains("\"other\": { \"type\": \"local\""));
+        assert!(after_install.contains("\"nabu\""));
+        assert!(jsonc_to_json_value(&after_install)
+            .pointer("/mcp/nabu")
+            .is_some());
+        assert!(opencode_mcp_entry_installed());
+
+        let uninstall =
+            mcp_apply_opencode(&harness_home, McpConfigAction::Uninstall, false).unwrap();
+        assert!(uninstall.changed);
+        let after_uninstall = fs::read_to_string(&opencode_json).unwrap();
+        assert!(after_uninstall.contains("// keep this comment"));
+        assert!(after_uninstall.contains("// keep other server"));
+        assert!(after_uninstall.contains("\"other\": { \"type\": \"local\""));
+        assert!(!after_uninstall.contains("\"nabu\""));
+        assert!(jsonc_to_json_value(&after_uninstall)
+            .pointer("/mcp/nabu")
+            .is_none());
+        assert!(!opencode_mcp_entry_installed());
+        drop(env_guard);
+    }
+
+    #[test]
+    fn opencode_mcp_install_preserves_same_line_comments_crlf_and_bom() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let temp = tempdir().unwrap();
+        let harness_home = temp.path().join("harness-home");
+        let opencode_config = temp.path().join("opencode");
+        fs::create_dir_all(&opencode_config).unwrap();
+        init_home(&harness_home).unwrap();
+
+        let opencode_json = opencode_config.join("opencode.json");
+        let before = "\u{feff}{\r\n  \"theme\": \"dark\",\r\n  \"mcp\": {\r\n    \"other\": { \"type\": \"local\", \"command\": [\"other\"] } // keep same-line comment\r\n  }\r\n}\r\n";
+        fs::write(&opencode_json, before).unwrap();
+        let env_guard = EnvGuard::set([("OPENCODE_CONFIG_DIR", opencode_config.as_os_str())]);
+
+        let report = mcp_apply_opencode(&harness_home, McpConfigAction::Install, false).unwrap();
+        assert!(report.changed);
+        let after = fs::read_to_string(&opencode_json).unwrap();
+        assert!(after.starts_with('\u{feff}'));
+        assert!(after.contains("}, // keep same-line comment"));
+        assert!(!after.replace("\r\n", "").contains('\n'));
+        let parsed = jsonc_to_json_value(&after);
+        assert_eq!(parsed["theme"], "dark");
+        assert!(parsed.pointer("/mcp/other").is_some());
+        assert!(parsed.pointer("/mcp/nabu").is_some());
+        drop(env_guard);
+    }
+
+    #[test]
+    fn opencode_mcp_install_rejects_duplicate_jsonc_mcp_keys_without_rewriting() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let temp = tempdir().unwrap();
+        let harness_home = temp.path().join("harness-home");
+        let opencode_config = temp.path().join("opencode");
+        fs::create_dir_all(&opencode_config).unwrap();
+        init_home(&harness_home).unwrap();
+
+        let opencode_json = opencode_config.join("opencode.json");
+        let before = "{\n  \"mcp\": {},\n  // ambiguous duplicate\n  \"mcp\": {}\n}\n";
+        fs::write(&opencode_json, before).unwrap();
+        let env_guard = EnvGuard::set([("OPENCODE_CONFIG_DIR", opencode_config.as_os_str())]);
+
+        let error = mcp_apply_opencode(&harness_home, McpConfigAction::Install, false).unwrap_err();
+        assert!(matches!(error, Error::Validation(_)));
+        assert_eq!(fs::read_to_string(&opencode_json).unwrap(), before);
+        drop(env_guard);
+    }
+
+    fn jsonc_to_json_value(content: &str) -> Value {
+        let bytes = content.as_bytes();
+        let mut index = if bytes.starts_with(b"\xEF\xBB\xBF") {
+            3
+        } else {
+            0
+        };
+        let mut stripped = String::with_capacity(content.len());
+        while index < bytes.len() {
+            match bytes[index] {
+                b'"' => {
+                    let end = skip_json_string(content, index).expect("valid JSON string");
+                    stripped.push_str(&content[index..end]);
+                    index = end;
+                }
+                b'/' if bytes.get(index + 1).copied() == Some(b'/') => {
+                    index += 2;
+                    while bytes
+                        .get(index)
+                        .is_some_and(|byte| !matches!(byte, b'\n' | b'\r'))
+                    {
+                        index += 1;
+                    }
+                }
+                b'/' if bytes.get(index + 1).copied() == Some(b'*') => {
+                    index += 2;
+                    while index + 1 < bytes.len()
+                        && !(bytes[index] == b'*' && bytes[index + 1] == b'/')
+                    {
+                        index += 1;
+                    }
+                    index = (index + 2).min(bytes.len());
+                }
+                _ => {
+                    let character = content[index..].chars().next().expect("valid UTF-8");
+                    stripped.push(character);
+                    index += character.len_utf8();
+                }
+            }
+        }
+        serde_json::from_str(&stripped).expect("rewritten JSONC parses after comment stripping")
     }
 
     #[cfg(unix)]

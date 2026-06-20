@@ -2480,7 +2480,7 @@ fn platform_physical_core_count() -> Option<usize> {
     let mut size = std::mem::size_of::<libc::c_int>();
     let status = unsafe {
         libc::sysctlbyname(
-            b"hw.physicalcpu\0".as_ptr().cast(),
+            c"hw.physicalcpu".as_ptr(),
             (&mut value as *mut libc::c_int).cast(),
             &mut size,
             std::ptr::null_mut(),
@@ -4823,22 +4823,63 @@ fn hydrate_search_result_payloads(results: &mut [SearchResult]) -> Result<()> {
 }
 
 fn rewrite_raw_file_after(path: &Path, before: &str) -> Result<bool> {
-    let content = fs::read_to_string(path).map_err(|source| Error::Io {
+    let input = File::open(path).map_err(|source| Error::Io {
         path: path.to_path_buf(),
         source,
     })?;
-    let mut kept = Vec::new();
-    for line in content.lines() {
-        if line.trim().is_empty() {
-            continue;
-        }
-        let envelope: EventEnvelope = serde_json::from_str(line)?;
-        if envelope.captured_at.as_str() >= before {
-            kept.push(line.to_string());
-        }
-    }
+    let tmp_path = path.with_extension("jsonl.tmp");
+    let rewrite_result = (|| -> Result<usize> {
+        let mut reader = BufReader::new(input);
+        let mut output = File::create(&tmp_path).map_err(|source| Error::Io {
+            path: tmp_path.clone(),
+            source,
+        })?;
+        let mut line = String::new();
+        let mut kept = 0usize;
 
-    if kept.is_empty() {
+        loop {
+            line.clear();
+            let bytes = reader.read_line(&mut line).map_err(|source| Error::Io {
+                path: path.to_path_buf(),
+                source,
+            })?;
+            if bytes == 0 {
+                break;
+            }
+            if line.trim().is_empty() {
+                continue;
+            }
+            let envelope: EventEnvelope = serde_json::from_str(line.trim_end())?;
+            if envelope.captured_at.as_str() >= before {
+                output
+                    .write_all(line.trim_end().as_bytes())
+                    .map_err(|source| Error::Io {
+                        path: tmp_path.clone(),
+                        source,
+                    })?;
+                output.write_all(b"\n").map_err(|source| Error::Io {
+                    path: tmp_path.clone(),
+                    source,
+                })?;
+                kept += 1;
+            }
+        }
+        output.flush().map_err(|source| Error::Io {
+            path: tmp_path.clone(),
+            source,
+        })?;
+        Ok(kept)
+    })();
+    let kept = match rewrite_result {
+        Ok(kept) => kept,
+        Err(error) => {
+            let _ = fs::remove_file(&tmp_path);
+            return Err(error);
+        }
+    };
+
+    if kept == 0 {
+        let _ = fs::remove_file(&tmp_path);
         fs::remove_file(path).map_err(|source| Error::Io {
             path: path.to_path_buf(),
             source,
@@ -4847,9 +4888,7 @@ fn rewrite_raw_file_after(path: &Path, before: &str) -> Result<bool> {
         return Ok(true);
     }
 
-    let mut rewritten = kept.join("\n");
-    rewritten.push('\n');
-    fs::write(path, rewritten).map_err(|source| Error::Io {
+    fs::rename(&tmp_path, path).map_err(|source| Error::Io {
         path: path.to_path_buf(),
         source,
     })?;
@@ -4998,36 +5037,56 @@ fn redact_json_value(value: Value) -> Value {
 }
 
 fn redact_text(text: &str) -> String {
-    let rules = [
-        (
-            r"(?s)-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?-----END [A-Z0-9 ]*PRIVATE KEY-----",
-            "[REDACTED:PRIVATE_KEY]",
-        ),
-        (
-            r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{16,}",
-            "Bearer [REDACTED:BEARER_TOKEN]",
-        ),
-        (r"\bsk-[A-Za-z0-9_-]{20,}\b", "[REDACTED:API_KEY]"),
-        (r"\bgh[pousr]_[A-Za-z0-9_]{20,}\b", "[REDACTED:API_KEY]"),
-        (r"\bgithub_pat_[A-Za-z0-9_]{20,}\b", "[REDACTED:API_KEY]"),
-        (r"\bxox[baprs]-[A-Za-z0-9-]{20,}\b", "[REDACTED:API_KEY]"),
-        (r"\bAKIA[0-9A-Z]{16}\b", "[REDACTED:API_KEY]"),
-    ];
     let mut redacted = text.to_string();
-    for (pattern, replacement) in rules {
-        redacted = Regex::new(pattern)
-            .expect("valid redaction regex")
-            .replace_all(&redacted, replacement)
-            .into_owned();
+    for (regex, replacement) in redaction_regex_rules() {
+        redacted = regex.replace_all(&redacted, *replacement).into_owned();
     }
-    Regex::new(
-        r##"(?im)^([A-Z0-9_]*(API|TOKEN|SECRET|KEY|PASSWORD)[A-Z0-9_]*\s*=\s*)(['"]?)[^\s'"#]{8,}(['"]?)"##,
-    )
-    .expect("valid env redaction regex")
-    .replace_all(&redacted, |captures: &Captures<'_>| {
-        format!("{}[REDACTED:ENV_VALUE]", &captures[1])
+    env_assignment_redaction_regex()
+        .replace_all(&redacted, |captures: &Captures<'_>| {
+            format!("{}[REDACTED:ENV_VALUE]", &captures[1])
+        })
+        .into_owned()
+}
+
+fn redaction_regex_rules() -> &'static [(Regex, &'static str)] {
+    static RULES: OnceLock<Vec<(Regex, &'static str)>> = OnceLock::new();
+    RULES
+        .get_or_init(|| {
+            [
+                (
+                    r"(?s)-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?-----END [A-Z0-9 ]*PRIVATE KEY-----",
+                    "[REDACTED:PRIVATE_KEY]",
+                ),
+                (
+                    r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{16,}",
+                    "Bearer [REDACTED:BEARER_TOKEN]",
+                ),
+                (r"\bsk-[A-Za-z0-9_-]{20,}\b", "[REDACTED:API_KEY]"),
+                (r"\bgh[pousr]_[A-Za-z0-9_]{20,}\b", "[REDACTED:API_KEY]"),
+                (r"\bgithub_pat_[A-Za-z0-9_]{20,}\b", "[REDACTED:API_KEY]"),
+                (r"\bxox[baprs]-[A-Za-z0-9-]{20,}\b", "[REDACTED:API_KEY]"),
+                (r"\bAKIA[0-9A-Z]{16}\b", "[REDACTED:API_KEY]"),
+            ]
+            .into_iter()
+            .map(|(pattern, replacement)| {
+                (
+                    Regex::new(pattern).expect("valid redaction regex"),
+                    replacement,
+                )
+            })
+            .collect()
+        })
+        .as_slice()
+}
+
+fn env_assignment_redaction_regex() -> &'static Regex {
+    static REGEX: OnceLock<Regex> = OnceLock::new();
+    REGEX.get_or_init(|| {
+        Regex::new(
+            r##"(?im)^([A-Z0-9_]*(API|TOKEN|SECRET|KEY|PASSWORD)[A-Z0-9_]*\s*=\s*)(['"]?)[^\s'"#]{8,}(['"]?)"##,
+        )
+        .expect("valid env redaction regex")
     })
-    .into_owned()
 }
 
 fn is_sensitive_key(key: &str) -> bool {
@@ -5890,13 +5949,17 @@ fn parse_codex_stream_jsonl(source_path: &Path) -> Result<ParsedBackfillSource> 
 }
 
 fn parse_codex_stream_json(source_path: &Path) -> Result<ParsedBackfillSource> {
-    let content = fs::read_to_string(source_path).map_err(|source| Error::Io {
+    let file = File::open(source_path).map_err(|source| Error::Io {
         path: source_path.to_path_buf(),
         source,
     })?;
-    let payload: Value = match serde_json::from_str(&content) {
+    let payload: Value = match serde_json::from_reader(BufReader::new(file)) {
         Ok(payload) => payload,
         Err(error) => {
+            let content = fs::read_to_string(source_path).map_err(|source| Error::Io {
+                path: source_path.to_path_buf(),
+                source,
+            })?;
             let event = envelope_from_codex_stream_payload(
                 source_path,
                 0,
@@ -7632,7 +7695,8 @@ pub fn set_opencode_server_url(home: &Path, url: Option<&str>) -> Result<()> {
         path: path.clone(),
         source,
     })?;
-    let updated = rewrite_opencode_server_url(&content, url);
+    let validated_url = url.map(validate_opencode_server_url).transpose()?;
+    let updated = rewrite_opencode_server_url(&content, validated_url);
     if updated == content {
         return Ok(());
     }
@@ -7654,7 +7718,7 @@ pub fn set_opencode_server_url(home: &Path, url: Option<&str>) -> Result<()> {
 /// active (uncommented) `server_url` line when `None`; all other content is
 /// preserved verbatim.
 fn rewrite_opencode_server_url(content: &str, url: Option<&str>) -> String {
-    let new_line = url.map(|value| format!("server_url = \"{value}\""));
+    let new_line = url.map(|value| format!("server_url = {}", toml_basic_string(value)));
     let mut out: Vec<String> = Vec::new();
     let mut in_opencode = false;
     let mut handled = false;
@@ -7726,6 +7790,74 @@ fn rewrite_opencode_server_url(content: &str, url: Option<&str>) -> String {
         result.push('\n');
     }
     result
+}
+
+fn validate_opencode_server_url(url: &str) -> Result<&str> {
+    let value = url.trim();
+    if value.is_empty() {
+        return Err(Error::Validation(
+            "OpenCode server URL must not be empty".to_string(),
+        ));
+    }
+    if value != url {
+        return Err(Error::Validation(
+            "OpenCode server URL must not include leading or trailing whitespace".to_string(),
+        ));
+    }
+    if value
+        .chars()
+        .any(|character| character.is_control() || character.is_whitespace())
+    {
+        return Err(Error::Validation(
+            "OpenCode server URL must not contain whitespace or control characters".to_string(),
+        ));
+    }
+    if value.contains('"') || value.contains('\\') {
+        return Err(Error::Validation(
+            "OpenCode server URL must not contain quotes or backslashes".to_string(),
+        ));
+    }
+    let Some(rest) = value.strip_prefix("http://") else {
+        return Err(Error::Validation(
+            "OpenCode server URL must use http:// for local reconciliation".to_string(),
+        ));
+    };
+    let authority = rest.split('/').next().unwrap_or("");
+    if authority.is_empty() {
+        return Err(Error::Validation(
+            "OpenCode server URL host must not be empty".to_string(),
+        ));
+    }
+    if let Some((host, port)) = authority.rsplit_once(':') {
+        if host.is_empty() || port.is_empty() || port.parse::<u16>().is_err() {
+            return Err(Error::Validation(
+                "OpenCode server URL port must be a valid TCP port".to_string(),
+            ));
+        }
+    }
+    Ok(value)
+}
+
+fn toml_basic_string(value: &str) -> String {
+    let mut output = String::with_capacity(value.len() + 2);
+    output.push('"');
+    for character in value.chars() {
+        match character {
+            '\u{08}' => output.push_str("\\b"),
+            '\t' => output.push_str("\\t"),
+            '\n' => output.push_str("\\n"),
+            '\u{0c}' => output.push_str("\\f"),
+            '\r' => output.push_str("\\r"),
+            '"' => output.push_str("\\\""),
+            '\\' => output.push_str("\\\\"),
+            character if character.is_control() => {
+                output.push_str(&format!("\\u{:04X}", character as u32));
+            }
+            character => output.push(character),
+        }
+    }
+    output.push('"');
+    output
 }
 
 fn initialize_database(path: &Path) -> Result<()> {
@@ -7800,10 +7932,24 @@ fn register_semantic_extension_if_enabled() {
     {
         static SQLITE_VEC_REGISTER: std::sync::Once = std::sync::Once::new();
         SQLITE_VEC_REGISTER.call_once(|| unsafe {
-            rusqlite::ffi::sqlite3_auto_extension(Some(std::mem::transmute(
-                sqlite_vec::sqlite3_vec_init as *const (),
-            )));
+            rusqlite::ffi::sqlite3_auto_extension(Some(sqlite_vec_auto_extension()));
         });
+    }
+}
+
+#[cfg(feature = "semantic")]
+type SqliteAutoExtensionFn = unsafe extern "C" fn(
+    *mut rusqlite::ffi::sqlite3,
+    *mut *mut std::os::raw::c_char,
+    *const rusqlite::ffi::sqlite3_api_routines,
+) -> std::os::raw::c_int;
+
+#[cfg(feature = "semantic")]
+fn sqlite_vec_auto_extension() -> SqliteAutoExtensionFn {
+    unsafe {
+        std::mem::transmute::<*const (), SqliteAutoExtensionFn>(
+            sqlite_vec::sqlite3_vec_init as *const (),
+        )
     }
 }
 
@@ -9145,7 +9291,7 @@ fn vector_to_blob(vector: &[f32]) -> Result<Vec<u8>> {
             SEMANTIC_VECTOR_DIMENSIONS
         )));
     }
-    let mut blob = Vec::with_capacity(vector.len() * std::mem::size_of::<f32>());
+    let mut blob = Vec::with_capacity(std::mem::size_of_val(vector));
     for value in vector {
         blob.extend_from_slice(&value.to_le_bytes());
     }
@@ -10078,6 +10224,7 @@ fn chmod(_path: &Path, _mode: u32) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
     use serde_json::json;
     use std::fs;
     use tempfile::tempdir;
@@ -10230,6 +10377,52 @@ mod tests {
         assert_eq!(first, second);
         assert_ne!(first, third);
         assert!(first.starts_with("sha256:"));
+    }
+
+    proptest! {
+        #[test]
+        fn dedupe_key_property_ignores_observation_metadata(
+            prompt in "[ -~]{1,256}",
+            first_second in 0u8..60,
+            second_second in 0u8..60,
+            route in "(hook|backfill|event_stream)"
+        ) {
+            let payload_a = json!({
+                "hook_event_name": "UserPromptSubmit",
+                "captured_at": format!("2026-06-17T12:00:{first_second:02}Z"),
+                "source": route,
+                "session_id": "volatile-a",
+                "cwd": "/tmp/a",
+                "prompt": prompt
+            });
+            let payload_b = json!({
+                "hook_event_name": "UserPromptSubmit",
+                "captured_at": format!("2026-06-17T12:01:{second_second:02}Z"),
+                "source": "different-route",
+                "session_id": "volatile-b",
+                "cwd": "/tmp/b",
+                "prompt": prompt
+            });
+
+            let first = dedupe_key(DedupeParts {
+                tool: Tool::Codex,
+                session_id: "stable-session",
+                canonical_type: CanonicalType::UserMessage,
+                source_event_id: None,
+                sequence: None,
+                payload: &payload_a,
+            }).unwrap();
+            let second = dedupe_key(DedupeParts {
+                tool: Tool::Codex,
+                session_id: "stable-session",
+                canonical_type: CanonicalType::UserMessage,
+                source_event_id: None,
+                sequence: None,
+                payload: &payload_b,
+            }).unwrap();
+
+            prop_assert_eq!(first, second);
+        }
     }
 
     #[test]
@@ -10495,9 +10688,7 @@ mod tests {
     #[test]
     fn semantic_feature_loads_sqlite_vec_with_bundled_rusqlite() {
         unsafe {
-            rusqlite::ffi::sqlite3_auto_extension(Some(std::mem::transmute(
-                sqlite_vec::sqlite3_vec_init as *const (),
-            )));
+            rusqlite::ffi::sqlite3_auto_extension(Some(sqlite_vec_auto_extension()));
         }
 
         let conn = Connection::open_in_memory().unwrap();
@@ -13545,6 +13736,28 @@ mod tests {
                 .as_deref(),
             Some("http://127.0.0.1:4096")
         );
+    }
+
+    #[test]
+    fn set_opencode_server_url_rejects_invalid_values_without_rewriting_config() {
+        let temp = tempdir().unwrap();
+        let home = temp.path().join("home");
+        init_home(&home).unwrap();
+        let config = home.join("config.toml");
+        let before = fs::read_to_string(&config).unwrap();
+
+        for invalid in [
+            "https://127.0.0.1:4096",
+            "http://",
+            "http://127.0.0.1:not-a-port",
+            "http://127.0.0.1:4096\nserver_url = \"http://evil\"",
+            "http://127.0.0.1:4096\\broken",
+            " http://127.0.0.1:4096",
+        ] {
+            let error = set_opencode_server_url(&home, Some(invalid)).unwrap_err();
+            assert!(matches!(error, Error::Validation(_)), "{invalid}: {error}");
+            assert_eq!(fs::read_to_string(&config).unwrap(), before);
+        }
     }
 
     #[test]

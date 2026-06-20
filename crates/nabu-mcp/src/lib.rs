@@ -496,7 +496,7 @@ fn tool_get_session(home: &Path, arguments: &Value) -> Result<Value, ToolError> 
     let before = clamped_usize(arguments, "before", 5, 0, 500)?;
     let after = clamped_usize(arguments, "after", 5, 0, 500)?;
     let redact = optional_bool(arguments, "redact", false);
-    Ok(serde_json::to_value(get_session_page(
+    let value = serde_json::to_value(get_session_page(
         home,
         tool,
         session_id,
@@ -511,7 +511,8 @@ fn tool_get_session(home: &Path, arguments: &Value) -> Result<Value, ToolError> 
             redact,
             corroborate: optional_bool(arguments, "corroborate", false),
         },
-    )?)?)
+    )?)?;
+    Ok(fit_session_response(value))
 }
 
 fn tool_export_session(home: &Path, arguments: &Value) -> Result<Value, ToolError> {
@@ -538,7 +539,7 @@ fn tool_export_session(home: &Path, arguments: &Value) -> Result<Value, ToolErro
         "raw_file": nabu_core::canonical_raw_path(home, tool, session_id),
         "redacted": redact
     });
-    Ok(enforce_size_bound(structured, format == "jsonl"))
+    Ok(fit_export_response(structured, format == "jsonl"))
 }
 
 fn tool_get_event(home: &Path, arguments: &Value) -> Result<Value, ToolError> {
@@ -547,7 +548,7 @@ fn tool_get_event(home: &Path, arguments: &Value) -> Result<Value, ToolError> {
     let raw_line = optional_i64_min(arguments, "raw_line", 1)?;
     let raw_offset = optional_i64_min(arguments, "raw_offset", 0)?;
     let redact = optional_bool(arguments, "redact", false);
-    Ok(serde_json::to_value(get_event_by_pointer_with_options(
+    let value = serde_json::to_value(get_event_by_pointer_with_options(
         home,
         tool,
         session_id,
@@ -557,7 +558,8 @@ fn tool_get_event(home: &Path, arguments: &Value) -> Result<Value, ToolError> {
             redact,
             corroborate: optional_bool(arguments, "corroborate", false),
         },
-    )?)?)
+    )?)?;
+    Ok(fit_event_response(value))
 }
 
 fn tool_history_doctor(home: &Path, arguments: &Value) -> Result<Value, ToolError> {
@@ -1094,7 +1096,7 @@ fn tool_schema(name: &str) -> Value {
             "type": "object",
             "properties": {
                 "tool": { "type": "string", "enum": ["codex", "claude", "opencode", "all"], "default": "all" },
-                "deep": { "type": "boolean", "default": false, "description": "Runs full SQLite integrity_check. Over MCP this is refused when harness.db exceeds NABU_MCP_DEEP_DOCTOR_MAX_BYTES (default 500 MiB; 0 disables the guard)." }
+                "deep": { "type": "boolean", "default": false, "description": "Runs full SQLite integrity_check. Over MCP this is refused when the index database exceeds NABU_MCP_DEEP_DOCTOR_MAX_BYTES (default 500 MiB; 0 disables the guard)." }
             },
             "additionalProperties": false
         }),
@@ -1212,6 +1214,222 @@ fn enforce_size_bound(value: Value, allow_jsonl: bool) -> Value {
     })
 }
 
+fn serialized_len(value: &Value) -> Option<usize> {
+    serde_json::to_vec(value)
+        .ok()
+        .map(|serialized| serialized.len())
+}
+
+fn fits_mcp_limit(value: &Value) -> bool {
+    serialized_len(value)
+        .map(|len| len <= MAX_MCP_BYTES)
+        .unwrap_or(true)
+}
+
+fn value_fits_budget(budget: &ResponseBudget, value: &Value, separator_bytes: usize) -> bool {
+    let mut trial = budget.clone();
+    trial.try_reserve_value(value, separator_bytes)
+}
+
+fn fit_session_response(mut value: Value) -> Value {
+    let Some(original_size) = serialized_len(&value) else {
+        return value;
+    };
+    if original_size <= MAX_MCP_BYTES {
+        return value;
+    }
+
+    let Some(events) = value.get("events").and_then(Value::as_array).cloned() else {
+        return enforce_size_bound(value, false);
+    };
+    value["events"] = json!([]);
+    value["truncated"] = json!(true);
+    value["mcp_truncated"] = json!(true);
+    value["mcp_original_size_bytes"] = json!(original_size);
+    value["message"] = json!(
+        "MCP response exceeded 256 KiB. Returned the leading events that fit; continue with next_after_raw_line."
+    );
+
+    let Some(mut budget) = ResponseBudget::from_base(&value) else {
+        return enforce_size_bound(value, false);
+    };
+    let mut kept = Vec::new();
+    let mut last_raw_line = None;
+    for event in events {
+        let separator = usize::from(!kept.is_empty());
+        let event = if value_fits_budget(&budget, &event, separator) {
+            event
+        } else if kept.is_empty() {
+            match fit_value_string_field_to_budget(event, "text", &budget, separator) {
+                Some(fitted) => fitted,
+                None => break,
+            }
+        } else {
+            break;
+        };
+        if !budget.try_reserve_value(&event, separator) {
+            break;
+        }
+        last_raw_line = event.get("raw_line").and_then(Value::as_i64);
+        kept.push(event);
+    }
+
+    let returned = kept.len();
+    if let Some(last_raw_line) = last_raw_line {
+        value["next_after_raw_line"] = json!(last_raw_line);
+        value["continuation"] = json!({ "next_after_raw_line": last_raw_line });
+    }
+    value["events"] = Value::Array(kept);
+    value["returned"] = json!(returned);
+    trim_array_response_to_limit(&mut value, "events");
+    value
+}
+
+fn fit_event_response(mut value: Value) -> Value {
+    let Some(original_size) = serialized_len(&value) else {
+        return value;
+    };
+    if original_size <= MAX_MCP_BYTES {
+        return value;
+    }
+
+    value["mcp_truncated"] = json!(true);
+    value["mcp_original_size_bytes"] = json!(original_size);
+    value["message"] =
+        json!("MCP event exceeded 256 KiB. Preserved the raw citation and truncated large fields.");
+    if let Some(envelope) = value.get_mut("envelope").and_then(Value::as_object_mut) {
+        if envelope.contains_key("payload") {
+            envelope.insert(
+                "payload".to_string(),
+                json!({
+                    "truncated": true,
+                    "message": "Payload omitted because this single event exceeds the MCP response cap. Use raw_file/raw_line or export_session format=jsonl for the exact envelope."
+                }),
+            );
+        }
+    }
+    if fits_mcp_limit(&value) {
+        return value;
+    }
+
+    fit_value_string_field_to_limit(value, "searchable_text")
+}
+
+fn fit_export_response(value: Value, allow_jsonl: bool) -> Value {
+    if allow_jsonl || fits_mcp_limit(&value) {
+        return value;
+    }
+    fit_value_string_field_to_limit(value, "content")
+}
+
+fn fit_value_string_field_to_limit(mut value: Value, field: &str) -> Value {
+    let Some(original_size) = serialized_len(&value) else {
+        return value;
+    };
+    value["mcp_truncated"] = json!(true);
+    if value.get("mcp_original_size_bytes").is_none() {
+        value["mcp_original_size_bytes"] = json!(original_size);
+    }
+    if value.get("message").is_none() {
+        value["message"] = json!(
+            "MCP response exceeded 256 KiB. The large string field was truncated to a prefix."
+        );
+    }
+
+    let Some(original) = value.get(field).and_then(Value::as_str).map(str::to_owned) else {
+        return enforce_size_bound(value, false);
+    };
+    value[format!("{field}_original_bytes")] = json!(original.len());
+    value = truncate_string_field_until_fit(value.clone(), field, &original)
+        .unwrap_or_else(|| enforce_size_bound(value, false));
+    value
+}
+
+fn fit_value_string_field_to_budget(
+    mut value: Value,
+    field: &str,
+    budget: &ResponseBudget,
+    separator_bytes: usize,
+) -> Option<Value> {
+    let original = value.get(field)?.as_str()?.to_owned();
+    value[format!("{field}_truncated")] = json!(true);
+    value[format!("{field}_original_bytes")] = json!(original.len());
+    truncate_string_field_to_budget(value, field, &original, budget, separator_bytes)
+}
+
+fn truncate_string_field_until_fit(mut value: Value, field: &str, original: &str) -> Option<Value> {
+    let mut low = 0usize;
+    let mut high = original.len().min(MAX_MCP_BYTES);
+    let mut best = None;
+    while low <= high {
+        let mid = (low + high) / 2;
+        let mut candidate = value.clone();
+        candidate[field] = json!(truncate_utf8_prefix(original, mid));
+        candidate[format!("{field}_truncated_bytes")] = json!(original.len().saturating_sub(mid));
+        if fits_mcp_limit(&candidate) {
+            best = Some(candidate);
+            low = mid.saturating_add(1);
+        } else if mid == 0 {
+            break;
+        } else {
+            high = mid - 1;
+        }
+    }
+    if best.is_none() {
+        value[field] = json!("");
+        value[format!("{field}_truncated_bytes")] = json!(original.len());
+        if fits_mcp_limit(&value) {
+            best = Some(value);
+        }
+    }
+    best
+}
+
+fn truncate_string_field_to_budget(
+    mut value: Value,
+    field: &str,
+    original: &str,
+    budget: &ResponseBudget,
+    separator_bytes: usize,
+) -> Option<Value> {
+    let mut low = 0usize;
+    let mut high = original.len().min(MAX_MCP_BYTES);
+    let mut best = None;
+    while low <= high {
+        let mid = (low + high) / 2;
+        let mut candidate = value.clone();
+        candidate[field] = json!(truncate_utf8_prefix(original, mid));
+        candidate[format!("{field}_truncated_bytes")] = json!(original.len().saturating_sub(mid));
+        if value_fits_budget(budget, &candidate, separator_bytes) {
+            best = Some(candidate);
+            low = mid.saturating_add(1);
+        } else if mid == 0 {
+            break;
+        } else {
+            high = mid - 1;
+        }
+    }
+    if best.is_none() {
+        value[field] = json!("");
+        value[format!("{field}_truncated_bytes")] = json!(original.len());
+        if value_fits_budget(budget, &value, separator_bytes) {
+            best = Some(value);
+        }
+    }
+    best
+}
+
+fn truncate_utf8_prefix(value: &str, max_bytes: usize) -> String {
+    if value.len() <= max_bytes {
+        return value.to_string();
+    }
+    let mut end = max_bytes.min(value.len());
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    value[..end].to_string()
+}
+
 fn fit_search_response(mut value: Value) -> Value {
     let Ok(serialized) = serde_json::to_vec(&value) else {
         return value;
@@ -1270,6 +1488,33 @@ fn trim_search_response_to_limit(value: &mut Value, offset: usize) {
         let returned = results.len();
         value["returned"] = json!(returned);
         value["continuation"] = json!({ "next_offset": offset.saturating_add(returned) });
+    }
+}
+
+fn trim_array_response_to_limit(value: &mut Value, array_field: &str) {
+    while serde_json::to_vec(value)
+        .map(|serialized| serialized.len() > MAX_MCP_BYTES)
+        .unwrap_or(false)
+    {
+        let (returned, last_raw_line) = {
+            let Some(items) = value.get_mut(array_field).and_then(Value::as_array_mut) else {
+                break;
+            };
+            if items.pop().is_none() {
+                break;
+            }
+            let returned = items.len();
+            let last_raw_line = items
+                .last()
+                .and_then(|event| event.get("raw_line"))
+                .and_then(Value::as_i64);
+            (returned, last_raw_line)
+        };
+        value["returned"] = json!(returned);
+        if let Some(last_raw_line) = last_raw_line {
+            value["next_after_raw_line"] = json!(last_raw_line);
+            value["continuation"] = json!({ "next_after_raw_line": last_raw_line });
+        }
     }
 }
 

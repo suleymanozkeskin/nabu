@@ -435,6 +435,162 @@ fn search_history_oversize_response_returns_truncated_prefix_with_continuation()
 }
 
 #[test]
+fn get_session_oversize_response_keeps_cited_prefix() {
+    let temp = tempdir().unwrap();
+    let home = temp.path().join("home");
+    init_home(&home).unwrap();
+    ingest_hook_event(
+        &home,
+        Tool::Claude,
+        json!({
+            "session_id": "large-session-page",
+            "hook_event_name": "UserPromptSubmit",
+            "message_id": "large-session-page-1",
+            "cwd": "/tmp/nabu-fixture",
+            "project_root": "/tmp/nabu-fixture",
+            "prompt": format!("session cap marker {}", "payload ".repeat(80_000))
+        }),
+    )
+    .unwrap();
+    index_once(&home).unwrap();
+
+    let output = run_mcp(
+        &home,
+        vec![json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "get_session",
+                "arguments": {
+                    "tool": "claude",
+                    "session_id": "large-session-page",
+                    "limit_events": 10
+                }
+            }
+        })],
+    );
+
+    let structured = &output[0]["result"]["structuredContent"];
+    assert_eq!(structured["mcp_truncated"], true);
+    assert_eq!(structured["events"].as_array().unwrap().len(), 1);
+    assert_eq!(structured["events"][0]["raw_line"], 1);
+    assert_eq!(structured["events"][0]["text_truncated"], true);
+    assert!(structured["continuation"]["next_after_raw_line"].is_i64());
+    assert!(serde_json::to_vec(structured).unwrap().len() <= 256 * 1024);
+}
+
+#[test]
+fn get_event_oversize_response_preserves_raw_citation() {
+    let temp = tempdir().unwrap();
+    let home = temp.path().join("home");
+    init_home(&home).unwrap();
+    ingest_hook_event(
+        &home,
+        Tool::Claude,
+        json!({
+            "session_id": "large-event",
+            "hook_event_name": "UserPromptSubmit",
+            "message_id": "large-event-1",
+            "cwd": "/tmp/nabu-fixture",
+            "project_root": "/tmp/nabu-fixture",
+            "prompt": format!("event cap marker {}", "payload ".repeat(80_000))
+        }),
+    )
+    .unwrap();
+    index_once(&home).unwrap();
+
+    let output = run_mcp(
+        &home,
+        vec![json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "get_event",
+                "arguments": {
+                    "tool": "claude",
+                    "session_id": "large-event",
+                    "raw_line": 1
+                }
+            }
+        })],
+    );
+
+    let structured = &output[0]["result"]["structuredContent"];
+    assert_eq!(structured["mcp_truncated"], true);
+    assert_eq!(structured["raw_line"], 1);
+    assert!(structured["raw_file"]
+        .as_str()
+        .unwrap()
+        .contains("large-event"));
+    assert_eq!(structured["envelope"]["payload"]["truncated"], true);
+    assert!(structured["searchable_text"]
+        .as_str()
+        .unwrap()
+        .contains("event cap marker"));
+    assert!(
+        structured["searchable_text_truncated_bytes"]
+            .as_u64()
+            .unwrap()
+            > 0
+    );
+    assert!(
+        structured["mcp_original_size_bytes"].as_u64().unwrap()
+            > serde_json::to_vec(structured).unwrap().len() as u64
+    );
+    assert!(serde_json::to_vec(structured).unwrap().len() <= 256 * 1024);
+}
+
+#[test]
+fn export_session_markdown_oversize_response_keeps_content_prefix() {
+    let temp = tempdir().unwrap();
+    let home = temp.path().join("home");
+    init_home(&home).unwrap();
+    ingest_hook_event(
+        &home,
+        Tool::Claude,
+        json!({
+            "session_id": "large-markdown-export",
+            "hook_event_name": "UserPromptSubmit",
+            "message_id": "large-markdown-export-1",
+            "cwd": "/tmp/nabu-fixture",
+            "project_root": "/tmp/nabu-fixture",
+            "prompt": format!("markdown cap marker {}", "payload ".repeat(80_000))
+        }),
+    )
+    .unwrap();
+    index_once(&home).unwrap();
+
+    let output = run_mcp(
+        &home,
+        vec![json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "export_session",
+                "arguments": {
+                    "tool": "claude",
+                    "session_id": "large-markdown-export",
+                    "format": "markdown"
+                }
+            }
+        })],
+    );
+
+    let structured = &output[0]["result"]["structuredContent"];
+    assert_eq!(structured["mcp_truncated"], true);
+    assert_eq!(structured["format"], "markdown");
+    assert!(structured["content"]
+        .as_str()
+        .unwrap()
+        .contains("markdown cap marker"));
+    assert!(structured["content_truncated_bytes"].as_u64().unwrap() > 0);
+    assert!(serde_json::to_vec(structured).unwrap().len() <= 256 * 1024);
+}
+
+#[test]
 fn numeric_pointer_minimums_are_enforced() {
     let temp = tempdir().unwrap();
     let home = temp.path().join("home");
