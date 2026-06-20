@@ -353,6 +353,12 @@ pub struct SearchResult {
     pub raw_file: String,
     pub raw_line: i64,
     pub raw_offset: Option<i64>,
+    /// Ready-to-run native shell command that extracts this exact JSONL event
+    /// from `raw_file` at `raw_line`, for jumping from the index to ground
+    /// truth. `None` when the line address is missing/invalid. See
+    /// [`native_jsonl_line_command`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub native_command: Option<String>,
     pub compaction_state: String,
     pub payload: Value,
     pub also_at: Vec<i64>,
@@ -366,6 +372,46 @@ pub struct SearchResult {
     pub cwd: Option<String>,
     #[serde(skip)]
     pub project_root: Option<String>,
+}
+
+/// Quote a path for safe use as a single POSIX shell word.
+///
+/// Wraps the value in single quotes and escapes any embedded single quote via
+/// the `'\''` idiom, so the result is a single argument regardless of spaces,
+/// quotes, `$`, or other metacharacters. An empty input becomes `''`.
+fn posix_shell_single_quote(value: &str) -> String {
+    let mut quoted = String::with_capacity(value.len() + 2);
+    quoted.push('\'');
+    for ch in value.chars() {
+        if ch == '\'' {
+            quoted.push_str("'\\''");
+        } else {
+            quoted.push(ch);
+        }
+    }
+    quoted.push('\'');
+    quoted
+}
+
+/// Build a ready-to-run native command that extracts a single JSONL line from
+/// `raw_file` at the 1-based `raw_line` and pretty-prints it with `jq`.
+///
+/// Raw capture files are JSONL (one event per line), so the located event is
+/// addressed by exact line number. `sed -n '<line>p'` selects that one line and
+/// pipes it to `jq .`, which serves "show me this exact event" precisely —
+/// unlike `rg`, which is for re-searching a file rather than jumping to a known
+/// location. The `raw_file` path is shell-quoted so paths containing spaces or
+/// metacharacters remain a single argument.
+///
+/// Returns `None` when `raw_line` is not a valid positive line number.
+pub fn native_jsonl_line_command(raw_file: &str, raw_line: i64) -> Option<String> {
+    if raw_line < 1 {
+        return None;
+    }
+    Some(format!(
+        "sed -n '{raw_line}p' {} | jq .",
+        posix_shell_single_quote(raw_file)
+    ))
 }
 
 #[derive(Debug)]

@@ -764,6 +764,8 @@ fn vector_search_results_for_k(
             let tool_text: String = row.get(1)?;
             let searchable_text = row.get::<_, String>(6).unwrap_or_default();
             let distance = row.get::<_, f64>(5)?;
+            let raw_file: String = row.get(7)?;
+            let raw_line: i64 = row.get(8)?;
             Ok(RankedSearchResult {
                 event_id: row.get(0)?,
                 result: SearchResult {
@@ -778,8 +780,9 @@ fn vector_search_results_for_k(
                         query_terms,
                         max_snippet_chars,
                     ),
-                    raw_file: row.get(7)?,
-                    raw_line: row.get(8)?,
+                    native_command: native_jsonl_line_command(&raw_file, raw_line),
+                    raw_file,
+                    raw_line,
                     raw_offset: row.get(9)?,
                     compaction_state: row.get(10)?,
                     payload: Value::Null,

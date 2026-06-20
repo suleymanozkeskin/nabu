@@ -78,14 +78,14 @@ pub use semantic_api::{Embedder, EmbeddingUnit, EmbeddingUnitKind};
 mod options;
 pub(crate) use options::RankedSearchResult;
 pub use options::{
-    AppendReport, BackfillCoverageSession, BackfillDryRunReport, BackfillImportPreview,
-    BackfillProgress, BackfillReport, CorroboratedRef, Corroboration, CoverageSummary, DoctorCheck,
-    DoctorReport, DoctorStats, EmbeddingDownloadProgress, EmbeddingDownloadReport,
-    EmbeddingIndexProgress, EmbeddingModelDisclosure, EmbeddingModelStatus, EventOptions,
-    EventPointer, FileIngestReport, IndexOptions, IndexReport, InitReport, PurgeAction,
-    PurgeAllArtifact, PurgeAllOptions, PurgeAllReport, PurgeReport, PurgeTier, SearchContinuation,
-    SearchMode, SearchOptions, SearchPage, SearchResult, SessionOptions, SessionPage,
-    SessionSummary, StorageFootprint, StoredEvent,
+    native_jsonl_line_command, AppendReport, BackfillCoverageSession, BackfillDryRunReport,
+    BackfillImportPreview, BackfillProgress, BackfillReport, CorroboratedRef, Corroboration,
+    CoverageSummary, DoctorCheck, DoctorReport, DoctorStats, EmbeddingDownloadProgress,
+    EmbeddingDownloadReport, EmbeddingIndexProgress, EmbeddingModelDisclosure,
+    EmbeddingModelStatus, EventOptions, EventPointer, FileIngestReport, IndexOptions, IndexReport,
+    InitReport, PurgeAction, PurgeAllArtifact, PurgeAllOptions, PurgeAllReport, PurgeReport,
+    PurgeTier, SearchContinuation, SearchMode, SearchOptions, SearchPage, SearchResult,
+    SessionOptions, SessionPage, SessionSummary, StorageFootprint, StoredEvent,
 };
 
 mod purge;
