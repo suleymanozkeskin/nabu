@@ -1910,11 +1910,22 @@ mod tests {
         .unwrap();
 
         assert_eq!(response["jsonrpc"], "2.0");
-        assert!(response["result"]["structuredContent"]["results"]
+        let results = response["result"]["structuredContent"]["results"]
             .as_array()
-            .unwrap()
+            .unwrap();
+        let hit = results
             .iter()
-            .any(|result| result["session_id"] == "fixture-session"));
+            .find(|result| result["session_id"] == "fixture-session")
+            .expect("fixture hit present");
+
+        // Item 14: the native handoff command survives serialization and
+        // response fitting, and is line-addressed to the hit's raw_file/raw_line.
+        let raw_file = hit["raw_file"].as_str().unwrap();
+        let raw_line = hit["raw_line"].as_i64().unwrap();
+        assert_eq!(
+            hit["native_command"].as_str().unwrap(),
+            format!("sed -n '{raw_line}p' '{raw_file}' | jq .")
+        );
     }
 
     #[test]
