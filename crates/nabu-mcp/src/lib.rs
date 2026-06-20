@@ -17,6 +17,7 @@ pub use nabu_core as core;
 const PROTOCOL_VERSION: &str = "2025-03-26";
 const MAX_MCP_BYTES: usize = 256 * 1024;
 const JSON_FIT_SAFETY_BYTES: usize = 2048;
+const DEFAULT_MCP_DEEP_DOCTOR_MAX_BYTES: u64 = 500 * 1024 * 1024;
 
 /// Fallback ceiling on MCP requests handled in parallel when the host CPU count
 /// is unavailable. Coding agents routinely issue several tool calls at once.
@@ -36,6 +37,17 @@ fn max_concurrency() -> usize {
         .map(|n| n.get())
         .unwrap_or(DEFAULT_MAX_CONCURRENCY)
         .clamp(2, 16)
+}
+
+fn mcp_deep_doctor_max_bytes() -> Option<u64> {
+    match std::env::var("NABU_MCP_DEEP_DOCTOR_MAX_BYTES")
+        .ok()
+        .and_then(|raw| raw.parse::<u64>().ok())
+    {
+        Some(0) => None,
+        Some(value) => Some(value),
+        None => Some(DEFAULT_MCP_DEEP_DOCTOR_MAX_BYTES),
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -281,7 +293,7 @@ fn tool_descriptions() -> Value {
         },
         {
             "name": "history_doctor",
-            "description": "Report fast local health by default using an O(1) structural index check and latest-event citations; pass deep=true for full SQLite integrity (scans the whole index) and counts.",
+            "description": "Report fast local health by default using an O(1) structural index check and latest-event citations; pass deep=true for full SQLite integrity (scans the whole index) and counts. Over MCP, deep=true is refused when the index exceeds NABU_MCP_DEEP_DOCTOR_MAX_BYTES (default 500 MiB).",
             "inputSchema": tool_schema("history_doctor")
         },
         {
@@ -497,6 +509,9 @@ fn tool_history_doctor(home: &Path, arguments: &Value) -> Result<Value, ToolErro
             ))
         }
     }
+    if deep {
+        ensure_mcp_deep_doctor_allowed(home)?;
+    }
     Ok(json!({
         "ok": true,
         "data": {
@@ -506,6 +521,43 @@ fn tool_history_doctor(home: &Path, arguments: &Value) -> Result<Value, ToolErro
             "health": doctor_with_options(home, deep)
         }
     }))
+}
+
+fn ensure_mcp_deep_doctor_allowed(home: &Path) -> Result<(), ToolError> {
+    let Some(max_bytes) = mcp_deep_doctor_max_bytes() else {
+        return Ok(());
+    };
+    let db_path = home.join("index").join("harness.db");
+    let db_size_bytes = match std::fs::metadata(&db_path) {
+        Ok(metadata) => metadata.len(),
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(source) => {
+            return Err(Error::Io {
+                path: db_path,
+                source,
+            }
+            .into())
+        }
+    };
+    if db_size_bytes <= max_bytes {
+        return Ok(());
+    }
+
+    Err(ToolError::with_details(
+        "VALIDATION_ERROR",
+        format!(
+            "history_doctor deep=true would run SQLite integrity_check over a {db_size_bytes}-byte index, above the MCP limit of {max_bytes} bytes"
+        ),
+        true,
+        json!({
+            "reason": "deep_doctor_index_too_large",
+            "db_path": db_path.display().to_string(),
+            "db_size_bytes": db_size_bytes,
+            "max_bytes": max_bytes,
+            "suggested_command": "nabu doctor --deep",
+            "override_env": "NABU_MCP_DEEP_DOCTOR_MAX_BYTES"
+        }),
+    ))
 }
 
 fn tool_recall_answer(home: &Path, arguments: &Value) -> Result<Value, ToolError> {
@@ -978,7 +1030,7 @@ fn tool_schema(name: &str) -> Value {
             "type": "object",
             "properties": {
                 "tool": { "type": "string", "enum": ["codex", "claude", "opencode", "all"], "default": "all" },
-                "deep": { "type": "boolean", "default": false }
+                "deep": { "type": "boolean", "default": false, "description": "Runs full SQLite integrity_check. Over MCP this is refused when harness.db exceeds NABU_MCP_DEEP_DOCTOR_MAX_BYTES (default 500 MiB; 0 disables the guard)." }
             },
             "additionalProperties": false
         }),
@@ -1514,6 +1566,54 @@ mod tests {
             .unwrap()
             .iter()
             .any(|result| result["session_id"] == "fixture-session"));
+    }
+
+    #[test]
+    fn history_doctor_deep_rejects_large_index_before_integrity_check() {
+        let temp = tempdir().unwrap();
+        let home = temp.path().join("home");
+        let db_path = home.join("index").join("harness.db");
+        std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+        std::fs::File::create(&db_path)
+            .unwrap()
+            .set_len(DEFAULT_MCP_DEEP_DOCTOR_MAX_BYTES + 1)
+            .unwrap();
+
+        let response = handle_message(
+            &home,
+            &json!({
+                "jsonrpc": "2.0",
+                "id": 4,
+                "method": "tools/call",
+                "params": {
+                    "name": "history_doctor",
+                    "arguments": {
+                        "deep": true
+                    }
+                }
+            })
+            .to_string(),
+        )
+        .unwrap()
+        .unwrap();
+
+        let error = &response["result"]["structuredContent"]["error"];
+        assert_eq!(response["result"]["isError"], true);
+        assert_eq!(error["code"], "VALIDATION_ERROR");
+        assert!(error["message"]
+            .as_str()
+            .unwrap()
+            .contains("integrity_check"));
+        assert_eq!(error["details"]["reason"], "deep_doctor_index_too_large");
+        assert_eq!(
+            error["details"]["db_size_bytes"],
+            DEFAULT_MCP_DEEP_DOCTOR_MAX_BYTES + 1
+        );
+        assert_eq!(
+            error["details"]["max_bytes"],
+            DEFAULT_MCP_DEEP_DOCTOR_MAX_BYTES
+        );
+        assert_eq!(error["details"]["suggested_command"], "nabu doctor --deep");
     }
 
     #[test]
