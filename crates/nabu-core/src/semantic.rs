@@ -10,6 +10,8 @@ use rusqlite::params;
 use rusqlite::Connection;
 #[cfg(feature = "semantic")]
 use serde_json::Value;
+#[cfg(all(feature = "semantic", target_os = "linux"))]
+use std::collections::HashSet;
 
 pub(crate) const SEMANTIC_MODEL_ID: &str = "embeddinggemma-300m-q4";
 pub(crate) const SEMANTIC_MODEL_REPO: &str = "onnx-community/embeddinggemma-300m-ONNX";
