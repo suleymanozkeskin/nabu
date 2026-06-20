@@ -4174,3 +4174,130 @@ fn valid_envelope_json() -> Value {
         "payload": {}
     })
 }
+
+#[test]
+fn codex_exec_wrapper_intent_strips_scaffolding_and_keeps_command() {
+    // codex emits the shell command as a JSON-encoded exec wrapper under
+    // `arguments`; the searchable text must carry the command, not the envelope.
+    let string_encoded = json!({
+        "type": "function_call",
+        "name": "shell",
+        "arguments": "{\"command\":[\"bash\",\"-lc\",\"cargo test --workspace\"],\"workdir\":\"/repo\",\"yield_time_ms\":250,\"with_escalated_permissions\":true,\"justification\":\"run the suite codex justification marker\"}",
+        "call_id": "call-1"
+    });
+    let rendered = search_document_for_event(CanonicalType::ToolCall, &string_encoded).render();
+    for key in ["workdir", "yield_time_ms", "with_escalated_permissions"] {
+        assert!(
+            !rendered.contains(key),
+            "scaffolding key {key} leaked: {rendered}"
+        );
+    }
+    assert!(
+        rendered.contains("cargo test --workspace"),
+        "missing command: {rendered}"
+    );
+    assert!(
+        rendered.contains("run the suite codex justification marker"),
+        "missing justification: {rendered}"
+    );
+
+    // Same wrapper as an inline object (not a JSON-encoded string).
+    let inline = json!({
+        "type": "function_call",
+        "name": "shell",
+        "arguments": {
+            "command": ["bash", "-lc", "cargo test --workspace"],
+            "workdir": "/repo",
+            "timeout_ms": 1000
+        }
+    });
+    let rendered = search_document_for_event(CanonicalType::ToolCall, &inline).render();
+    assert!(
+        !rendered.contains("workdir"),
+        "scaffolding leaked: {rendered}"
+    );
+    assert!(
+        !rendered.contains("timeout_ms"),
+        "scaffolding leaked: {rendered}"
+    );
+    assert!(
+        rendered.contains("cargo test --workspace"),
+        "missing command: {rendered}"
+    );
+
+    // Non-wrapper tool input keeps its existing plain-string rendering.
+    let plain = json!({"tool_name": "shell", "input": "printf plain codex marker"});
+    let rendered = search_document_for_event(CanonicalType::ToolCall, &plain).render();
+    assert!(
+        rendered.contains("printf plain codex marker"),
+        "plain input lost: {rendered}"
+    );
+}
+
+#[test]
+fn codex_exec_wrapper_tool_call_is_searchable_by_command_without_scaffolding() {
+    let temp = tempdir().unwrap();
+    let home = temp.path().join("home");
+    let source = temp.path().join("codex-sessions");
+    init_home(&home).unwrap();
+    fs::create_dir_all(&source).unwrap();
+
+    let session_id = "019b0000-0000-7000-8000-000000000077";
+    let arguments = serde_json::to_string(&json!({
+        "command": ["bash", "-lc", "cargo build --release codexcmdmarker"],
+        "workdir": "/tmp/native-codex",
+        "yield_time_ms": 500
+    }))
+    .unwrap();
+    let line = serde_json::to_string(&json!({
+        "timestamp": "2026-06-18T00:00:01Z",
+        "type": "response_item",
+        "payload": {
+            "type": "function_call",
+            "name": "shell",
+            "call_id": "codex-exec-call-1",
+            "arguments": arguments
+        }
+    }))
+    .unwrap();
+    fs::write(
+        source.join(format!("rollout-2026-06-18T00-00-00-{session_id}.jsonl")),
+        format!(
+            "{{\"timestamp\":\"2026-06-18T00:00:00Z\",\"type\":\"session_meta\",\"payload\":{{\"id\":\"{session_id}\",\"cwd\":\"/tmp/native-codex\"}}}}\n{line}\n"
+        ),
+    )
+    .unwrap();
+
+    backfill_since(&home, Some(Tool::Codex), &source, None).unwrap();
+    index_once(&home).unwrap();
+
+    // A search for the real command returns the event.
+    let hits = search_history(&home, "codexcmdmarker", 10).unwrap();
+    assert_eq!(hits.len(), 1, "command not searchable: {hits:?}");
+    let hit = &hits[0];
+    assert_eq!(hit.session_id, session_id);
+    // Invariant #13: raw provenance is intact.
+    assert!(hit.raw_line > 0);
+    assert!(!hit.raw_file.is_empty());
+    // The snippet carries the command and excludes exec scaffolding.
+    assert!(
+        hit.snippet.contains("cargo build --release codexcmdmarker"),
+        "snippet missing command: {:?}",
+        hit.snippet
+    );
+    for key in ["workdir", "yield_time_ms"] {
+        assert!(
+            !hit.snippet.contains(key),
+            "scaffolding key {key} leaked into snippet: {:?}",
+            hit.snippet
+        );
+    }
+
+    // A search for a scaffolding key does not surface this event.
+    assert!(
+        search_history(&home, "yield_time_ms", 10)
+            .unwrap()
+            .is_empty(),
+        "scaffolding key became searchable"
+    );
+}
