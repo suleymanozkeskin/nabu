@@ -1,0 +1,1258 @@
+pub mod nabu_core
+pub enum nabu_core::CanonicalType
+pub nabu_core::CanonicalType::AssistantDelta
+pub nabu_core::CanonicalType::AssistantMessage
+pub nabu_core::CanonicalType::CompactionAfter
+pub nabu_core::CanonicalType::CompactionBefore
+pub nabu_core::CanonicalType::Error
+pub nabu_core::CanonicalType::FileChanged
+pub nabu_core::CanonicalType::PermissionReplied
+pub nabu_core::CanonicalType::PermissionRequested
+pub nabu_core::CanonicalType::SessionEnded
+pub nabu_core::CanonicalType::SessionResumed
+pub nabu_core::CanonicalType::SessionStarted
+pub nabu_core::CanonicalType::SourceDiscontinuity
+pub nabu_core::CanonicalType::ToolCall
+pub nabu_core::CanonicalType::ToolResult
+pub nabu_core::CanonicalType::UserMessage
+impl nabu_core::CanonicalType
+pub fn nabu_core::CanonicalType::as_str(self) -> &'static str
+impl core::clone::Clone for nabu_core::CanonicalType
+pub fn nabu_core::CanonicalType::clone(&self) -> nabu_core::CanonicalType
+impl core::cmp::Eq for nabu_core::CanonicalType
+impl core::cmp::PartialEq for nabu_core::CanonicalType
+pub fn nabu_core::CanonicalType::eq(&self, &nabu_core::CanonicalType) -> bool
+impl core::fmt::Debug for nabu_core::CanonicalType
+pub fn nabu_core::CanonicalType::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for nabu_core::CanonicalType
+impl core::marker::StructuralPartialEq for nabu_core::CanonicalType
+impl core::str::traits::FromStr for nabu_core::CanonicalType
+pub type nabu_core::CanonicalType::Err = nabu_core::Error
+pub fn nabu_core::CanonicalType::from_str(&str) -> nabu_core::Result<Self>
+impl serde_core::ser::Serialize for nabu_core::CanonicalType
+pub fn nabu_core::CanonicalType::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for nabu_core::CanonicalType
+pub fn nabu_core::CanonicalType::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for nabu_core::CanonicalType
+impl core::marker::Send for nabu_core::CanonicalType
+impl core::marker::Sync for nabu_core::CanonicalType
+impl core::marker::Unpin for nabu_core::CanonicalType
+impl core::marker::UnsafeUnpin for nabu_core::CanonicalType
+impl core::panic::unwind_safe::RefUnwindSafe for nabu_core::CanonicalType
+impl core::panic::unwind_safe::UnwindSafe for nabu_core::CanonicalType
+pub enum nabu_core::DoctorStage
+pub nabu_core::DoctorStage::Backfill
+pub nabu_core::DoctorStage::Coverage
+pub nabu_core::DoctorStage::Footprint
+pub nabu_core::DoctorStage::Index
+pub nabu_core::DoctorStage::LatestEvents
+pub nabu_core::DoctorStage::Storage
+impl core::clone::Clone for nabu_core::DoctorStage
+pub fn nabu_core::DoctorStage::clone(&self) -> nabu_core::DoctorStage
+impl core::cmp::Eq for nabu_core::DoctorStage
+impl core::cmp::PartialEq for nabu_core::DoctorStage
+pub fn nabu_core::DoctorStage::eq(&self, &nabu_core::DoctorStage) -> bool
+impl core::fmt::Debug for nabu_core::DoctorStage
+pub fn nabu_core::DoctorStage::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for nabu_core::DoctorStage
+impl core::marker::StructuralPartialEq for nabu_core::DoctorStage
+impl core::marker::Freeze for nabu_core::DoctorStage
+impl core::marker::Send for nabu_core::DoctorStage
+impl core::marker::Sync for nabu_core::DoctorStage
+impl core::marker::Unpin for nabu_core::DoctorStage
+impl core::marker::UnsafeUnpin for nabu_core::DoctorStage
+impl core::panic::unwind_safe::RefUnwindSafe for nabu_core::DoctorStage
+impl core::panic::unwind_safe::UnwindSafe for nabu_core::DoctorStage
+pub enum nabu_core::EmbeddingUnitKind
+pub nabu_core::EmbeddingUnitKind::AssistantText
+pub nabu_core::EmbeddingUnitKind::MetadataText
+pub nabu_core::EmbeddingUnitKind::ToolIntent
+pub nabu_core::EmbeddingUnitKind::UserText
+impl nabu_core::EmbeddingUnitKind
+pub fn nabu_core::EmbeddingUnitKind::as_str(self) -> &'static str
+impl core::clone::Clone for nabu_core::EmbeddingUnitKind
+pub fn nabu_core::EmbeddingUnitKind::clone(&self) -> nabu_core::EmbeddingUnitKind
+impl core::cmp::Eq for nabu_core::EmbeddingUnitKind
+impl core::cmp::PartialEq for nabu_core::EmbeddingUnitKind
+pub fn nabu_core::EmbeddingUnitKind::eq(&self, &nabu_core::EmbeddingUnitKind) -> bool
+impl core::fmt::Debug for nabu_core::EmbeddingUnitKind
+pub fn nabu_core::EmbeddingUnitKind::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for nabu_core::EmbeddingUnitKind
+impl core::marker::StructuralPartialEq for nabu_core::EmbeddingUnitKind
+impl core::str::traits::FromStr for nabu_core::EmbeddingUnitKind
+pub type nabu_core::EmbeddingUnitKind::Err = nabu_core::Error
+pub fn nabu_core::EmbeddingUnitKind::from_str(&str) -> nabu_core::Result<Self>
+impl serde_core::ser::Serialize for nabu_core::EmbeddingUnitKind
+pub fn nabu_core::EmbeddingUnitKind::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for nabu_core::EmbeddingUnitKind
+pub fn nabu_core::EmbeddingUnitKind::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for nabu_core::EmbeddingUnitKind
+impl core::marker::Send for nabu_core::EmbeddingUnitKind
+impl core::marker::Sync for nabu_core::EmbeddingUnitKind
+impl core::marker::Unpin for nabu_core::EmbeddingUnitKind
+impl core::marker::UnsafeUnpin for nabu_core::EmbeddingUnitKind
+impl core::panic::unwind_safe::RefUnwindSafe for nabu_core::EmbeddingUnitKind
+impl core::panic::unwind_safe::UnwindSafe for nabu_core::EmbeddingUnitKind
+pub enum nabu_core::Error
+pub nabu_core::Error::HomeUnavailable
+pub nabu_core::Error::Io
+pub nabu_core::Error::Io::path: std::path::PathBuf
+pub nabu_core::Error::Io::source: std::io::error::Error
+pub nabu_core::Error::Json(serde_json::error::Error)
+pub nabu_core::Error::SemanticUnavailable(alloc::string::String)
+pub nabu_core::Error::Sqlite
+pub nabu_core::Error::Sqlite::path: std::path::PathBuf
+pub nabu_core::Error::Sqlite::source: rusqlite::error::Error
+pub nabu_core::Error::TimeFormat(time::error::format::Format)
+pub nabu_core::Error::Validation(alloc::string::String)
+impl core::convert::From<serde_json::error::Error> for nabu_core::Error
+pub fn nabu_core::Error::from(serde_json::error::Error) -> Self
+impl core::convert::From<time::error::format::Format> for nabu_core::Error
+pub fn nabu_core::Error::from(time::error::format::Format) -> Self
+impl core::error::Error for nabu_core::Error
+pub fn nabu_core::Error::source(&self) -> core::option::Option<&(dyn core::error::Error + 'static)>
+impl core::fmt::Debug for nabu_core::Error
+pub fn nabu_core::Error::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for nabu_core::Error
+pub fn nabu_core::Error::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for nabu_core::Error
+impl core::marker::Send for nabu_core::Error
+impl core::marker::Sync for nabu_core::Error
+impl core::marker::Unpin for nabu_core::Error
+impl core::marker::UnsafeUnpin for nabu_core::Error
+impl !core::panic::unwind_safe::RefUnwindSafe for nabu_core::Error
+impl !core::panic::unwind_safe::UnwindSafe for nabu_core::Error
+pub enum nabu_core::PurgeAction
+pub nabu_core::PurgeAction::Absent
+pub nabu_core::PurgeAction::Preserved
+pub nabu_core::PurgeAction::Removed
+pub nabu_core::PurgeAction::WouldRemove
+impl core::clone::Clone for nabu_core::PurgeAction
+pub fn nabu_core::PurgeAction::clone(&self) -> nabu_core::PurgeAction
+impl core::cmp::Eq for nabu_core::PurgeAction
+impl core::cmp::PartialEq for nabu_core::PurgeAction
+pub fn nabu_core::PurgeAction::eq(&self, &nabu_core::PurgeAction) -> bool
+impl core::fmt::Debug for nabu_core::PurgeAction
+pub fn nabu_core::PurgeAction::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for nabu_core::PurgeAction
+impl core::marker::StructuralPartialEq for nabu_core::PurgeAction
+impl serde_core::ser::Serialize for nabu_core::PurgeAction
+pub fn nabu_core::PurgeAction::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl core::marker::Freeze for nabu_core::PurgeAction
+impl core::marker::Send for nabu_core::PurgeAction
+impl core::marker::Sync for nabu_core::PurgeAction
+impl core::marker::Unpin for nabu_core::PurgeAction
+impl core::marker::UnsafeUnpin for nabu_core::PurgeAction
+impl core::panic::unwind_safe::RefUnwindSafe for nabu_core::PurgeAction
+impl core::panic::unwind_safe::UnwindSafe for nabu_core::PurgeAction
+pub enum nabu_core::PurgeTier
+pub nabu_core::PurgeTier::Authoritative
+pub nabu_core::PurgeTier::Config
+pub nabu_core::PurgeTier::Derived
+pub nabu_core::PurgeTier::Model
+impl core::clone::Clone for nabu_core::PurgeTier
+pub fn nabu_core::PurgeTier::clone(&self) -> nabu_core::PurgeTier
+impl core::cmp::Eq for nabu_core::PurgeTier
+impl core::cmp::PartialEq for nabu_core::PurgeTier
+pub fn nabu_core::PurgeTier::eq(&self, &nabu_core::PurgeTier) -> bool
+impl core::fmt::Debug for nabu_core::PurgeTier
+pub fn nabu_core::PurgeTier::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for nabu_core::PurgeTier
+impl core::marker::StructuralPartialEq for nabu_core::PurgeTier
+impl serde_core::ser::Serialize for nabu_core::PurgeTier
+pub fn nabu_core::PurgeTier::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl core::marker::Freeze for nabu_core::PurgeTier
+impl core::marker::Send for nabu_core::PurgeTier
+impl core::marker::Sync for nabu_core::PurgeTier
+impl core::marker::Unpin for nabu_core::PurgeTier
+impl core::marker::UnsafeUnpin for nabu_core::PurgeTier
+impl core::panic::unwind_safe::RefUnwindSafe for nabu_core::PurgeTier
+impl core::panic::unwind_safe::UnwindSafe for nabu_core::PurgeTier
+pub enum nabu_core::SearchMode
+pub nabu_core::SearchMode::Auto
+pub nabu_core::SearchMode::Hybrid
+pub nabu_core::SearchMode::Lexical
+impl nabu_core::SearchMode
+pub fn nabu_core::SearchMode::as_str(self) -> &'static str
+impl core::clone::Clone for nabu_core::SearchMode
+pub fn nabu_core::SearchMode::clone(&self) -> nabu_core::SearchMode
+impl core::cmp::Eq for nabu_core::SearchMode
+impl core::cmp::PartialEq for nabu_core::SearchMode
+pub fn nabu_core::SearchMode::eq(&self, &nabu_core::SearchMode) -> bool
+impl core::default::Default for nabu_core::SearchMode
+pub fn nabu_core::SearchMode::default() -> nabu_core::SearchMode
+impl core::fmt::Debug for nabu_core::SearchMode
+pub fn nabu_core::SearchMode::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for nabu_core::SearchMode
+impl core::marker::StructuralPartialEq for nabu_core::SearchMode
+impl core::str::traits::FromStr for nabu_core::SearchMode
+pub type nabu_core::SearchMode::Err = nabu_core::Error
+pub fn nabu_core::SearchMode::from_str(&str) -> nabu_core::Result<Self>
+impl serde_core::ser::Serialize for nabu_core::SearchMode
+pub fn nabu_core::SearchMode::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for nabu_core::SearchMode
+pub fn nabu_core::SearchMode::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for nabu_core::SearchMode
+impl core::marker::Send for nabu_core::SearchMode
+impl core::marker::Sync for nabu_core::SearchMode
+impl core::marker::Unpin for nabu_core::SearchMode
+impl core::marker::UnsafeUnpin for nabu_core::SearchMode
+impl core::panic::unwind_safe::RefUnwindSafe for nabu_core::SearchMode
+impl core::panic::unwind_safe::UnwindSafe for nabu_core::SearchMode
+pub enum nabu_core::Source
+pub nabu_core::Source::AppServer
+pub nabu_core::Source::Backfill
+pub nabu_core::Source::EventStream
+pub nabu_core::Source::ExecJson
+pub nabu_core::Source::Hook
+pub nabu_core::Source::SdkSessionStore
+pub nabu_core::Source::TranscriptTail
+impl nabu_core::Source
+pub fn nabu_core::Source::as_str(self) -> &'static str
+impl core::clone::Clone for nabu_core::Source
+pub fn nabu_core::Source::clone(&self) -> nabu_core::Source
+impl core::cmp::Eq for nabu_core::Source
+impl core::cmp::PartialEq for nabu_core::Source
+pub fn nabu_core::Source::eq(&self, &nabu_core::Source) -> bool
+impl core::fmt::Debug for nabu_core::Source
+pub fn nabu_core::Source::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for nabu_core::Source
+impl core::marker::StructuralPartialEq for nabu_core::Source
+impl core::str::traits::FromStr for nabu_core::Source
+pub type nabu_core::Source::Err = nabu_core::Error
+pub fn nabu_core::Source::from_str(&str) -> nabu_core::Result<Self>
+impl serde_core::ser::Serialize for nabu_core::Source
+pub fn nabu_core::Source::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for nabu_core::Source
+pub fn nabu_core::Source::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for nabu_core::Source
+impl core::marker::Send for nabu_core::Source
+impl core::marker::Sync for nabu_core::Source
+impl core::marker::Unpin for nabu_core::Source
+impl core::marker::UnsafeUnpin for nabu_core::Source
+impl core::panic::unwind_safe::RefUnwindSafe for nabu_core::Source
+impl core::panic::unwind_safe::UnwindSafe for nabu_core::Source
+pub enum nabu_core::Tool
+pub nabu_core::Tool::Claude
+pub nabu_core::Tool::Codex
+pub nabu_core::Tool::Opencode
+impl nabu_core::Tool
+pub const fn nabu_core::Tool::all() -> [nabu_core::Tool; 3]
+pub fn nabu_core::Tool::as_str(self) -> &'static str
+impl core::clone::Clone for nabu_core::Tool
+pub fn nabu_core::Tool::clone(&self) -> nabu_core::Tool
+impl core::cmp::Eq for nabu_core::Tool
+impl core::cmp::PartialEq for nabu_core::Tool
+pub fn nabu_core::Tool::eq(&self, &nabu_core::Tool) -> bool
+impl core::fmt::Debug for nabu_core::Tool
+pub fn nabu_core::Tool::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for nabu_core::Tool
+pub fn nabu_core::Tool::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for nabu_core::Tool
+pub fn nabu_core::Tool::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for nabu_core::Tool
+impl core::marker::StructuralPartialEq for nabu_core::Tool
+impl core::str::traits::FromStr for nabu_core::Tool
+pub type nabu_core::Tool::Err = nabu_core::Error
+pub fn nabu_core::Tool::from_str(&str) -> nabu_core::Result<Self>
+impl serde_core::ser::Serialize for nabu_core::Tool
+pub fn nabu_core::Tool::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for nabu_core::Tool
+pub fn nabu_core::Tool::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for nabu_core::Tool
+impl core::marker::Send for nabu_core::Tool
+impl core::marker::Sync for nabu_core::Tool
+impl core::marker::Unpin for nabu_core::Tool
+impl core::marker::UnsafeUnpin for nabu_core::Tool
+impl core::panic::unwind_safe::RefUnwindSafe for nabu_core::Tool
+impl core::panic::unwind_safe::UnwindSafe for nabu_core::Tool
+pub struct nabu_core::AppendReport
+pub nabu_core::AppendReport::appended: bool
+pub nabu_core::AppendReport::dedupe_key: alloc::string::String
+pub nabu_core::AppendReport::raw_file: std::path::PathBuf
+pub nabu_core::AppendReport::raw_offset: u64
+pub nabu_core::AppendReport::session_id: alloc::string::String
+impl core::clone::Clone for nabu_core::AppendReport
+pub fn nabu_core::AppendReport::clone(&self) -> nabu_core::AppendReport
+impl core::cmp::Eq for nabu_core::AppendReport
+impl core::cmp::PartialEq for nabu_core::AppendReport
+pub fn nabu_core::AppendReport::eq(&self, &nabu_core::AppendReport) -> bool
+impl core::fmt::Debug for nabu_core::AppendReport
+pub fn nabu_core::AppendReport::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for nabu_core::AppendReport
+impl serde_core::ser::Serialize for nabu_core::AppendReport
+pub fn nabu_core::AppendReport::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl core::marker::Freeze for nabu_core::AppendReport
+impl core::marker::Send for nabu_core::AppendReport
+impl core::marker::Sync for nabu_core::AppendReport
+impl core::marker::Unpin for nabu_core::AppendReport
+impl core::marker::UnsafeUnpin for nabu_core::AppendReport
+impl core::panic::unwind_safe::RefUnwindSafe for nabu_core::AppendReport
+impl core::panic::unwind_safe::UnwindSafe for nabu_core::AppendReport
+pub struct nabu_core::BackfillCoverageSession
+pub nabu_core::BackfillCoverageSession::captured: usize
+pub nabu_core::BackfillCoverageSession::missing: usize
+pub nabu_core::BackfillCoverageSession::on_disk: usize
+pub nabu_core::BackfillCoverageSession::partial: bool
+pub nabu_core::BackfillCoverageSession::session_id: alloc::string::String
+pub nabu_core::BackfillCoverageSession::source_path: alloc::string::String
+pub nabu_core::BackfillCoverageSession::tool: nabu_core::Tool
+pub nabu_core::BackfillCoverageSession::would_import: alloc::vec::Vec<nabu_core::BackfillImportPreview>
+impl core::clone::Clone for nabu_core::BackfillCoverageSession
+pub fn nabu_core::BackfillCoverageSession::clone(&self) -> nabu_core::BackfillCoverageSession
+impl core::cmp::Eq for nabu_core::BackfillCoverageSession
+impl core::cmp::PartialEq for nabu_core::BackfillCoverageSession
+pub fn nabu_core::BackfillCoverageSession::eq(&self, &nabu_core::BackfillCoverageSession) -> bool
+impl core::fmt::Debug for nabu_core::BackfillCoverageSession
+pub fn nabu_core::BackfillCoverageSession::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for nabu_core::BackfillCoverageSession
+impl serde_core::ser::Serialize for nabu_core::BackfillCoverageSession
+pub fn nabu_core::BackfillCoverageSession::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl core::marker::Freeze for nabu_core::BackfillCoverageSession
+impl core::marker::Send for nabu_core::BackfillCoverageSession
+impl core::marker::Sync for nabu_core::BackfillCoverageSession
+impl core::marker::Unpin for nabu_core::BackfillCoverageSession
+impl core::marker::UnsafeUnpin for nabu_core::BackfillCoverageSession
+impl core::panic::unwind_safe::RefUnwindSafe for nabu_core::BackfillCoverageSession
+impl core::panic::unwind_safe::UnwindSafe for nabu_core::BackfillCoverageSession
+pub struct nabu_core::BackfillDryRunReport
+pub nabu_core::BackfillDryRunReport::captured_events: usize
+pub nabu_core::BackfillDryRunReport::missing_events: usize
+pub nabu_core::BackfillDryRunReport::on_disk_events: usize
+pub nabu_core::BackfillDryRunReport::partial_sessions: usize
+pub nabu_core::BackfillDryRunReport::sessions: alloc::vec::Vec<nabu_core::BackfillCoverageSession>
+pub nabu_core::BackfillDryRunReport::source_files: usize
+impl core::clone::Clone for nabu_core::BackfillDryRunReport
+pub fn nabu_core::BackfillDryRunReport::clone(&self) -> nabu_core::BackfillDryRunReport
+impl core::cmp::Eq for nabu_core::BackfillDryRunReport
+impl core::cmp::PartialEq for nabu_core::BackfillDryRunReport
+pub fn nabu_core::BackfillDryRunReport::eq(&self, &nabu_core::BackfillDryRunReport) -> bool
+impl core::fmt::Debug for nabu_core::BackfillDryRunReport
+pub fn nabu_core::BackfillDryRunReport::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for nabu_core::BackfillDryRunReport
+impl serde_core::ser::Serialize for nabu_core::BackfillDryRunReport
+pub fn nabu_core::BackfillDryRunReport::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl core::marker::Freeze for nabu_core::BackfillDryRunReport
+impl core::marker::Send for nabu_core::BackfillDryRunReport
+impl core::marker::Sync for nabu_core::BackfillDryRunReport
+impl core::marker::Unpin for nabu_core::BackfillDryRunReport
+impl core::marker::UnsafeUnpin for nabu_core::BackfillDryRunReport
+impl core::panic::unwind_safe::RefUnwindSafe for nabu_core::BackfillDryRunReport
+impl core::panic::unwind_safe::UnwindSafe for nabu_core::BackfillDryRunReport
+pub struct nabu_core::BackfillImportPreview
+pub nabu_core::BackfillImportPreview::canonical_type: alloc::string::String
+pub nabu_core::BackfillImportPreview::captured_at: alloc::string::String
+pub nabu_core::BackfillImportPreview::sequence: core::option::Option<i64>
+pub nabu_core::BackfillImportPreview::source_event_id: core::option::Option<alloc::string::String>
+pub nabu_core::BackfillImportPreview::source_event_type: alloc::string::String
+impl core::clone::Clone for nabu_core::BackfillImportPreview
+pub fn nabu_core::BackfillImportPreview::clone(&self) -> nabu_core::BackfillImportPreview
+impl core::cmp::Eq for nabu_core::BackfillImportPreview
+impl core::cmp::PartialEq for nabu_core::BackfillImportPreview
+pub fn nabu_core::BackfillImportPreview::eq(&self, &nabu_core::BackfillImportPreview) -> bool
+impl core::fmt::Debug for nabu_core::BackfillImportPreview
+pub fn nabu_core::BackfillImportPreview::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for nabu_core::BackfillImportPreview
+impl serde_core::ser::Serialize for nabu_core::BackfillImportPreview
+pub fn nabu_core::BackfillImportPreview::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl core::marker::Freeze for nabu_core::BackfillImportPreview
+impl core::marker::Send for nabu_core::BackfillImportPreview
+impl core::marker::Sync for nabu_core::BackfillImportPreview
+impl core::marker::Unpin for nabu_core::BackfillImportPreview
+impl core::marker::UnsafeUnpin for nabu_core::BackfillImportPreview
+impl core::panic::unwind_safe::RefUnwindSafe for nabu_core::BackfillImportPreview
+impl core::panic::unwind_safe::UnwindSafe for nabu_core::BackfillImportPreview
+pub struct nabu_core::BackfillProgress
+pub nabu_core::BackfillProgress::operation: alloc::string::String
+pub nabu_core::BackfillProgress::processed_files: usize
+pub nabu_core::BackfillProgress::source_path: core::option::Option<alloc::string::String>
+pub nabu_core::BackfillProgress::source_root: alloc::string::String
+pub nabu_core::BackfillProgress::tool: nabu_core::Tool
+pub nabu_core::BackfillProgress::total_files: usize
+impl core::clone::Clone for nabu_core::BackfillProgress
+pub fn nabu_core::BackfillProgress::clone(&self) -> nabu_core::BackfillProgress
+impl core::cmp::Eq for nabu_core::BackfillProgress
+impl core::cmp::PartialEq for nabu_core::BackfillProgress
+pub fn nabu_core::BackfillProgress::eq(&self, &nabu_core::BackfillProgress) -> bool
+impl core::fmt::Debug for nabu_core::BackfillProgress
+pub fn nabu_core::BackfillProgress::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for nabu_core::BackfillProgress
+impl serde_core::ser::Serialize for nabu_core::BackfillProgress
+pub fn nabu_core::BackfillProgress::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl core::marker::Freeze for nabu_core::BackfillProgress
+impl core::marker::Send for nabu_core::BackfillProgress
+impl core::marker::Sync for nabu_core::BackfillProgress
+impl core::marker::Unpin for nabu_core::BackfillProgress
+impl core::marker::UnsafeUnpin for nabu_core::BackfillProgress
+impl core::panic::unwind_safe::RefUnwindSafe for nabu_core::BackfillProgress
+impl core::panic::unwind_safe::UnwindSafe for nabu_core::BackfillProgress
+pub struct nabu_core::BackfillReport
+pub nabu_core::BackfillReport::appended_events: usize
+pub nabu_core::BackfillReport::checkpoint_files: usize
+pub nabu_core::BackfillReport::discontinuities: usize
+pub nabu_core::BackfillReport::source_files: usize
+impl core::clone::Clone for nabu_core::BackfillReport
+pub fn nabu_core::BackfillReport::clone(&self) -> nabu_core::BackfillReport
+impl core::cmp::Eq for nabu_core::BackfillReport
+impl core::cmp::PartialEq for nabu_core::BackfillReport
+pub fn nabu_core::BackfillReport::eq(&self, &nabu_core::BackfillReport) -> bool
+impl core::fmt::Debug for nabu_core::BackfillReport
+pub fn nabu_core::BackfillReport::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for nabu_core::BackfillReport
+impl serde_core::ser::Serialize for nabu_core::BackfillReport
+pub fn nabu_core::BackfillReport::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl core::marker::Freeze for nabu_core::BackfillReport
+impl core::marker::Send for nabu_core::BackfillReport
+impl core::marker::Sync for nabu_core::BackfillReport
+impl core::marker::Unpin for nabu_core::BackfillReport
+impl core::marker::UnsafeUnpin for nabu_core::BackfillReport
+impl core::panic::unwind_safe::RefUnwindSafe for nabu_core::BackfillReport
+impl core::panic::unwind_safe::UnwindSafe for nabu_core::BackfillReport
+pub struct nabu_core::CorroboratedRef
+pub nabu_core::CorroboratedRef::detail: core::option::Option<alloc::string::String>
+pub nabu_core::CorroboratedRef::kind: alloc::string::String
+pub nabu_core::CorroboratedRef::reason: core::option::Option<alloc::string::String>
+pub nabu_core::CorroboratedRef::reference: alloc::string::String
+pub nabu_core::CorroboratedRef::status: alloc::string::String
+impl core::clone::Clone for nabu_core::CorroboratedRef
+pub fn nabu_core::CorroboratedRef::clone(&self) -> nabu_core::CorroboratedRef
+impl core::cmp::Eq for nabu_core::CorroboratedRef
+impl core::cmp::PartialEq for nabu_core::CorroboratedRef
+pub fn nabu_core::CorroboratedRef::eq(&self, &nabu_core::CorroboratedRef) -> bool
+impl core::fmt::Debug for nabu_core::CorroboratedRef
+pub fn nabu_core::CorroboratedRef::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for nabu_core::CorroboratedRef
+impl serde_core::ser::Serialize for nabu_core::CorroboratedRef
+pub fn nabu_core::CorroboratedRef::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl core::marker::Freeze for nabu_core::CorroboratedRef
+impl core::marker::Send for nabu_core::CorroboratedRef
+impl core::marker::Sync for nabu_core::CorroboratedRef
+impl core::marker::Unpin for nabu_core::CorroboratedRef
+impl core::marker::UnsafeUnpin for nabu_core::CorroboratedRef
+impl core::panic::unwind_safe::RefUnwindSafe for nabu_core::CorroboratedRef
+impl core::panic::unwind_safe::UnwindSafe for nabu_core::CorroboratedRef
+pub struct nabu_core::Corroboration
+pub nabu_core::Corroboration::refs: alloc::vec::Vec<nabu_core::CorroboratedRef>
+pub nabu_core::Corroboration::repo: core::option::Option<alloc::string::String>
+impl core::clone::Clone for nabu_core::Corroboration
+pub fn nabu_core::Corroboration::clone(&self) -> nabu_core::Corroboration
+impl core::cmp::Eq for nabu_core::Corroboration
+impl core::cmp::PartialEq for nabu_core::Corroboration
+pub fn nabu_core::Corroboration::eq(&self, &nabu_core::Corroboration) -> bool
+impl core::fmt::Debug for nabu_core::Corroboration
+pub fn nabu_core::Corroboration::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for nabu_core::Corroboration
+impl serde_core::ser::Serialize for nabu_core::Corroboration
+pub fn nabu_core::Corroboration::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl core::marker::Freeze for nabu_core::Corroboration
+impl core::marker::Send for nabu_core::Corroboration
+impl core::marker::Sync for nabu_core::Corroboration
+impl core::marker::Unpin for nabu_core::Corroboration
+impl core::marker::UnsafeUnpin for nabu_core::Corroboration
+impl core::panic::unwind_safe::RefUnwindSafe for nabu_core::Corroboration
+impl core::panic::unwind_safe::UnwindSafe for nabu_core::Corroboration
+pub struct nabu_core::CoverageSummary
+pub nabu_core::CoverageSummary::captured_events: usize
+pub nabu_core::CoverageSummary::captured_sessions: usize
+pub nabu_core::CoverageSummary::checkpointed_sources: usize
+impl core::clone::Clone for nabu_core::CoverageSummary
+pub fn nabu_core::CoverageSummary::clone(&self) -> nabu_core::CoverageSummary
+impl core::cmp::Eq for nabu_core::CoverageSummary
+impl core::cmp::PartialEq for nabu_core::CoverageSummary
+pub fn nabu_core::CoverageSummary::eq(&self, &nabu_core::CoverageSummary) -> bool
+impl core::fmt::Debug for nabu_core::CoverageSummary
+pub fn nabu_core::CoverageSummary::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for nabu_core::CoverageSummary
+impl serde_core::ser::Serialize for nabu_core::CoverageSummary
+pub fn nabu_core::CoverageSummary::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl core::marker::Freeze for nabu_core::CoverageSummary
+impl core::marker::Send for nabu_core::CoverageSummary
+impl core::marker::Sync for nabu_core::CoverageSummary
+impl core::marker::Unpin for nabu_core::CoverageSummary
+impl core::marker::UnsafeUnpin for nabu_core::CoverageSummary
+impl core::panic::unwind_safe::RefUnwindSafe for nabu_core::CoverageSummary
+impl core::panic::unwind_safe::UnwindSafe for nabu_core::CoverageSummary
+pub struct nabu_core::DedupeParts<'a>
+pub nabu_core::DedupeParts::canonical_type: nabu_core::CanonicalType
+pub nabu_core::DedupeParts::payload: &'a serde_json::value::Value
+pub nabu_core::DedupeParts::sequence: core::option::Option<i64>
+pub nabu_core::DedupeParts::session_id: &'a str
+pub nabu_core::DedupeParts::source_event_id: core::option::Option<&'a str>
+pub nabu_core::DedupeParts::tool: nabu_core::Tool
+impl<'a> core::marker::Freeze for nabu_core::DedupeParts<'a>
+impl<'a> core::marker::Send for nabu_core::DedupeParts<'a>
+impl<'a> core::marker::Sync for nabu_core::DedupeParts<'a>
+impl<'a> core::marker::Unpin for nabu_core::DedupeParts<'a>
+impl<'a> core::marker::UnsafeUnpin for nabu_core::DedupeParts<'a>
+impl<'a> core::panic::unwind_safe::RefUnwindSafe for nabu_core::DedupeParts<'a>
+impl<'a> core::panic::unwind_safe::UnwindSafe for nabu_core::DedupeParts<'a>
+pub struct nabu_core::DoctorCheck
+pub nabu_core::DoctorCheck::message: alloc::string::String
+pub nabu_core::DoctorCheck::ok: bool
+impl core::clone::Clone for nabu_core::DoctorCheck
+pub fn nabu_core::DoctorCheck::clone(&self) -> nabu_core::DoctorCheck
+impl core::cmp::Eq for nabu_core::DoctorCheck
+impl core::cmp::PartialEq for nabu_core::DoctorCheck
+pub fn nabu_core::DoctorCheck::eq(&self, &nabu_core::DoctorCheck) -> bool
+impl core::fmt::Debug for nabu_core::DoctorCheck
+pub fn nabu_core::DoctorCheck::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for nabu_core::DoctorCheck
+impl serde_core::ser::Serialize for nabu_core::DoctorCheck
+pub fn nabu_core::DoctorCheck::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl core::marker::Freeze for nabu_core::DoctorCheck
+impl core::marker::Send for nabu_core::DoctorCheck
+impl core::marker::Sync for nabu_core::DoctorCheck
+impl core::marker::Unpin for nabu_core::DoctorCheck
+impl core::marker::UnsafeUnpin for nabu_core::DoctorCheck
+impl core::panic::unwind_safe::RefUnwindSafe for nabu_core::DoctorCheck
+impl core::panic::unwind_safe::UnwindSafe for nabu_core::DoctorCheck
+pub struct nabu_core::DoctorReport
+pub nabu_core::DoctorReport::backfill: nabu_core::DoctorCheck
+pub nabu_core::DoctorReport::coverage: nabu_core::CoverageSummary
+pub nabu_core::DoctorReport::index: nabu_core::DoctorCheck
+pub nabu_core::DoctorReport::integrity: alloc::string::String
+pub nabu_core::DoctorReport::latest_captured_events: alloc::collections::btree::map::BTreeMap<alloc::string::String, core::option::Option<nabu_core::StoredEvent>>
+pub nabu_core::DoctorReport::level: alloc::string::String
+pub nabu_core::DoctorReport::stats: core::option::Option<nabu_core::DoctorStats>
+pub nabu_core::DoctorReport::storage: nabu_core::DoctorCheck
+pub nabu_core::DoctorReport::storage_footprint: nabu_core::StorageFootprint
+impl core::clone::Clone for nabu_core::DoctorReport
+pub fn nabu_core::DoctorReport::clone(&self) -> nabu_core::DoctorReport
+impl core::cmp::PartialEq for nabu_core::DoctorReport
+pub fn nabu_core::DoctorReport::eq(&self, &nabu_core::DoctorReport) -> bool
+impl core::fmt::Debug for nabu_core::DoctorReport
+pub fn nabu_core::DoctorReport::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for nabu_core::DoctorReport
+impl serde_core::ser::Serialize for nabu_core::DoctorReport
+pub fn nabu_core::DoctorReport::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl core::marker::Freeze for nabu_core::DoctorReport
+impl core::marker::Send for nabu_core::DoctorReport
+impl core::marker::Sync for nabu_core::DoctorReport
+impl core::marker::Unpin for nabu_core::DoctorReport
+impl core::marker::UnsafeUnpin for nabu_core::DoctorReport
+impl core::panic::unwind_safe::RefUnwindSafe for nabu_core::DoctorReport
+impl core::panic::unwind_safe::UnwindSafe for nabu_core::DoctorReport
+pub struct nabu_core::DoctorStats
+pub nabu_core::DoctorStats::compactions: i64
+pub nabu_core::DoctorStats::events: i64
+pub nabu_core::DoctorStats::messages: i64
+pub nabu_core::DoctorStats::sessions: i64
+pub nabu_core::DoctorStats::tool_events: i64
+impl core::clone::Clone for nabu_core::DoctorStats
+pub fn nabu_core::DoctorStats::clone(&self) -> nabu_core::DoctorStats
+impl core::cmp::Eq for nabu_core::DoctorStats
+impl core::cmp::PartialEq for nabu_core::DoctorStats
+pub fn nabu_core::DoctorStats::eq(&self, &nabu_core::DoctorStats) -> bool
+impl core::fmt::Debug for nabu_core::DoctorStats
+pub fn nabu_core::DoctorStats::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for nabu_core::DoctorStats
+impl serde_core::ser::Serialize for nabu_core::DoctorStats
+pub fn nabu_core::DoctorStats::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl core::marker::Freeze for nabu_core::DoctorStats
+impl core::marker::Send for nabu_core::DoctorStats
+impl core::marker::Sync for nabu_core::DoctorStats
+impl core::marker::Unpin for nabu_core::DoctorStats
+impl core::marker::UnsafeUnpin for nabu_core::DoctorStats
+impl core::panic::unwind_safe::RefUnwindSafe for nabu_core::DoctorStats
+impl core::panic::unwind_safe::UnwindSafe for nabu_core::DoctorStats
+pub struct nabu_core::EmbeddingDownloadProgress
+pub nabu_core::EmbeddingDownloadProgress::downloaded_files: usize
+pub nabu_core::EmbeddingDownloadProgress::file: alloc::string::String
+pub nabu_core::EmbeddingDownloadProgress::model_id: alloc::string::String
+pub nabu_core::EmbeddingDownloadProgress::phase: alloc::string::String
+pub nabu_core::EmbeddingDownloadProgress::total_files: usize
+impl core::clone::Clone for nabu_core::EmbeddingDownloadProgress
+pub fn nabu_core::EmbeddingDownloadProgress::clone(&self) -> nabu_core::EmbeddingDownloadProgress
+impl core::cmp::Eq for nabu_core::EmbeddingDownloadProgress
+impl core::cmp::PartialEq for nabu_core::EmbeddingDownloadProgress
+pub fn nabu_core::EmbeddingDownloadProgress::eq(&self, &nabu_core::EmbeddingDownloadProgress) -> bool
+impl core::fmt::Debug for nabu_core::EmbeddingDownloadProgress
+pub fn nabu_core::EmbeddingDownloadProgress::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for nabu_core::EmbeddingDownloadProgress
+impl serde_core::ser::Serialize for nabu_core::EmbeddingDownloadProgress
+pub fn nabu_core::EmbeddingDownloadProgress::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl core::marker::Freeze for nabu_core::EmbeddingDownloadProgress
+impl core::marker::Send for nabu_core::EmbeddingDownloadProgress
+impl core::marker::Sync for nabu_core::EmbeddingDownloadProgress
+impl core::marker::Unpin for nabu_core::EmbeddingDownloadProgress
+impl core::marker::UnsafeUnpin for nabu_core::EmbeddingDownloadProgress
+impl core::panic::unwind_safe::RefUnwindSafe for nabu_core::EmbeddingDownloadProgress
+impl core::panic::unwind_safe::UnwindSafe for nabu_core::EmbeddingDownloadProgress
+pub struct nabu_core::EmbeddingDownloadReport
+pub nabu_core::EmbeddingDownloadReport::cache_path: alloc::string::String
+pub nabu_core::EmbeddingDownloadReport::downloaded_bytes: u64
+pub nabu_core::EmbeddingDownloadReport::downloaded_files: usize
+pub nabu_core::EmbeddingDownloadReport::license_summary: alloc::string::String
+pub nabu_core::EmbeddingDownloadReport::model_id: alloc::string::String
+pub nabu_core::EmbeddingDownloadReport::on_disk_bytes: u64
+pub nabu_core::EmbeddingDownloadReport::total_files: usize
+impl core::clone::Clone for nabu_core::EmbeddingDownloadReport
+pub fn nabu_core::EmbeddingDownloadReport::clone(&self) -> nabu_core::EmbeddingDownloadReport
+impl core::cmp::Eq for nabu_core::EmbeddingDownloadReport
+impl core::cmp::PartialEq for nabu_core::EmbeddingDownloadReport
+pub fn nabu_core::EmbeddingDownloadReport::eq(&self, &nabu_core::EmbeddingDownloadReport) -> bool
+impl core::fmt::Debug for nabu_core::EmbeddingDownloadReport
+pub fn nabu_core::EmbeddingDownloadReport::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for nabu_core::EmbeddingDownloadReport
+impl serde_core::ser::Serialize for nabu_core::EmbeddingDownloadReport
+pub fn nabu_core::EmbeddingDownloadReport::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl core::marker::Freeze for nabu_core::EmbeddingDownloadReport
+impl core::marker::Send for nabu_core::EmbeddingDownloadReport
+impl core::marker::Sync for nabu_core::EmbeddingDownloadReport
+impl core::marker::Unpin for nabu_core::EmbeddingDownloadReport
+impl core::marker::UnsafeUnpin for nabu_core::EmbeddingDownloadReport
+impl core::panic::unwind_safe::RefUnwindSafe for nabu_core::EmbeddingDownloadReport
+impl core::panic::unwind_safe::UnwindSafe for nabu_core::EmbeddingDownloadReport
+pub struct nabu_core::EmbeddingIndexProgress
+pub nabu_core::EmbeddingIndexProgress::batch_size: usize
+pub nabu_core::EmbeddingIndexProgress::embedded_units: usize
+pub nabu_core::EmbeddingIndexProgress::eta_seconds: core::option::Option<u64>
+pub nabu_core::EmbeddingIndexProgress::intra_threads: usize
+pub nabu_core::EmbeddingIndexProgress::phase: alloc::string::String
+pub nabu_core::EmbeddingIndexProgress::status: alloc::string::String
+pub nabu_core::EmbeddingIndexProgress::total_units: usize
+pub nabu_core::EmbeddingIndexProgress::units_per_second: f64
+pub nabu_core::EmbeddingIndexProgress::write_chunk_size: usize
+impl core::clone::Clone for nabu_core::EmbeddingIndexProgress
+pub fn nabu_core::EmbeddingIndexProgress::clone(&self) -> nabu_core::EmbeddingIndexProgress
+impl core::cmp::PartialEq for nabu_core::EmbeddingIndexProgress
+pub fn nabu_core::EmbeddingIndexProgress::eq(&self, &nabu_core::EmbeddingIndexProgress) -> bool
+impl core::fmt::Debug for nabu_core::EmbeddingIndexProgress
+pub fn nabu_core::EmbeddingIndexProgress::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for nabu_core::EmbeddingIndexProgress
+impl serde_core::ser::Serialize for nabu_core::EmbeddingIndexProgress
+pub fn nabu_core::EmbeddingIndexProgress::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl core::marker::Freeze for nabu_core::EmbeddingIndexProgress
+impl core::marker::Send for nabu_core::EmbeddingIndexProgress
+impl core::marker::Sync for nabu_core::EmbeddingIndexProgress
+impl core::marker::Unpin for nabu_core::EmbeddingIndexProgress
+impl core::marker::UnsafeUnpin for nabu_core::EmbeddingIndexProgress
+impl core::panic::unwind_safe::RefUnwindSafe for nabu_core::EmbeddingIndexProgress
+impl core::panic::unwind_safe::UnwindSafe for nabu_core::EmbeddingIndexProgress
+pub struct nabu_core::EmbeddingModelDisclosure
+pub nabu_core::EmbeddingModelDisclosure::cache_path: alloc::string::String
+pub nabu_core::EmbeddingModelDisclosure::current_on_disk_bytes: u64
+pub nabu_core::EmbeddingModelDisclosure::license_summary: alloc::string::String
+pub nabu_core::EmbeddingModelDisclosure::model_id: alloc::string::String
+pub nabu_core::EmbeddingModelDisclosure::model_present: bool
+pub nabu_core::EmbeddingModelDisclosure::repository: alloc::string::String
+pub nabu_core::EmbeddingModelDisclosure::total_files: usize
+impl core::clone::Clone for nabu_core::EmbeddingModelDisclosure
+pub fn nabu_core::EmbeddingModelDisclosure::clone(&self) -> nabu_core::EmbeddingModelDisclosure
+impl core::cmp::Eq for nabu_core::EmbeddingModelDisclosure
+impl core::cmp::PartialEq for nabu_core::EmbeddingModelDisclosure
+pub fn nabu_core::EmbeddingModelDisclosure::eq(&self, &nabu_core::EmbeddingModelDisclosure) -> bool
+impl core::fmt::Debug for nabu_core::EmbeddingModelDisclosure
+pub fn nabu_core::EmbeddingModelDisclosure::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for nabu_core::EmbeddingModelDisclosure
+impl serde_core::ser::Serialize for nabu_core::EmbeddingModelDisclosure
+pub fn nabu_core::EmbeddingModelDisclosure::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl core::marker::Freeze for nabu_core::EmbeddingModelDisclosure
+impl core::marker::Send for nabu_core::EmbeddingModelDisclosure
+impl core::marker::Sync for nabu_core::EmbeddingModelDisclosure
+impl core::marker::Unpin for nabu_core::EmbeddingModelDisclosure
+impl core::marker::UnsafeUnpin for nabu_core::EmbeddingModelDisclosure
+impl core::panic::unwind_safe::RefUnwindSafe for nabu_core::EmbeddingModelDisclosure
+impl core::panic::unwind_safe::UnwindSafe for nabu_core::EmbeddingModelDisclosure
+pub struct nabu_core::EmbeddingModelStatus
+pub nabu_core::EmbeddingModelStatus::cache_path: alloc::string::String
+pub nabu_core::EmbeddingModelStatus::expected_dimensions: usize
+pub nabu_core::EmbeddingModelStatus::feature_enabled: bool
+pub nabu_core::EmbeddingModelStatus::message: alloc::string::String
+pub nabu_core::EmbeddingModelStatus::model_id: alloc::string::String
+pub nabu_core::EmbeddingModelStatus::model_present: bool
+pub nabu_core::EmbeddingModelStatus::semantic_available: bool
+impl core::clone::Clone for nabu_core::EmbeddingModelStatus
+pub fn nabu_core::EmbeddingModelStatus::clone(&self) -> nabu_core::EmbeddingModelStatus
+impl core::cmp::Eq for nabu_core::EmbeddingModelStatus
+impl core::cmp::PartialEq for nabu_core::EmbeddingModelStatus
+pub fn nabu_core::EmbeddingModelStatus::eq(&self, &nabu_core::EmbeddingModelStatus) -> bool
+impl core::fmt::Debug for nabu_core::EmbeddingModelStatus
+pub fn nabu_core::EmbeddingModelStatus::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for nabu_core::EmbeddingModelStatus
+impl serde_core::ser::Serialize for nabu_core::EmbeddingModelStatus
+pub fn nabu_core::EmbeddingModelStatus::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl core::marker::Freeze for nabu_core::EmbeddingModelStatus
+impl core::marker::Send for nabu_core::EmbeddingModelStatus
+impl core::marker::Sync for nabu_core::EmbeddingModelStatus
+impl core::marker::Unpin for nabu_core::EmbeddingModelStatus
+impl core::marker::UnsafeUnpin for nabu_core::EmbeddingModelStatus
+impl core::panic::unwind_safe::RefUnwindSafe for nabu_core::EmbeddingModelStatus
+impl core::panic::unwind_safe::UnwindSafe for nabu_core::EmbeddingModelStatus
+pub struct nabu_core::EmbeddingUnit
+pub nabu_core::EmbeddingUnit::kind: nabu_core::EmbeddingUnitKind
+pub nabu_core::EmbeddingUnit::text: alloc::string::String
+pub nabu_core::EmbeddingUnit::text_hash: alloc::string::String
+pub nabu_core::EmbeddingUnit::unit_index: usize
+impl core::clone::Clone for nabu_core::EmbeddingUnit
+pub fn nabu_core::EmbeddingUnit::clone(&self) -> nabu_core::EmbeddingUnit
+impl core::cmp::Eq for nabu_core::EmbeddingUnit
+impl core::cmp::PartialEq for nabu_core::EmbeddingUnit
+pub fn nabu_core::EmbeddingUnit::eq(&self, &nabu_core::EmbeddingUnit) -> bool
+impl core::fmt::Debug for nabu_core::EmbeddingUnit
+pub fn nabu_core::EmbeddingUnit::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for nabu_core::EmbeddingUnit
+impl core::marker::Freeze for nabu_core::EmbeddingUnit
+impl core::marker::Send for nabu_core::EmbeddingUnit
+impl core::marker::Sync for nabu_core::EmbeddingUnit
+impl core::marker::Unpin for nabu_core::EmbeddingUnit
+impl core::marker::UnsafeUnpin for nabu_core::EmbeddingUnit
+impl core::panic::unwind_safe::RefUnwindSafe for nabu_core::EmbeddingUnit
+impl core::panic::unwind_safe::UnwindSafe for nabu_core::EmbeddingUnit
+pub struct nabu_core::EventEnvelope
+pub nabu_core::EventEnvelope::canonical_type: nabu_core::CanonicalType
+pub nabu_core::EventEnvelope::captured_at: alloc::string::String
+pub nabu_core::EventEnvelope::cwd: core::option::Option<alloc::string::String>
+pub nabu_core::EventEnvelope::dedupe_key: alloc::string::String
+pub nabu_core::EventEnvelope::filename_session_id: alloc::string::String
+pub nabu_core::EventEnvelope::message_id: core::option::Option<alloc::string::String>
+pub nabu_core::EventEnvelope::payload: serde_json::value::Value
+pub nabu_core::EventEnvelope::payload_ref: core::option::Option<alloc::string::String>
+pub nabu_core::EventEnvelope::project_root: core::option::Option<alloc::string::String>
+pub nabu_core::EventEnvelope::raw_file: core::option::Option<alloc::string::String>
+pub nabu_core::EventEnvelope::raw_offset: core::option::Option<i64>
+pub nabu_core::EventEnvelope::schema_version: u32
+pub nabu_core::EventEnvelope::sequence: core::option::Option<i64>
+pub nabu_core::EventEnvelope::session_id: alloc::string::String
+pub nabu_core::EventEnvelope::source: nabu_core::Source
+pub nabu_core::EventEnvelope::source_event_id: core::option::Option<alloc::string::String>
+pub nabu_core::EventEnvelope::source_event_type: alloc::string::String
+pub nabu_core::EventEnvelope::tool: nabu_core::Tool
+pub nabu_core::EventEnvelope::tool_version: core::option::Option<alloc::string::String>
+pub nabu_core::EventEnvelope::turn_id: core::option::Option<alloc::string::String>
+impl nabu_core::EventEnvelope
+pub fn nabu_core::EventEnvelope::validate(&self) -> nabu_core::Result<()>
+impl core::clone::Clone for nabu_core::EventEnvelope
+pub fn nabu_core::EventEnvelope::clone(&self) -> nabu_core::EventEnvelope
+impl core::cmp::PartialEq for nabu_core::EventEnvelope
+pub fn nabu_core::EventEnvelope::eq(&self, &nabu_core::EventEnvelope) -> bool
+impl core::fmt::Debug for nabu_core::EventEnvelope
+pub fn nabu_core::EventEnvelope::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for nabu_core::EventEnvelope
+impl serde_core::ser::Serialize for nabu_core::EventEnvelope
+pub fn nabu_core::EventEnvelope::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for nabu_core::EventEnvelope
+pub fn nabu_core::EventEnvelope::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for nabu_core::EventEnvelope
+impl core::marker::Send for nabu_core::EventEnvelope
+impl core::marker::Sync for nabu_core::EventEnvelope
+impl core::marker::Unpin for nabu_core::EventEnvelope
+impl core::marker::UnsafeUnpin for nabu_core::EventEnvelope
+impl core::panic::unwind_safe::RefUnwindSafe for nabu_core::EventEnvelope
+impl core::panic::unwind_safe::UnwindSafe for nabu_core::EventEnvelope
+pub struct nabu_core::EventOptions
+pub nabu_core::EventOptions::corroborate: bool
+pub nabu_core::EventOptions::redact: bool
+impl core::clone::Clone for nabu_core::EventOptions
+pub fn nabu_core::EventOptions::clone(&self) -> nabu_core::EventOptions
+impl core::cmp::Eq for nabu_core::EventOptions
+impl core::cmp::PartialEq for nabu_core::EventOptions
+pub fn nabu_core::EventOptions::eq(&self, &nabu_core::EventOptions) -> bool
+impl core::default::Default for nabu_core::EventOptions
+pub fn nabu_core::EventOptions::default() -> nabu_core::EventOptions
+impl core::fmt::Debug for nabu_core::EventOptions
+pub fn nabu_core::EventOptions::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for nabu_core::EventOptions
+impl core::marker::Freeze for nabu_core::EventOptions
+impl core::marker::Send for nabu_core::EventOptions
+impl core::marker::Sync for nabu_core::EventOptions
+impl core::marker::Unpin for nabu_core::EventOptions
+impl core::marker::UnsafeUnpin for nabu_core::EventOptions
+impl core::panic::unwind_safe::RefUnwindSafe for nabu_core::EventOptions
+impl core::panic::unwind_safe::UnwindSafe for nabu_core::EventOptions
+pub struct nabu_core::EventPointer
+pub nabu_core::EventPointer::corroboration: core::option::Option<nabu_core::Corroboration>
+pub nabu_core::EventPointer::envelope: nabu_core::EventEnvelope
+pub nabu_core::EventPointer::raw_file: alloc::string::String
+pub nabu_core::EventPointer::raw_line: i64
+pub nabu_core::EventPointer::raw_offset: core::option::Option<i64>
+pub nabu_core::EventPointer::searchable_text: alloc::string::String
+impl core::clone::Clone for nabu_core::EventPointer
+pub fn nabu_core::EventPointer::clone(&self) -> nabu_core::EventPointer
+impl core::cmp::PartialEq for nabu_core::EventPointer
+pub fn nabu_core::EventPointer::eq(&self, &nabu_core::EventPointer) -> bool
+impl core::fmt::Debug for nabu_core::EventPointer
+pub fn nabu_core::EventPointer::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for nabu_core::EventPointer
+impl serde_core::ser::Serialize for nabu_core::EventPointer
+pub fn nabu_core::EventPointer::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl core::marker::Freeze for nabu_core::EventPointer
+impl core::marker::Send for nabu_core::EventPointer
+impl core::marker::Sync for nabu_core::EventPointer
+impl core::marker::Unpin for nabu_core::EventPointer
+impl core::marker::UnsafeUnpin for nabu_core::EventPointer
+impl core::panic::unwind_safe::RefUnwindSafe for nabu_core::EventPointer
+impl core::panic::unwind_safe::UnwindSafe for nabu_core::EventPointer
+pub struct nabu_core::FileIngestReport
+pub nabu_core::FileIngestReport::appended_events: usize
+impl core::clone::Clone for nabu_core::FileIngestReport
+pub fn nabu_core::FileIngestReport::clone(&self) -> nabu_core::FileIngestReport
+impl core::cmp::Eq for nabu_core::FileIngestReport
+impl core::cmp::PartialEq for nabu_core::FileIngestReport
+pub fn nabu_core::FileIngestReport::eq(&self, &nabu_core::FileIngestReport) -> bool
+impl core::fmt::Debug for nabu_core::FileIngestReport
+pub fn nabu_core::FileIngestReport::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for nabu_core::FileIngestReport
+impl serde_core::ser::Serialize for nabu_core::FileIngestReport
+pub fn nabu_core::FileIngestReport::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl core::marker::Freeze for nabu_core::FileIngestReport
+impl core::marker::Send for nabu_core::FileIngestReport
+impl core::marker::Sync for nabu_core::FileIngestReport
+impl core::marker::Unpin for nabu_core::FileIngestReport
+impl core::marker::UnsafeUnpin for nabu_core::FileIngestReport
+impl core::panic::unwind_safe::RefUnwindSafe for nabu_core::FileIngestReport
+impl core::panic::unwind_safe::UnwindSafe for nabu_core::FileIngestReport
+pub struct nabu_core::IndexOptions
+pub nabu_core::IndexOptions::embed: bool
+impl core::clone::Clone for nabu_core::IndexOptions
+pub fn nabu_core::IndexOptions::clone(&self) -> nabu_core::IndexOptions
+impl core::cmp::Eq for nabu_core::IndexOptions
+impl core::cmp::PartialEq for nabu_core::IndexOptions
+pub fn nabu_core::IndexOptions::eq(&self, &nabu_core::IndexOptions) -> bool
+impl core::default::Default for nabu_core::IndexOptions
+pub fn nabu_core::IndexOptions::default() -> Self
+impl core::fmt::Debug for nabu_core::IndexOptions
+pub fn nabu_core::IndexOptions::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for nabu_core::IndexOptions
+impl core::marker::StructuralPartialEq for nabu_core::IndexOptions
+impl core::marker::Freeze for nabu_core::IndexOptions
+impl core::marker::Send for nabu_core::IndexOptions
+impl core::marker::Sync for nabu_core::IndexOptions
+impl core::marker::Unpin for nabu_core::IndexOptions
+impl core::marker::UnsafeUnpin for nabu_core::IndexOptions
+impl core::panic::unwind_safe::RefUnwindSafe for nabu_core::IndexOptions
+impl core::panic::unwind_safe::UnwindSafe for nabu_core::IndexOptions
+pub struct nabu_core::IndexReport
+pub nabu_core::IndexReport::indexed_events: usize
+impl core::clone::Clone for nabu_core::IndexReport
+pub fn nabu_core::IndexReport::clone(&self) -> nabu_core::IndexReport
+impl core::cmp::Eq for nabu_core::IndexReport
+impl core::cmp::PartialEq for nabu_core::IndexReport
+pub fn nabu_core::IndexReport::eq(&self, &nabu_core::IndexReport) -> bool
+impl core::fmt::Debug for nabu_core::IndexReport
+pub fn nabu_core::IndexReport::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for nabu_core::IndexReport
+impl serde_core::ser::Serialize for nabu_core::IndexReport
+pub fn nabu_core::IndexReport::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl core::marker::Freeze for nabu_core::IndexReport
+impl core::marker::Send for nabu_core::IndexReport
+impl core::marker::Sync for nabu_core::IndexReport
+impl core::marker::Unpin for nabu_core::IndexReport
+impl core::marker::UnsafeUnpin for nabu_core::IndexReport
+impl core::panic::unwind_safe::RefUnwindSafe for nabu_core::IndexReport
+impl core::panic::unwind_safe::UnwindSafe for nabu_core::IndexReport
+pub struct nabu_core::InitReport
+pub nabu_core::InitReport::db_path: std::path::PathBuf
+pub nabu_core::InitReport::home: std::path::PathBuf
+impl core::clone::Clone for nabu_core::InitReport
+pub fn nabu_core::InitReport::clone(&self) -> nabu_core::InitReport
+impl core::cmp::Eq for nabu_core::InitReport
+impl core::cmp::PartialEq for nabu_core::InitReport
+pub fn nabu_core::InitReport::eq(&self, &nabu_core::InitReport) -> bool
+impl core::fmt::Debug for nabu_core::InitReport
+pub fn nabu_core::InitReport::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for nabu_core::InitReport
+impl core::marker::Freeze for nabu_core::InitReport
+impl core::marker::Send for nabu_core::InitReport
+impl core::marker::Sync for nabu_core::InitReport
+impl core::marker::Unpin for nabu_core::InitReport
+impl core::marker::UnsafeUnpin for nabu_core::InitReport
+impl core::panic::unwind_safe::RefUnwindSafe for nabu_core::InitReport
+impl core::panic::unwind_safe::UnwindSafe for nabu_core::InitReport
+pub struct nabu_core::PurgeAllArtifact
+pub nabu_core::PurgeAllArtifact::action: nabu_core::PurgeAction
+pub nabu_core::PurgeAllArtifact::bytes: u64
+pub nabu_core::PurgeAllArtifact::name: alloc::string::String
+pub nabu_core::PurgeAllArtifact::path: std::path::PathBuf
+pub nabu_core::PurgeAllArtifact::tier: nabu_core::PurgeTier
+impl core::clone::Clone for nabu_core::PurgeAllArtifact
+pub fn nabu_core::PurgeAllArtifact::clone(&self) -> nabu_core::PurgeAllArtifact
+impl core::cmp::Eq for nabu_core::PurgeAllArtifact
+impl core::cmp::PartialEq for nabu_core::PurgeAllArtifact
+pub fn nabu_core::PurgeAllArtifact::eq(&self, &nabu_core::PurgeAllArtifact) -> bool
+impl core::fmt::Debug for nabu_core::PurgeAllArtifact
+pub fn nabu_core::PurgeAllArtifact::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for nabu_core::PurgeAllArtifact
+impl serde_core::ser::Serialize for nabu_core::PurgeAllArtifact
+pub fn nabu_core::PurgeAllArtifact::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl core::marker::Freeze for nabu_core::PurgeAllArtifact
+impl core::marker::Send for nabu_core::PurgeAllArtifact
+impl core::marker::Sync for nabu_core::PurgeAllArtifact
+impl core::marker::Unpin for nabu_core::PurgeAllArtifact
+impl core::marker::UnsafeUnpin for nabu_core::PurgeAllArtifact
+impl core::panic::unwind_safe::RefUnwindSafe for nabu_core::PurgeAllArtifact
+impl core::panic::unwind_safe::UnwindSafe for nabu_core::PurgeAllArtifact
+pub struct nabu_core::PurgeAllOptions
+pub nabu_core::PurgeAllOptions::dry_run: bool
+pub nabu_core::PurgeAllOptions::keep_config: bool
+pub nabu_core::PurgeAllOptions::keep_model: bool
+impl core::clone::Clone for nabu_core::PurgeAllOptions
+pub fn nabu_core::PurgeAllOptions::clone(&self) -> nabu_core::PurgeAllOptions
+impl core::fmt::Debug for nabu_core::PurgeAllOptions
+pub fn nabu_core::PurgeAllOptions::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for nabu_core::PurgeAllOptions
+impl core::marker::Freeze for nabu_core::PurgeAllOptions
+impl core::marker::Send for nabu_core::PurgeAllOptions
+impl core::marker::Sync for nabu_core::PurgeAllOptions
+impl core::marker::Unpin for nabu_core::PurgeAllOptions
+impl core::marker::UnsafeUnpin for nabu_core::PurgeAllOptions
+impl core::panic::unwind_safe::RefUnwindSafe for nabu_core::PurgeAllOptions
+impl core::panic::unwind_safe::UnwindSafe for nabu_core::PurgeAllOptions
+pub struct nabu_core::PurgeAllReport
+pub nabu_core::PurgeAllReport::artifacts: alloc::vec::Vec<nabu_core::PurgeAllArtifact>
+pub nabu_core::PurgeAllReport::authoritative_in_scope: bool
+pub nabu_core::PurgeAllReport::bytes_in_scope: u64
+pub nabu_core::PurgeAllReport::bytes_reclaimed: u64
+pub nabu_core::PurgeAllReport::dry_run: bool
+pub nabu_core::PurgeAllReport::home: std::path::PathBuf
+pub nabu_core::PurgeAllReport::unknown_entries: alloc::vec::Vec<std::path::PathBuf>
+impl core::clone::Clone for nabu_core::PurgeAllReport
+pub fn nabu_core::PurgeAllReport::clone(&self) -> nabu_core::PurgeAllReport
+impl core::cmp::Eq for nabu_core::PurgeAllReport
+impl core::cmp::PartialEq for nabu_core::PurgeAllReport
+pub fn nabu_core::PurgeAllReport::eq(&self, &nabu_core::PurgeAllReport) -> bool
+impl core::fmt::Debug for nabu_core::PurgeAllReport
+pub fn nabu_core::PurgeAllReport::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for nabu_core::PurgeAllReport
+impl serde_core::ser::Serialize for nabu_core::PurgeAllReport
+pub fn nabu_core::PurgeAllReport::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl core::marker::Freeze for nabu_core::PurgeAllReport
+impl core::marker::Send for nabu_core::PurgeAllReport
+impl core::marker::Sync for nabu_core::PurgeAllReport
+impl core::marker::Unpin for nabu_core::PurgeAllReport
+impl core::marker::UnsafeUnpin for nabu_core::PurgeAllReport
+impl core::panic::unwind_safe::RefUnwindSafe for nabu_core::PurgeAllReport
+impl core::panic::unwind_safe::UnwindSafe for nabu_core::PurgeAllReport
+pub struct nabu_core::PurgeReport
+pub nabu_core::PurgeReport::indexed_events_removed: usize
+pub nabu_core::PurgeReport::raw_files_removed: usize
+pub nabu_core::PurgeReport::sessions_removed: usize
+impl core::clone::Clone for nabu_core::PurgeReport
+pub fn nabu_core::PurgeReport::clone(&self) -> nabu_core::PurgeReport
+impl core::cmp::Eq for nabu_core::PurgeReport
+impl core::cmp::PartialEq for nabu_core::PurgeReport
+pub fn nabu_core::PurgeReport::eq(&self, &nabu_core::PurgeReport) -> bool
+impl core::fmt::Debug for nabu_core::PurgeReport
+pub fn nabu_core::PurgeReport::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for nabu_core::PurgeReport
+impl serde_core::ser::Serialize for nabu_core::PurgeReport
+pub fn nabu_core::PurgeReport::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl core::marker::Freeze for nabu_core::PurgeReport
+impl core::marker::Send for nabu_core::PurgeReport
+impl core::marker::Sync for nabu_core::PurgeReport
+impl core::marker::Unpin for nabu_core::PurgeReport
+impl core::marker::UnsafeUnpin for nabu_core::PurgeReport
+impl core::panic::unwind_safe::RefUnwindSafe for nabu_core::PurgeReport
+impl core::panic::unwind_safe::UnwindSafe for nabu_core::PurgeReport
+pub struct nabu_core::SearchContinuation
+pub nabu_core::SearchContinuation::next_offset: usize
+impl core::clone::Clone for nabu_core::SearchContinuation
+pub fn nabu_core::SearchContinuation::clone(&self) -> nabu_core::SearchContinuation
+impl core::cmp::Eq for nabu_core::SearchContinuation
+impl core::cmp::PartialEq for nabu_core::SearchContinuation
+pub fn nabu_core::SearchContinuation::eq(&self, &nabu_core::SearchContinuation) -> bool
+impl core::fmt::Debug for nabu_core::SearchContinuation
+pub fn nabu_core::SearchContinuation::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for nabu_core::SearchContinuation
+impl serde_core::ser::Serialize for nabu_core::SearchContinuation
+pub fn nabu_core::SearchContinuation::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl core::marker::Freeze for nabu_core::SearchContinuation
+impl core::marker::Send for nabu_core::SearchContinuation
+impl core::marker::Sync for nabu_core::SearchContinuation
+impl core::marker::Unpin for nabu_core::SearchContinuation
+impl core::marker::UnsafeUnpin for nabu_core::SearchContinuation
+impl core::panic::unwind_safe::RefUnwindSafe for nabu_core::SearchContinuation
+impl core::panic::unwind_safe::UnwindSafe for nabu_core::SearchContinuation
+pub struct nabu_core::SearchOptions
+pub nabu_core::SearchOptions::canonical_type: core::option::Option<alloc::string::String>
+pub nabu_core::SearchOptions::command: core::option::Option<alloc::string::String>
+pub nabu_core::SearchOptions::corroborate: bool
+pub nabu_core::SearchOptions::cwd: core::option::Option<alloc::string::String>
+pub nabu_core::SearchOptions::dedupe: bool
+pub nabu_core::SearchOptions::file: core::option::Option<alloc::string::String>
+pub nabu_core::SearchOptions::include_deltas: bool
+pub nabu_core::SearchOptions::include_payload: bool
+pub nabu_core::SearchOptions::limit: usize
+pub nabu_core::SearchOptions::max_snippet_chars: usize
+pub nabu_core::SearchOptions::mode: nabu_core::SearchMode
+pub nabu_core::SearchOptions::offset: usize
+pub nabu_core::SearchOptions::session_id: core::option::Option<alloc::string::String>
+pub nabu_core::SearchOptions::since: core::option::Option<alloc::string::String>
+pub nabu_core::SearchOptions::tool: core::option::Option<nabu_core::Tool>
+impl core::clone::Clone for nabu_core::SearchOptions
+pub fn nabu_core::SearchOptions::clone(&self) -> nabu_core::SearchOptions
+impl core::cmp::Eq for nabu_core::SearchOptions
+impl core::cmp::PartialEq for nabu_core::SearchOptions
+pub fn nabu_core::SearchOptions::eq(&self, &nabu_core::SearchOptions) -> bool
+impl core::default::Default for nabu_core::SearchOptions
+pub fn nabu_core::SearchOptions::default() -> Self
+impl core::fmt::Debug for nabu_core::SearchOptions
+pub fn nabu_core::SearchOptions::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for nabu_core::SearchOptions
+impl core::marker::Freeze for nabu_core::SearchOptions
+impl core::marker::Send for nabu_core::SearchOptions
+impl core::marker::Sync for nabu_core::SearchOptions
+impl core::marker::Unpin for nabu_core::SearchOptions
+impl core::marker::UnsafeUnpin for nabu_core::SearchOptions
+impl core::panic::unwind_safe::RefUnwindSafe for nabu_core::SearchOptions
+impl core::panic::unwind_safe::UnwindSafe for nabu_core::SearchOptions
+pub struct nabu_core::SearchPage
+pub nabu_core::SearchPage::continuation: core::option::Option<nabu_core::SearchContinuation>
+pub nabu_core::SearchPage::dedupe: bool
+pub nabu_core::SearchPage::include_deltas: bool
+pub nabu_core::SearchPage::include_payload: bool
+pub nabu_core::SearchPage::limit_applied: usize
+pub nabu_core::SearchPage::max_snippet_chars_applied: usize
+pub nabu_core::SearchPage::mode_applied: nabu_core::SearchMode
+pub nabu_core::SearchPage::mode_requested: nabu_core::SearchMode
+pub nabu_core::SearchPage::offset_applied: usize
+pub nabu_core::SearchPage::results: alloc::vec::Vec<nabu_core::SearchResult>
+pub nabu_core::SearchPage::returned: usize
+pub nabu_core::SearchPage::semantic_available: bool
+pub nabu_core::SearchPage::total_estimated: core::option::Option<usize>
+pub nabu_core::SearchPage::truncated: bool
+impl core::clone::Clone for nabu_core::SearchPage
+pub fn nabu_core::SearchPage::clone(&self) -> nabu_core::SearchPage
+impl core::cmp::PartialEq for nabu_core::SearchPage
+pub fn nabu_core::SearchPage::eq(&self, &nabu_core::SearchPage) -> bool
+impl core::fmt::Debug for nabu_core::SearchPage
+pub fn nabu_core::SearchPage::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for nabu_core::SearchPage
+impl serde_core::ser::Serialize for nabu_core::SearchPage
+pub fn nabu_core::SearchPage::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl core::marker::Freeze for nabu_core::SearchPage
+impl core::marker::Send for nabu_core::SearchPage
+impl core::marker::Sync for nabu_core::SearchPage
+impl core::marker::Unpin for nabu_core::SearchPage
+impl core::marker::UnsafeUnpin for nabu_core::SearchPage
+impl core::panic::unwind_safe::RefUnwindSafe for nabu_core::SearchPage
+impl core::panic::unwind_safe::UnwindSafe for nabu_core::SearchPage
+pub struct nabu_core::SearchResult
+pub nabu_core::SearchResult::also_at: alloc::vec::Vec<i64>
+pub nabu_core::SearchResult::canonical_type: alloc::string::String
+pub nabu_core::SearchResult::compaction_state: alloc::string::String
+pub nabu_core::SearchResult::corroboration: core::option::Option<nabu_core::Corroboration>
+pub nabu_core::SearchResult::corroboration_text: alloc::string::String
+pub nabu_core::SearchResult::cwd: core::option::Option<alloc::string::String>
+pub nabu_core::SearchResult::payload: serde_json::value::Value
+pub nabu_core::SearchResult::project_root: core::option::Option<alloc::string::String>
+pub nabu_core::SearchResult::raw_file: alloc::string::String
+pub nabu_core::SearchResult::raw_line: i64
+pub nabu_core::SearchResult::raw_offset: core::option::Option<i64>
+pub nabu_core::SearchResult::retrieval_key: alloc::string::String
+pub nabu_core::SearchResult::score: f64
+pub nabu_core::SearchResult::session_id: alloc::string::String
+pub nabu_core::SearchResult::snippet: alloc::string::String
+pub nabu_core::SearchResult::timestamp: alloc::string::String
+pub nabu_core::SearchResult::tool: nabu_core::Tool
+impl core::clone::Clone for nabu_core::SearchResult
+pub fn nabu_core::SearchResult::clone(&self) -> nabu_core::SearchResult
+impl core::cmp::PartialEq for nabu_core::SearchResult
+pub fn nabu_core::SearchResult::eq(&self, &nabu_core::SearchResult) -> bool
+impl core::fmt::Debug for nabu_core::SearchResult
+pub fn nabu_core::SearchResult::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for nabu_core::SearchResult
+impl serde_core::ser::Serialize for nabu_core::SearchResult
+pub fn nabu_core::SearchResult::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl core::marker::Freeze for nabu_core::SearchResult
+impl core::marker::Send for nabu_core::SearchResult
+impl core::marker::Sync for nabu_core::SearchResult
+impl core::marker::Unpin for nabu_core::SearchResult
+impl core::marker::UnsafeUnpin for nabu_core::SearchResult
+impl core::panic::unwind_safe::RefUnwindSafe for nabu_core::SearchResult
+impl core::panic::unwind_safe::UnwindSafe for nabu_core::SearchResult
+pub struct nabu_core::SessionOptions
+pub nabu_core::SessionOptions::after: usize
+pub nabu_core::SessionOptions::after_raw_line: core::option::Option<i64>
+pub nabu_core::SessionOptions::around_raw_line: core::option::Option<i64>
+pub nabu_core::SessionOptions::before: usize
+pub nabu_core::SessionOptions::canonical_type: core::option::Option<alloc::string::String>
+pub nabu_core::SessionOptions::corroborate: bool
+pub nabu_core::SessionOptions::include_deltas: bool
+pub nabu_core::SessionOptions::limit_events: usize
+pub nabu_core::SessionOptions::redact: bool
+impl core::clone::Clone for nabu_core::SessionOptions
+pub fn nabu_core::SessionOptions::clone(&self) -> nabu_core::SessionOptions
+impl core::cmp::Eq for nabu_core::SessionOptions
+impl core::cmp::PartialEq for nabu_core::SessionOptions
+pub fn nabu_core::SessionOptions::eq(&self, &nabu_core::SessionOptions) -> bool
+impl core::default::Default for nabu_core::SessionOptions
+pub fn nabu_core::SessionOptions::default() -> Self
+impl core::fmt::Debug for nabu_core::SessionOptions
+pub fn nabu_core::SessionOptions::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for nabu_core::SessionOptions
+impl core::marker::Freeze for nabu_core::SessionOptions
+impl core::marker::Send for nabu_core::SessionOptions
+impl core::marker::Sync for nabu_core::SessionOptions
+impl core::marker::Unpin for nabu_core::SessionOptions
+impl core::marker::UnsafeUnpin for nabu_core::SessionOptions
+impl core::panic::unwind_safe::RefUnwindSafe for nabu_core::SessionOptions
+impl core::panic::unwind_safe::UnwindSafe for nabu_core::SessionOptions
+pub struct nabu_core::SessionPage
+pub nabu_core::SessionPage::after_applied: core::option::Option<usize>
+pub nabu_core::SessionPage::after_raw_line: core::option::Option<i64>
+pub nabu_core::SessionPage::around_raw_line: core::option::Option<i64>
+pub nabu_core::SessionPage::before_applied: core::option::Option<usize>
+pub nabu_core::SessionPage::canonical_type: core::option::Option<alloc::string::String>
+pub nabu_core::SessionPage::events: alloc::vec::Vec<nabu_core::StoredEvent>
+pub nabu_core::SessionPage::include_deltas: bool
+pub nabu_core::SessionPage::limit_events_applied: core::option::Option<usize>
+pub nabu_core::SessionPage::mode: alloc::string::String
+pub nabu_core::SessionPage::next_after_raw_line: core::option::Option<i64>
+pub nabu_core::SessionPage::raw_file: alloc::string::String
+pub nabu_core::SessionPage::session_id: alloc::string::String
+pub nabu_core::SessionPage::tool: nabu_core::Tool
+pub nabu_core::SessionPage::truncated: bool
+impl core::clone::Clone for nabu_core::SessionPage
+pub fn nabu_core::SessionPage::clone(&self) -> nabu_core::SessionPage
+impl core::cmp::PartialEq for nabu_core::SessionPage
+pub fn nabu_core::SessionPage::eq(&self, &nabu_core::SessionPage) -> bool
+impl core::fmt::Debug for nabu_core::SessionPage
+pub fn nabu_core::SessionPage::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for nabu_core::SessionPage
+impl serde_core::ser::Serialize for nabu_core::SessionPage
+pub fn nabu_core::SessionPage::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl core::marker::Freeze for nabu_core::SessionPage
+impl core::marker::Send for nabu_core::SessionPage
+impl core::marker::Sync for nabu_core::SessionPage
+impl core::marker::Unpin for nabu_core::SessionPage
+impl core::marker::UnsafeUnpin for nabu_core::SessionPage
+impl core::panic::unwind_safe::RefUnwindSafe for nabu_core::SessionPage
+impl core::panic::unwind_safe::UnwindSafe for nabu_core::SessionPage
+pub struct nabu_core::SessionSummary
+pub nabu_core::SessionSummary::compaction_count: i64
+pub nabu_core::SessionSummary::cwd: core::option::Option<alloc::string::String>
+pub nabu_core::SessionSummary::event_count: i64
+pub nabu_core::SessionSummary::message_count: i64
+pub nabu_core::SessionSummary::project_root: core::option::Option<alloc::string::String>
+pub nabu_core::SessionSummary::raw_file: alloc::string::String
+pub nabu_core::SessionSummary::session_id: alloc::string::String
+pub nabu_core::SessionSummary::started_at: core::option::Option<alloc::string::String>
+pub nabu_core::SessionSummary::tool: nabu_core::Tool
+pub nabu_core::SessionSummary::updated_at: core::option::Option<alloc::string::String>
+impl core::clone::Clone for nabu_core::SessionSummary
+pub fn nabu_core::SessionSummary::clone(&self) -> nabu_core::SessionSummary
+impl core::cmp::PartialEq for nabu_core::SessionSummary
+pub fn nabu_core::SessionSummary::eq(&self, &nabu_core::SessionSummary) -> bool
+impl core::fmt::Debug for nabu_core::SessionSummary
+pub fn nabu_core::SessionSummary::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for nabu_core::SessionSummary
+impl serde_core::ser::Serialize for nabu_core::SessionSummary
+pub fn nabu_core::SessionSummary::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl core::marker::Freeze for nabu_core::SessionSummary
+impl core::marker::Send for nabu_core::SessionSummary
+impl core::marker::Sync for nabu_core::SessionSummary
+impl core::marker::Unpin for nabu_core::SessionSummary
+impl core::marker::UnsafeUnpin for nabu_core::SessionSummary
+impl core::panic::unwind_safe::RefUnwindSafe for nabu_core::SessionSummary
+impl core::panic::unwind_safe::UnwindSafe for nabu_core::SessionSummary
+pub struct nabu_core::StorageFootprint
+pub nabu_core::StorageFootprint::blobs_bytes: u64
+pub nabu_core::StorageFootprint::canonical_total: u64
+pub nabu_core::StorageFootprint::derived_total: u64
+pub nabu_core::StorageFootprint::index_bytes: u64
+pub nabu_core::StorageFootprint::models_bytes: u64
+pub nabu_core::StorageFootprint::raw_bytes: u64
+pub nabu_core::StorageFootprint::spool_bytes: u64
+pub nabu_core::StorageFootprint::total_bytes: u64
+pub nabu_core::StorageFootprint::vectors_bytes: u64
+impl core::clone::Clone for nabu_core::StorageFootprint
+pub fn nabu_core::StorageFootprint::clone(&self) -> nabu_core::StorageFootprint
+impl core::cmp::Eq for nabu_core::StorageFootprint
+impl core::cmp::PartialEq for nabu_core::StorageFootprint
+pub fn nabu_core::StorageFootprint::eq(&self, &nabu_core::StorageFootprint) -> bool
+impl core::fmt::Debug for nabu_core::StorageFootprint
+pub fn nabu_core::StorageFootprint::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for nabu_core::StorageFootprint
+impl serde_core::ser::Serialize for nabu_core::StorageFootprint
+pub fn nabu_core::StorageFootprint::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl core::marker::Freeze for nabu_core::StorageFootprint
+impl core::marker::Send for nabu_core::StorageFootprint
+impl core::marker::Sync for nabu_core::StorageFootprint
+impl core::marker::Unpin for nabu_core::StorageFootprint
+impl core::marker::UnsafeUnpin for nabu_core::StorageFootprint
+impl core::panic::unwind_safe::RefUnwindSafe for nabu_core::StorageFootprint
+impl core::panic::unwind_safe::UnwindSafe for nabu_core::StorageFootprint
+pub struct nabu_core::StoredEvent
+pub nabu_core::StoredEvent::canonical_type: alloc::string::String
+pub nabu_core::StoredEvent::corroboration: core::option::Option<nabu_core::Corroboration>
+pub nabu_core::StoredEvent::cwd: core::option::Option<alloc::string::String>
+pub nabu_core::StoredEvent::project_root: core::option::Option<alloc::string::String>
+pub nabu_core::StoredEvent::raw_file: alloc::string::String
+pub nabu_core::StoredEvent::raw_line: i64
+pub nabu_core::StoredEvent::raw_offset: core::option::Option<i64>
+pub nabu_core::StoredEvent::session_id: alloc::string::String
+pub nabu_core::StoredEvent::text: alloc::string::String
+pub nabu_core::StoredEvent::timestamp: alloc::string::String
+pub nabu_core::StoredEvent::tool: nabu_core::Tool
+impl core::clone::Clone for nabu_core::StoredEvent
+pub fn nabu_core::StoredEvent::clone(&self) -> nabu_core::StoredEvent
+impl core::cmp::PartialEq for nabu_core::StoredEvent
+pub fn nabu_core::StoredEvent::eq(&self, &nabu_core::StoredEvent) -> bool
+impl core::fmt::Debug for nabu_core::StoredEvent
+pub fn nabu_core::StoredEvent::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for nabu_core::StoredEvent
+impl serde_core::ser::Serialize for nabu_core::StoredEvent
+pub fn nabu_core::StoredEvent::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl core::marker::Freeze for nabu_core::StoredEvent
+impl core::marker::Send for nabu_core::StoredEvent
+impl core::marker::Sync for nabu_core::StoredEvent
+impl core::marker::Unpin for nabu_core::StoredEvent
+impl core::marker::UnsafeUnpin for nabu_core::StoredEvent
+impl core::panic::unwind_safe::RefUnwindSafe for nabu_core::StoredEvent
+impl core::panic::unwind_safe::UnwindSafe for nabu_core::StoredEvent
+pub const nabu_core::MAX_INLINE_ENVELOPE_BYTES: usize
+pub const nabu_core::SCHEMA_VERSION: u32
+pub const nabu_core::SQLITE_SCHEMA: &str
+pub trait nabu_core::Embedder
+pub fn nabu_core::Embedder::document_batch_size(&self) -> usize
+pub fn nabu_core::Embedder::embed_documents(&self, &[alloc::string::String]) -> nabu_core::Result<alloc::vec::Vec<alloc::vec::Vec<f32>>>
+pub fn nabu_core::Embedder::embed_query(&self, &str) -> nabu_core::Result<alloc::vec::Vec<f32>>
+pub fn nabu_core::Embedder::intra_threads(&self) -> usize
+pub fn nabu_core::backfill(&std::path::Path, core::option::Option<nabu_core::Tool>, &std::path::Path) -> nabu_core::Result<nabu_core::BackfillReport>
+pub fn nabu_core::backfill_dry_run(&std::path::Path, core::option::Option<nabu_core::Tool>, &std::path::Path, core::option::Option<&str>) -> nabu_core::Result<nabu_core::BackfillDryRunReport>
+pub fn nabu_core::backfill_dry_run_with_progress<F>(&std::path::Path, core::option::Option<nabu_core::Tool>, &std::path::Path, core::option::Option<&str>, F) -> nabu_core::Result<nabu_core::BackfillDryRunReport> where F: core::ops::function::Fn(nabu_core::BackfillProgress) + core::marker::Sync
+pub fn nabu_core::backfill_since(&std::path::Path, core::option::Option<nabu_core::Tool>, &std::path::Path, core::option::Option<&str>) -> nabu_core::Result<nabu_core::BackfillReport>
+pub fn nabu_core::backfill_since_with_progress<F>(&std::path::Path, core::option::Option<nabu_core::Tool>, &std::path::Path, core::option::Option<&str>, F) -> nabu_core::Result<nabu_core::BackfillReport> where F: core::ops::function::Fn(nabu_core::BackfillProgress) + core::marker::Sync
+pub fn nabu_core::canonical_raw_path(&std::path::Path, nabu_core::Tool, &str) -> std::path::PathBuf
+pub fn nabu_core::dedupe_key(nabu_core::DedupeParts<'_>) -> nabu_core::Result<alloc::string::String>
+pub fn nabu_core::default_home() -> nabu_core::Result<std::path::PathBuf>
+pub fn nabu_core::doctor(&std::path::Path) -> nabu_core::DoctorReport
+pub fn nabu_core::doctor_with_options(&std::path::Path, bool) -> nabu_core::DoctorReport
+pub fn nabu_core::doctor_with_progress(&std::path::Path, bool, &mut dyn core::ops::function::FnMut(nabu_core::DoctorStage, bool)) -> nabu_core::DoctorReport
+pub fn nabu_core::download_embedding_model(&std::path::Path, &str) -> nabu_core::Result<nabu_core::EmbeddingDownloadReport>
+pub fn nabu_core::download_embedding_model_with_progress<F>(&std::path::Path, &str, F) -> nabu_core::Result<nabu_core::EmbeddingDownloadReport> where F: core::ops::function::FnMut(nabu_core::EmbeddingDownloadProgress)
+pub fn nabu_core::embedding_model_disclosure(&std::path::Path, &str) -> nabu_core::Result<nabu_core::EmbeddingModelDisclosure>
+pub fn nabu_core::embedding_model_status(&std::path::Path) -> nabu_core::EmbeddingModelStatus
+pub fn nabu_core::export_session_jsonl(&std::path::Path, nabu_core::Tool, &str) -> nabu_core::Result<alloc::string::String>
+pub fn nabu_core::export_session_jsonl_with_options(&std::path::Path, nabu_core::Tool, &str, bool) -> nabu_core::Result<alloc::string::String>
+pub fn nabu_core::export_session_markdown(&std::path::Path, nabu_core::Tool, &str) -> nabu_core::Result<alloc::string::String>
+pub fn nabu_core::export_session_markdown_with_options(&std::path::Path, nabu_core::Tool, &str, bool) -> nabu_core::Result<alloc::string::String>
+pub fn nabu_core::get_event_by_pointer(&std::path::Path, nabu_core::Tool, &str, core::option::Option<i64>, core::option::Option<i64>, bool) -> nabu_core::Result<nabu_core::EventPointer>
+pub fn nabu_core::get_event_by_pointer_with_options(&std::path::Path, nabu_core::Tool, &str, core::option::Option<i64>, core::option::Option<i64>, nabu_core::EventOptions) -> nabu_core::Result<nabu_core::EventPointer>
+pub fn nabu_core::get_session_page(&std::path::Path, nabu_core::Tool, &str, nabu_core::SessionOptions) -> nabu_core::Result<nabu_core::SessionPage>
+pub fn nabu_core::index_once(&std::path::Path) -> nabu_core::Result<nabu_core::IndexReport>
+pub fn nabu_core::index_once_with_options(&std::path::Path, nabu_core::IndexOptions) -> nabu_core::Result<nabu_core::IndexReport>
+pub fn nabu_core::index_once_with_options_and_progress<F>(&std::path::Path, nabu_core::IndexOptions, F) -> nabu_core::Result<nabu_core::IndexReport> where F: core::ops::function::FnMut(nabu_core::EmbeddingIndexProgress)
+pub fn nabu_core::index_once_with_progress<F>(&std::path::Path, F) -> nabu_core::Result<nabu_core::IndexReport> where F: core::ops::function::FnMut(nabu_core::EmbeddingIndexProgress)
+pub fn nabu_core::ingest_file(&std::path::Path, nabu_core::Tool, nabu_core::Source, &std::path::Path) -> nabu_core::Result<nabu_core::FileIngestReport>
+pub fn nabu_core::ingest_hook_event(&std::path::Path, nabu_core::Tool, serde_json::value::Value) -> nabu_core::Result<nabu_core::AppendReport>
+pub fn nabu_core::ingest_opencode_server_messages(&std::path::Path, &str, serde_json::value::Value) -> nabu_core::Result<nabu_core::FileIngestReport>
+pub fn nabu_core::init_home(&std::path::Path) -> nabu_core::Result<nabu_core::InitReport>
+pub fn nabu_core::latest_event(&std::path::Path, nabu_core::Tool) -> nabu_core::Result<core::option::Option<nabu_core::StoredEvent>>
+pub fn nabu_core::list_sessions(&std::path::Path, core::option::Option<nabu_core::Tool>, core::option::Option<&str>, core::option::Option<&str>, usize) -> nabu_core::Result<alloc::vec::Vec<nabu_core::SessionSummary>>
+pub fn nabu_core::opencode_server_url(&std::path::Path) -> nabu_core::Result<core::option::Option<alloc::string::String>>
+pub fn nabu_core::prune_embedding_cache(&std::path::Path) -> nabu_core::Result<nabu_core::StorageFootprint>
+pub fn nabu_core::purge_all(&std::path::Path, nabu_core::PurgeAllOptions) -> nabu_core::Result<nabu_core::PurgeAllReport>
+pub fn nabu_core::purge_before(&std::path::Path, &str) -> nabu_core::Result<nabu_core::PurgeReport>
+pub fn nabu_core::purge_session(&std::path::Path, nabu_core::Tool, &str) -> nabu_core::Result<nabu_core::PurgeReport>
+pub fn nabu_core::redact_export_json(serde_json::value::Value) -> serde_json::value::Value
+pub fn nabu_core::redact_export_text(&str) -> alloc::string::String
+pub fn nabu_core::resolve_home(core::option::Option<std::path::PathBuf>) -> nabu_core::Result<std::path::PathBuf>
+pub fn nabu_core::sanitize_session_id(&str) -> alloc::string::String
+pub fn nabu_core::search_history(&std::path::Path, &str, usize) -> nabu_core::Result<alloc::vec::Vec<nabu_core::SearchResult>>
+pub fn nabu_core::search_history_filtered(&std::path::Path, &str, nabu_core::SearchOptions) -> nabu_core::Result<alloc::vec::Vec<nabu_core::SearchResult>>
+pub fn nabu_core::search_history_page(&std::path::Path, &str, nabu_core::SearchOptions) -> nabu_core::Result<nabu_core::SearchPage>
+pub fn nabu_core::session_events(&std::path::Path, nabu_core::Tool, &str) -> nabu_core::Result<alloc::vec::Vec<nabu_core::StoredEvent>>
+pub fn nabu_core::set_opencode_server_url(&std::path::Path, core::option::Option<&str>) -> nabu_core::Result<()>
+pub type nabu_core::Result<T> = core::result::Result<T, nabu_core::Error>

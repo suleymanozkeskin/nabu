@@ -73,3 +73,33 @@ jobs:
           command: check
           arguments: --all-features
           command-arguments: all
+
+  public-api:
+    name: nabu-core public API
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # cargo-public-api builds rustdoc JSON, which requires nightly. The
+      # nightly and cargo-public-api versions are pinned together so the
+      # rustdoc-JSON format matches the committed snapshot; bump both in lockstep
+      # and regenerate with `scripts/check-public-api.sh --update`.
+      - name: Install Rust (nightly, pinned)
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-06-19
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-public-api
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-public-api@0.52.0
+
+      # nabu-core/src/lib.rs is a facade; a dropped or renamed `pub use` can pass
+      # the workspace build because no downstream file references every symbol.
+      # This diffs the full public surface against the committed snapshot.
+      - name: Check public API snapshot
+        run: ./scripts/check-public-api.sh
