@@ -3002,6 +3002,43 @@ fn search_session_filter_fails_open_on_prefix_and_filename() {
     assert!(hit.raw_line > 0);
     assert!(hit.raw_offset.is_some());
     assert!(!hit.session_id.is_empty());
+
+    // Item 14: the native handoff command is populated for a real hit, names the
+    // hit's raw_file, and addresses the hit's raw_line. The path is shell-quoted.
+    let command = hit
+        .native_command
+        .as_deref()
+        .expect("indexed hit carries a native handoff command");
+    assert_eq!(
+        command,
+        format!("sed -n '{}p' '{}' | jq .", hit.raw_line, hit.raw_file)
+    );
+    assert!(command.contains(&format!("'{}p'", hit.raw_line)));
+    assert!(command.ends_with("| jq ."));
+}
+
+// Item 14: the native handoff command must be a single, safe, correct shell
+// command — the path shell-quoted (paths can contain spaces), the actual
+// raw_line used, and the raw_file targeted. Invalid line numbers yield None.
+#[test]
+fn native_handoff_command_is_line_addressed_and_shell_quoted() {
+    // Path with a space stays one argument via single quotes.
+    let cmd = native_jsonl_line_command("/var/log/my sessions/raven.jsonl", 42)
+        .expect("positive line yields a command");
+    assert_eq!(
+        cmd,
+        "sed -n '42p' '/var/log/my sessions/raven.jsonl' | jq ."
+    );
+    assert!(cmd.contains("'42p'"));
+    assert!(cmd.contains("'/var/log/my sessions/raven.jsonl'"));
+
+    // Embedded single quote is escaped via the '\'' idiom, keeping one argument.
+    let tricky = native_jsonl_line_command("/tmp/o'brien.jsonl", 3).unwrap();
+    assert_eq!(tricky, "sed -n '3p' '/tmp/o'\\''brien.jsonl' | jq .");
+
+    // Non-positive line numbers have no valid 1-based address.
+    assert_eq!(native_jsonl_line_command("/tmp/a.jsonl", 0), None);
+    assert_eq!(native_jsonl_line_command("/tmp/a.jsonl", -1), None);
 }
 
 #[test]
