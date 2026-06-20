@@ -8,9 +8,20 @@
 //! these helpers rather than re-deriving a private lock.
 
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard, PoisonError};
 
-pub(crate) static ENV_LOCK: Mutex<()> = Mutex::new(());
+static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+/// Acquire the env lock, tolerating poisoning. Env tests mutate process-global
+/// state under this lock and restore it via `EnvGuard` on drop, which runs even
+/// during a panic unwind, so the guarded state is consistent regardless of a
+/// prior holder's panic. Recovering the poisoned guard keeps one test's failure
+/// from cascading `PoisonError` into every later env test and masking the root
+/// cause. This is the only way to take the lock — `ENV_LOCK` stays private so a
+/// raw `.lock().unwrap()` cannot reintroduce the cascade.
+pub(crate) fn env_lock() -> MutexGuard<'static, ()> {
+    ENV_LOCK.lock().unwrap_or_else(PoisonError::into_inner)
+}
 
 #[cfg(unix)]
 pub(crate) fn set_mode(path: &Path, mode: u32) {

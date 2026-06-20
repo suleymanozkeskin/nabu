@@ -1136,7 +1136,7 @@ mod tests {
         add_claude_mcp, add_codex_mcp_block, add_opencode_mcp, mcp_apply_opencode,
         opencode_mcp_entry_installed,
     };
-    use crate::testsupport::{file_mode, set_mode, EnvGuard, ENV_LOCK};
+    use crate::testsupport::{env_lock, file_mode, set_mode, EnvGuard};
     use nabu_core::{search_history, EmbeddingIndexProgress, EmbeddingModelDisclosure};
     use serde_json::json;
     use std::fs;
@@ -1341,7 +1341,7 @@ mod tests {
 
     #[test]
     fn opencode_server_api_backfill_fetches_configured_session_messages() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = env_lock();
         let temp = tempdir().unwrap();
         let harness_home = temp.path().join("harness-home");
         let opencode_root = temp.path().join("opencode");
@@ -1433,7 +1433,7 @@ mod tests {
 
     #[test]
     fn opencode_server_api_backfill_skips_without_configured_url() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = env_lock();
         let temp = tempdir().unwrap();
         let harness_home = temp.path().join("harness-home");
         let opencode_root = temp.path().join("opencode");
@@ -1462,7 +1462,7 @@ mod tests {
 
     #[test]
     fn opencode_server_api_backfill_logs_and_continues_on_server_error() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = env_lock();
         let temp = tempdir().unwrap();
         let harness_home = temp.path().join("harness-home");
         let opencode_root = temp.path().join("opencode");
@@ -1504,7 +1504,7 @@ mod tests {
 
     #[test]
     fn doctor_json_reports_codex_and_opencode_parity_shape() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = env_lock();
         let temp = tempdir().unwrap();
         let harness_home = temp.path().join("harness-home");
         let fake_home = temp.path().join("home");
@@ -1590,7 +1590,7 @@ mod tests {
 
     #[test]
     fn default_backfill_scans_native_roots_for_all_tools() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = env_lock();
         let temp = tempdir().unwrap();
         let native = temp.path().join("native");
         let codex_home = native.join("codex-home");
@@ -1682,7 +1682,7 @@ mod tests {
 
     #[test]
     fn mcp_install_uninstall_preserves_configs_and_records_backups() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = env_lock();
         let temp = tempdir().unwrap();
         let home = temp.path().join("home");
         let codex_home = temp.path().join("codex");
@@ -1798,7 +1798,7 @@ mod tests {
 
     #[test]
     fn opencode_mcp_install_preserves_jsonc_comments_without_reformatting() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = env_lock();
         let temp = tempdir().unwrap();
         let harness_home = temp.path().join("harness-home");
         let opencode_config = temp.path().join("opencode");
@@ -1833,7 +1833,7 @@ mod tests {
 
     #[test]
     fn opencode_mcp_install_updates_existing_jsonc_mcp_without_reformatting() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = env_lock();
         let temp = tempdir().unwrap();
         let harness_home = temp.path().join("harness-home");
         let opencode_config = temp.path().join("opencode");
@@ -1877,7 +1877,7 @@ mod tests {
 
     #[test]
     fn opencode_mcp_install_preserves_same_line_comments_crlf_and_bom() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = env_lock();
         let temp = tempdir().unwrap();
         let harness_home = temp.path().join("harness-home");
         let opencode_config = temp.path().join("opencode");
@@ -1904,7 +1904,7 @@ mod tests {
 
     #[test]
     fn opencode_mcp_install_rejects_duplicate_jsonc_mcp_keys_without_rewriting() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = env_lock();
         let temp = tempdir().unwrap();
         let harness_home = temp.path().join("harness-home");
         let opencode_config = temp.path().join("opencode");
@@ -1928,7 +1928,7 @@ mod tests {
         use nabu_core::search_history;
         use std::os::unix::fs::PermissionsExt;
 
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = env_lock();
         let temp = tempdir().unwrap();
         let harness_home = temp.path().join("harness-home");
         let fake_home = temp.path().join("home");
