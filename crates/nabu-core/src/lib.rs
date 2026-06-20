@@ -6239,14 +6239,8 @@ fn looks_like_uuid(value: &str) -> bool {
         })
 }
 
-fn string_pointer(payload: &Value, pointer: &str) -> Option<String> {
-    payload
-        .pointer(pointer)
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
-}
+mod json;
+pub(crate) use json::{i64_pointer, required_string, string_pointer};
 
 fn append_prepared_events(home: &Path, events: Vec<EventEnvelope>) -> Result<Vec<AppendReport>> {
     let mut grouped = BTreeMap::<PathBuf, Vec<EventEnvelope>>::new();
@@ -8945,14 +8939,6 @@ fn recalculate_all_session_counts(conn: &Connection, db_path: &Path) -> Result<(
     })
 }
 
-fn required_string<'a>(payload: &'a Value, key: &str) -> Result<&'a str> {
-    payload
-        .get(key)
-        .and_then(Value::as_str)
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| Error::Validation(format!("payload.{key} must be a non-empty string")))
-}
-
 fn hook_event_name(payload: &Value) -> Result<&str> {
     payload
         .get("hook_event_name")
@@ -9285,18 +9271,6 @@ fn sequence_for_payload(
     }
 
     backfill_offset.and_then(|offset| i64::try_from(offset).ok())
-}
-
-fn i64_pointer(payload: &Value, pointer: &str) -> Option<i64> {
-    let value = payload.pointer(pointer)?;
-    value
-        .as_i64()
-        .or_else(|| value.as_u64().and_then(|value| i64::try_from(value).ok()))
-        .or_else(|| {
-            value
-                .as_str()
-                .and_then(|value| value.trim().parse::<i64>().ok())
-        })
 }
 
 fn lock_path_for_raw_file(raw_file: &Path) -> PathBuf {
