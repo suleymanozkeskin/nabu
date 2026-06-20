@@ -537,6 +537,39 @@ fn export_session_jsonl_can_exceed_general_response_cap() {
     assert!(structured.get("truncated").is_none());
 }
 
+#[test]
+fn concurrent_requests_all_receive_exactly_one_response() {
+    let temp = tempdir().unwrap();
+    let home = temp.path().join("home");
+    init_home(&home).unwrap();
+
+    // Many in-flight requests at once: the server handles them on a worker pool
+    // and may answer out of order, but every `id` must come back exactly once.
+    let count = 50;
+    let messages = (1..=count)
+        .map(|id| {
+            json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "method": "tools/call",
+                "params": {
+                    "name": "list_sessions",
+                    "arguments": {}
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let output = run_mcp(&home, messages);
+
+    let mut ids = output
+        .iter()
+        .map(|response| response["id"].as_i64().expect("response carries an id"))
+        .collect::<Vec<_>>();
+    ids.sort_unstable();
+    assert_eq!(ids, (1..=count).collect::<Vec<_>>());
+}
+
 fn run_mcp(home: &std::path::Path, messages: Vec<Value>) -> Vec<Value> {
     let input = messages
         .into_iter()

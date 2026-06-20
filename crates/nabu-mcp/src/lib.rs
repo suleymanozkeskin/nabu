@@ -8,12 +8,35 @@ use serde_json::{json, Value};
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use std::sync::mpsc::{channel, sync_channel};
+use std::sync::{Arc, Mutex};
+use std::thread;
 
 pub use nabu_core as core;
 
 const PROTOCOL_VERSION: &str = "2025-03-26";
 const MAX_MCP_BYTES: usize = 256 * 1024;
 const JSON_FIT_SAFETY_BYTES: usize = 2048;
+
+/// Fallback ceiling on MCP requests handled in parallel when the host CPU count
+/// is unavailable. Coding agents routinely issue several tool calls at once.
+const DEFAULT_MAX_CONCURRENCY: usize = 8;
+
+/// How many MCP requests may be handled concurrently. `NABU_MCP_MAX_CONCURRENCY`
+/// overrides; otherwise scale to the host CPU count, clamped to a sane band.
+fn max_concurrency() -> usize {
+    if let Some(value) = std::env::var("NABU_MCP_MAX_CONCURRENCY")
+        .ok()
+        .and_then(|raw| raw.parse::<usize>().ok())
+        .filter(|&n| n > 0)
+    {
+        return value;
+    }
+    thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(DEFAULT_MAX_CONCURRENCY)
+        .clamp(2, 16)
+}
 
 #[derive(Debug, Clone)]
 struct ResponseBudget {
@@ -54,24 +77,41 @@ struct RecallWindow {
 }
 
 pub fn serve_stdio(home: PathBuf) -> nabu_core::Result<()> {
-    serve_with_io(home, std::io::stdin().lock(), std::io::stdout().lock())
+    // Pass the unlocked `Stdout` (it is `Send`, unlike `StdoutLock`) so the
+    // writer can run on its own thread; the reader keeps the `StdinLock` on this
+    // thread, where `Send` is not required.
+    serve_with_io(home, std::io::stdin().lock(), std::io::stdout())
 }
 
-pub fn serve_with_io<R, W>(home: PathBuf, reader: R, mut writer: W) -> nabu_core::Result<()>
+pub fn serve_with_io<R, W>(home: PathBuf, reader: R, writer: W) -> nabu_core::Result<()>
 where
     R: BufRead,
-    W: Write,
+    W: Write + Send,
 {
-    for line in reader.lines() {
-        let line = line.map_err(|source| Error::Io {
-            path: PathBuf::from("<stdin>"),
-            source,
-        })?;
-        if line.trim().is_empty() {
-            continue;
-        }
-        match handle_message(&home, &line) {
-            Ok(Some(response)) => {
+    // Concurrent request handling. A serial loop made every later request wait
+    // behind the current one, so one slow tool call (e.g. a multi-minute
+    // `history_doctor` deep integrity scan on a multi-GB index, or a large
+    // export) stalled all search/list calls and clients timed out. JSON-RPC
+    // permits out-of-order responses keyed by `id`, handlers are stateless, and
+    // each opens its own SQLite connection against a WAL index, so requests are
+    // safe to run in parallel.
+    //
+    // Layout: this thread reads stdin and feeds a bounded work queue; a pool of
+    // worker threads handle requests; a single writer thread serializes every
+    // response onto the output stream (one consumer means responses never
+    // interleave). `thread::scope` lets the writer borrow non-`'static` writers.
+    let workers = max_concurrency();
+    // Bound the queue so a flood of input cannot buffer without limit: once the
+    // pool is saturated the reader blocks here, applying backpressure upstream.
+    let (work_tx, work_rx) = sync_channel::<String>(workers);
+    let work_rx = Arc::new(Mutex::new(work_rx));
+    let (resp_tx, resp_rx) = channel::<Value>();
+    let home = &home;
+
+    thread::scope(|scope| -> nabu_core::Result<()> {
+        let writer_handle = scope.spawn(move || -> nabu_core::Result<()> {
+            let mut writer = writer;
+            for response in resp_rx {
                 serde_json::to_writer(&mut writer, &response)?;
                 writer.write_all(b"\n").map_err(|source| Error::Io {
                     path: PathBuf::from("<stdout>"),
@@ -82,13 +122,63 @@ where
                     source,
                 })?;
             }
-            Ok(None) => {}
-            Err(error) => {
-                eprintln!("nabu mcp error: {error}");
+            Ok(())
+        });
+
+        for _ in 0..workers {
+            let work_rx = Arc::clone(&work_rx);
+            let resp_tx = resp_tx.clone();
+            scope.spawn(move || loop {
+                // Hold the queue lock only to dequeue; a closed channel (reader
+                // done) returns `Err`, which ends the worker.
+                let line = {
+                    let rx = work_rx.lock().expect("work queue mutex poisoned");
+                    rx.recv()
+                };
+                let Ok(line) = line else { break };
+                match handle_message(home, &line) {
+                    Ok(Some(response)) => {
+                        // A send error means the writer thread is gone (shutdown).
+                        if resp_tx.send(response).is_err() {
+                            break;
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(error) => eprintln!("nabu mcp error: {error}"),
+                }
+            });
+        }
+        // Drop this thread's response sender so the writer can finish once every
+        // worker has dropped its clone.
+        drop(resp_tx);
+
+        let mut read_result = Ok(());
+        for line in reader.lines() {
+            let line = match line {
+                Ok(line) => line,
+                Err(source) => {
+                    read_result = Err(Error::Io {
+                        path: PathBuf::from("<stdin>"),
+                        source,
+                    });
+                    break;
+                }
+            };
+            if line.trim().is_empty() {
+                continue;
+            }
+            // A send error means every worker has exited; stop reading.
+            if work_tx.send(line).is_err() {
+                break;
             }
         }
-    }
-    Ok(())
+        // Closing the work queue drains the pool; workers then drop their
+        // response senders, which lets the writer thread reach EOF and return.
+        drop(work_tx);
+
+        let write_result = writer_handle.join().expect("writer thread panicked");
+        read_result.and(write_result)
+    })
 }
 
 fn handle_message(home: &Path, line: &str) -> nabu_core::Result<Option<Value>> {

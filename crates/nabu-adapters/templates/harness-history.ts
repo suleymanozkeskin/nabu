@@ -41,7 +41,11 @@ async function capture(eventName: string, payload: HarnessEvent) {
 
     const exitCode = await proc.exited
     if (exitCode !== 0) {
-      console.error(`[nabu] ingest exited with status ${exitCode}`)
+      // Surface the subprocess's stderr (e.g. a validation message) instead of a
+      // bare status code, so capture failures are diagnosable.
+      const stderr = (await new Response(proc.stderr).text()).trim()
+      const detail = stderr ? `: ${stderr}` : ""
+      console.error(`[nabu] ingest (${eventName}) exited with status ${exitCode}${detail}`)
     }
   } catch (error) {
     console.error("[nabu] failed to capture OpenCode event", error)

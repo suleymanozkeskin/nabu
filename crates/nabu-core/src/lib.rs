@@ -1196,9 +1196,14 @@ pub fn init_home(home: &Path) -> Result<InitReport> {
 }
 
 pub fn ingest_hook_event(home: &Path, tool: Tool, payload: Value) -> Result<AppendReport> {
-    let session_id = required_string(&payload, "session_id")?.to_string();
-    let filename_session_id = sanitize_session_id(&session_id);
     let source_event_type = hook_event_name(&payload)?.to_string();
+    // OpenCode plugin events do not carry a top-level `session_id`; resolve from
+    // the tool's own event shapes. Claude/Codex hooks emit `session_id` directly.
+    let session_id = match tool {
+        Tool::Opencode => opencode_hook_session_id(&payload, &source_event_type)?,
+        _ => required_string(&payload, "session_id")?.to_string(),
+    };
+    let filename_session_id = sanitize_session_id(&session_id);
     let canonical_type = canonical_type_for_payload(tool, &source_event_type, &payload);
     let sequence = sequence_for_payload(tool, &source_event_type, &payload, None);
     let source_event_id = source_event_id_for_payload(tool, &source_event_type, &payload, sequence);
@@ -5389,6 +5394,52 @@ fn opencode_metadata_session_id(
             } else {
                 None
             }
+        })
+}
+
+/// Resolve the session id from a live OpenCode plugin event.
+///
+/// OpenCode events have no top-level `session_id` (the field the generic hook
+/// path requires), so every event the plugin forwards would otherwise fail
+/// validation and the ingest subprocess would exit non-zero. Message, part,
+/// tool, text, patch, step, and file events carry `sessionID`; the payload may
+/// be the bare object or wrapped under `info`/`part`/`properties`. `session.*`
+/// events have no `sessionID` and instead identify the session by the session
+/// object's own `id` — so that fallback is gated on the event name to avoid
+/// mistaking a message id for a session id.
+fn opencode_hook_session_id(payload: &Value, event_name: &str) -> Result<String> {
+    const SESSION_ID_POINTERS: [&str; 9] = [
+        "/sessionID",
+        "/session_id",
+        "/sessionId",
+        "/info/sessionID",
+        "/part/sessionID",
+        "/properties/info/sessionID",
+        "/properties/part/sessionID",
+        "/payload/sessionID",
+        "/payload/session_id",
+    ];
+    const SESSION_OBJECT_ID_POINTERS: [&str; 3] = ["/id", "/info/id", "/properties/info/id"];
+
+    SESSION_ID_POINTERS
+        .into_iter()
+        .find_map(|pointer| string_pointer(payload, pointer))
+        .or_else(|| {
+            // Only `session.*` events name the session by its own `id`.
+            event_name
+                .starts_with("session.")
+                .then(|| {
+                    SESSION_OBJECT_ID_POINTERS
+                        .into_iter()
+                        .find_map(|pointer| string_pointer(payload, pointer))
+                })
+                .flatten()
+        })
+        .ok_or_else(|| {
+            Error::Validation(format!(
+                "opencode event '{event_name}' has no resolvable session id \
+                 (looked for sessionID, and id for session.* events)"
+            ))
         })
 }
 
@@ -10273,6 +10324,87 @@ mod tests {
             .unwrap();
         assert!(payload_json.is_none());
         assert!(!embedding_model_status(&home).semantic_available);
+    }
+
+    #[test]
+    fn opencode_hook_resolves_session_id_from_native_event_shapes() {
+        let temp = tempdir().unwrap();
+        let home = temp.path().join("home");
+        init_home(&home).unwrap();
+
+        // Message/part/tool/etc. events carry top-level `sessionID`; live plugin
+        // payloads may nest the object under `info`/`part`.
+        let by_session_id = ingest_hook_event(
+            &home,
+            Tool::Opencode,
+            json!({
+                "hook_event_name": "message.updated",
+                "id": "msg_abc",
+                "sessionID": "ses_top_level",
+                "role": "assistant"
+            }),
+        )
+        .unwrap();
+        assert!(by_session_id.appended);
+        assert!(by_session_id
+            .raw_file
+            .to_string_lossy()
+            .contains("ses_top_level"));
+
+        let nested_part = ingest_hook_event(
+            &home,
+            Tool::Opencode,
+            json!({
+                "hook_event_name": "message.part.updated",
+                "part": { "id": "prt_1", "sessionID": "ses_nested_part", "type": "text" }
+            }),
+        )
+        .unwrap();
+        assert!(nested_part
+            .raw_file
+            .to_string_lossy()
+            .contains("ses_nested_part"));
+
+        // `session.*` events have no `sessionID`; the session id is `id`.
+        let session_created = ingest_hook_event(
+            &home,
+            Tool::Opencode,
+            json!({
+                "hook_event_name": "session.created",
+                "id": "ses_from_id",
+                "directory": "/tmp/project"
+            }),
+        )
+        .unwrap();
+        assert!(session_created
+            .raw_file
+            .to_string_lossy()
+            .contains("ses_from_id"));
+    }
+
+    #[test]
+    fn opencode_hook_does_not_mistake_message_id_for_session_id() {
+        // A non-session event with `id` but no `sessionID` must NOT fall back to
+        // `id` (that would be the message id, not the session id).
+        let payload = json!({
+            "hook_event_name": "message.updated",
+            "id": "msg_no_session"
+        });
+        let result = opencode_hook_session_id(&payload, "message.updated");
+        assert!(matches!(result, Err(Error::Validation(_))));
+    }
+
+    #[test]
+    fn opencode_hook_rejects_event_without_resolvable_session_id() {
+        let temp = tempdir().unwrap();
+        let home = temp.path().join("home");
+        init_home(&home).unwrap();
+        let result = ingest_hook_event(
+            &home,
+            Tool::Opencode,
+            json!({ "hook_event_name": "file.edited", "filename": "src/lib.rs" }),
+        );
+        assert!(matches!(result, Err(Error::Validation(_))));
     }
 
     #[cfg(feature = "semantic")]
