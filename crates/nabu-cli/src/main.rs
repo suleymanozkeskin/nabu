@@ -1422,8 +1422,12 @@ mod tests {
         index_once(&harness_home).unwrap();
         let results =
             search_history(&harness_home, "opencode configured server api marker", 10).unwrap();
-        assert_eq!(results.len(), 1);
+        // OR-semantics search (issue #1, P0 bug 1) also matches the pre-existing
+        // "shared marker" event on the overlapping terms; the appended gap event
+        // still ranks first since it satisfies every query term.
+        assert!(results.iter().any(|result| result.session_id == session_id));
         assert_eq!(results[0].session_id, session_id);
+        assert!(results[0].snippet.contains("api marker"));
         drop(env_guard);
     }
 

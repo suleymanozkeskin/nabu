@@ -508,12 +508,19 @@ fn searchable_terms(query: &str) -> Result<Vec<String>> {
     Ok(terms)
 }
 
+// Join terms with OR, not AND. AND made specificity collapse recall: a
+// longer, more-specific query required every term to occur in one event, so
+// adding terms could only ever shrink the match set to zero. With OR the FTS
+// match set is the union of per-term hits and bm25 (weighted by term rarity
+// and the column weights in lexical_search_ranked_results) floats events that
+// satisfy more of the query to the top — specificity now improves ranking
+// instead of erasing recall.
 fn quoted_fts_terms(terms: &[String]) -> String {
     terms
         .iter()
         .map(|term| format!("\"{}\"", term.replace('"', "\"\"")))
         .collect::<Vec<_>>()
-        .join(" AND ")
+        .join(" OR ")
 }
 
 fn hydrate_search_result_payloads(results: &mut [SearchResult]) -> Result<()> {
