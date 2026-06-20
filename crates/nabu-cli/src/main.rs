@@ -2,6 +2,7 @@ mod backup;
 mod bench;
 mod jsonc_edit;
 mod opencode_http;
+mod paths;
 mod progress;
 mod wizard;
 
@@ -10,6 +11,7 @@ mod testsupport;
 
 use crate::backup::{backup_cli_config, read_text_or_empty, text_diff, write_text_config};
 use crate::bench::{run_ingest_bench, run_search_bench};
+use crate::paths::ToolLayout;
 use crate::progress::ProgressEmitter;
 use clap::{Parser, Subcommand, ValueEnum};
 use nabu_adapters::{
@@ -1500,22 +1502,8 @@ fn visit_default_backfill_roots(
     mut visit: impl FnMut(Tool, &Path) -> nabu_core::Result<()>,
 ) -> nabu_core::Result<()> {
     for &tool in selected_backfill_tools(selection) {
-        match tool {
-            Tool::Codex => {
-                let codex_home = codex_home_dir()?;
-                let sessions = codex_home.join("sessions");
-                visit(Tool::Codex, &sessions)?;
-                let archived_sessions = codex_home.join("archived_sessions");
-                visit(Tool::Codex, &archived_sessions)?;
-            }
-            Tool::Claude => {
-                let projects = claude_projects_dir()?;
-                visit(Tool::Claude, &projects)?;
-            }
-            Tool::Opencode => {
-                let project_data = opencode_project_data_dir()?;
-                visit(Tool::Opencode, &project_data)?;
-            }
+        for root in tool.transcript_roots()? {
+            visit(tool, &root)?;
         }
     }
     Ok(())
@@ -1528,36 +1516,6 @@ fn selected_backfill_tools(selection: BackfillTool) -> &'static [Tool] {
         BackfillTool::Opencode => &[Tool::Opencode],
         BackfillTool::All => &[Tool::Codex, Tool::Claude, Tool::Opencode],
     }
-}
-
-fn codex_home_dir() -> nabu_core::Result<PathBuf> {
-    if let Some(codex_home) = std::env::var_os("CODEX_HOME") {
-        return Ok(PathBuf::from(codex_home));
-    }
-    let Some(home) = std::env::var_os("HOME") else {
-        return Err(Error::HomeUnavailable);
-    };
-    Ok(PathBuf::from(home).join(".codex"))
-}
-
-fn claude_projects_dir() -> nabu_core::Result<PathBuf> {
-    if let Some(config_dir) = std::env::var_os("CLAUDE_CONFIG_DIR") {
-        return Ok(PathBuf::from(config_dir).join("projects"));
-    }
-    let Some(home) = std::env::var_os("HOME") else {
-        return Err(Error::HomeUnavailable);
-    };
-    Ok(PathBuf::from(home).join(".claude").join("projects"))
-}
-
-fn opencode_project_data_dir() -> nabu_core::Result<PathBuf> {
-    let Some(home) = std::env::var_os("HOME") else {
-        return Err(Error::HomeUnavailable);
-    };
-    Ok(PathBuf::from(home)
-        .join(".local")
-        .join("share")
-        .join("opencode"))
 }
 
 fn backfill_opencode_server_api_if_configured(
@@ -1724,7 +1682,7 @@ fn mcp_apply_codex(
     action: McpConfigAction,
     dry_run: bool,
 ) -> nabu_core::Result<ConfigChangeReport> {
-    let target_path = codex_mcp_config_path()?;
+    let target_path = Tool::Codex.mcp_config_path()?;
     if dry_run {
         let diff = match action {
             McpConfigAction::Install => {
@@ -1809,7 +1767,7 @@ fn mcp_apply_claude(
         }
         McpConfigAction::Uninstall => "claude mcp remove --scope user nabu",
     };
-    let target_path = claude_mcp_config_path()?;
+    let target_path = Tool::Claude.mcp_config_path()?;
     let use_native = command_in_path("claude");
 
     let before_text = read_text_or_empty(&target_path)?;
@@ -1927,7 +1885,7 @@ fn mcp_apply_opencode(
     action: McpConfigAction,
     dry_run: bool,
 ) -> nabu_core::Result<ConfigChangeReport> {
-    let target_path = opencode_mcp_config_path()?;
+    let target_path = Tool::Opencode.mcp_config_path()?;
     if dry_run {
         let diff = match action {
             McpConfigAction::Install => {
@@ -2244,7 +2202,8 @@ fn bounded_probe_text(value: &str) -> String {
 }
 
 fn codex_mcp_entry_installed() -> bool {
-    codex_mcp_config_path()
+    Tool::Codex
+        .mcp_config_path()
         .ok()
         .and_then(|path| read_text_or_empty(&path).ok())
         .map(|content| content.contains("[mcp_servers.nabu]"))
@@ -2252,7 +2211,8 @@ fn codex_mcp_entry_installed() -> bool {
 }
 
 fn claude_mcp_entry_installed() -> bool {
-    claude_mcp_config_path()
+    Tool::Claude
+        .mcp_config_path()
         .ok()
         .and_then(|path| read_text_or_empty(&path).ok())
         .and_then(|content| serde_json::from_str::<Value>(&content).ok())
@@ -2261,7 +2221,8 @@ fn claude_mcp_entry_installed() -> bool {
 }
 
 fn opencode_mcp_entry_installed() -> bool {
-    opencode_mcp_config_path()
+    Tool::Opencode
+        .mcp_config_path()
         .ok()
         .and_then(|path| read_text_or_empty(&path).ok())
         .map(|content| {
@@ -2272,41 +2233,6 @@ fn opencode_mcp_entry_installed() -> bool {
                 || jsonc_edit::opencode_mcp_text_entry_installed(&content)
         })
         .unwrap_or(false)
-}
-
-fn codex_mcp_config_path() -> nabu_core::Result<PathBuf> {
-    if let Some(codex_home) = std::env::var_os("CODEX_HOME") {
-        return Ok(PathBuf::from(codex_home).join("config.toml"));
-    }
-    let Some(home) = std::env::var_os("HOME") else {
-        return Err(Error::HomeUnavailable);
-    };
-    Ok(PathBuf::from(home).join(".codex").join("config.toml"))
-}
-
-fn claude_mcp_config_path() -> nabu_core::Result<PathBuf> {
-    let Some(home) = std::env::var_os("HOME") else {
-        return Err(Error::HomeUnavailable);
-    };
-    Ok(PathBuf::from(home).join(".claude.json"))
-}
-
-fn opencode_mcp_config_path() -> nabu_core::Result<PathBuf> {
-    if let Some(config_dir) = std::env::var_os("OPENCODE_CONFIG_DIR") {
-        return Ok(PathBuf::from(config_dir).join("opencode.json"));
-    }
-    if let Some(config_home) = std::env::var_os("XDG_CONFIG_HOME") {
-        return Ok(PathBuf::from(config_home)
-            .join("opencode")
-            .join("opencode.json"));
-    }
-    let Some(home) = std::env::var_os("HOME") else {
-        return Err(Error::HomeUnavailable);
-    };
-    Ok(PathBuf::from(home)
-        .join(".config")
-        .join("opencode")
-        .join("opencode.json"))
 }
 
 fn add_codex_mcp_block(content: &str) -> String {
