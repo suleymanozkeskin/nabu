@@ -3064,6 +3064,47 @@ fn search_defaults_are_citation_first_and_full_payload_is_opt_in() {
 }
 
 #[test]
+fn search_default_snippet_length_is_triage_sized() {
+    assert_eq!(DEFAULT_SEARCH_SNIPPET_CHARS, 500);
+    assert_eq!(SearchOptions::default().max_snippet_chars, 500);
+
+    let temp = tempdir().unwrap();
+    let home = temp.path().join("home");
+    init_home(&home).unwrap();
+    ingest_hook_event(
+        &home,
+        Tool::Claude,
+        json!({
+            "session_id": "snippet-default-session",
+            "hook_event_name": "UserPromptSubmit",
+            "message_id": "snippet-default-1",
+            "cwd": "/tmp/nabu-fixture",
+            "project_root": "/tmp/nabu-fixture",
+            "prompt": format!("{} triage needle marker {}", "lead ".repeat(120), "tail ".repeat(120))
+        }),
+    )
+    .unwrap();
+    index_once(&home).unwrap();
+
+    // Omitting max_snippet_chars applies the default and yields a longer,
+    // match-centered snippet than the previous 240-char default would have.
+    let page =
+        search_history_page(&home, "triage needle marker", SearchOptions::default()).unwrap();
+    assert_eq!(page.max_snippet_chars_applied, 500);
+    let snippet = &page.results[0].snippet;
+    assert!(snippet.contains("triage needle marker"));
+    let len = snippet.chars().count();
+    assert!(
+        len > 240,
+        "default snippet should exceed the old 240 cap, got {len}"
+    );
+    assert!(
+        len <= 500,
+        "default snippet should honor the 500 cap, got {len}"
+    );
+}
+
+#[test]
 fn payload_hydration_uses_raw_offset_and_falls_back_to_line_scan() {
     let temp = tempdir().unwrap();
     let home = temp.path().join("home");

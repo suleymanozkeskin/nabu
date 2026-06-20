@@ -26,8 +26,15 @@ pub(crate) use db::{
     ensure_semantic_vector_schema, initialize_database, open_index, table_count, table_exists,
 };
 const MAX_SEARCH_LIMIT: usize = 50;
-const MAX_SEARCH_SNIPPET_CHARS: usize = 1000;
-pub(crate) const DEFAULT_SEARCH_SNIPPET_CHARS: usize = 240;
+/// Hard upper bound on per-result snippet length. Callers may request up to this
+/// many characters; requests above it are clamped.
+pub const MAX_SEARCH_SNIPPET_CHARS: usize = 1000;
+/// Default per-result snippet length applied when a caller omits
+/// `max_snippet_chars`. Sized for triage: ~500 chars (a few sentences of
+/// match-centered context) is enough to tell a real bug from discussion of one
+/// without a `get_session` round-trip, while staying far inside the MCP
+/// response-size budget even at the maximum result count.
+pub const DEFAULT_SEARCH_SNIPPET_CHARS: usize = 500;
 const MAX_SESSION_LIMIT: usize = 500;
 const MAX_CONTEXT_EVENTS_PER_SIDE: usize = 500;
 const MAX_DIRECTORY_SIZE_DEPTH: usize = 64;
