@@ -1617,19 +1617,31 @@ fn bounded_usize(
     min: usize,
     max: usize,
 ) -> Result<usize, ToolError> {
-    let value = arguments
-        .get(key)
-        .and_then(Value::as_i64)
-        .map(|value| value as isize)
-        .unwrap_or(default as isize);
-    if value < min as isize || value > max as isize {
+    let Some(raw) = arguments.get(key) else {
+        return Ok(default);
+    };
+    let Some(value) = raw.as_i64() else {
+        return Err(ToolError::new(
+            "VALIDATION_ERROR",
+            format!("{key} must be an integer"),
+            true,
+        ));
+    };
+    let Ok(value) = usize::try_from(value) else {
+        return Err(ToolError::new(
+            "VALIDATION_ERROR",
+            format!("{key} must be between {min} and {max}"),
+            true,
+        ));
+    };
+    if value < min || value > max {
         return Err(ToolError::new(
             "VALIDATION_ERROR",
             format!("{key} must be between {min} and {max}"),
             true,
         ));
     }
-    Ok(value as usize)
+    Ok(value)
 }
 
 fn clamped_usize(
@@ -1639,19 +1651,7 @@ fn clamped_usize(
     min: usize,
     max: usize,
 ) -> Result<usize, ToolError> {
-    let value = arguments
-        .get(key)
-        .and_then(Value::as_i64)
-        .map(|value| value as isize)
-        .unwrap_or(default as isize);
-    if value < min as isize {
-        return Err(ToolError::new(
-            "VALIDATION_ERROR",
-            format!("{key} must be at least {min}"),
-            true,
-        ));
-    }
-    Ok((value as usize).min(max))
+    bounded_usize(arguments, key, default, min, max)
 }
 
 fn optional_usize_min(
@@ -1669,14 +1669,21 @@ fn optional_usize_min(
             true,
         ));
     };
-    if value < min as i64 {
+    let Ok(value) = usize::try_from(value) else {
+        return Err(ToolError::new(
+            "VALIDATION_ERROR",
+            format!("{key} must be at least {min}"),
+            true,
+        ));
+    };
+    if value < min {
         return Err(ToolError::new(
             "VALIDATION_ERROR",
             format!("{key} must be at least {min}"),
             true,
         ));
     }
-    Ok(Some(value as usize))
+    Ok(Some(value))
 }
 
 fn redact_result_snippets(value: &mut Value) {
@@ -1740,38 +1747,71 @@ impl std::fmt::Display for ToolError {
 
 impl From<nabu_core::Error> for ToolError {
     fn from(value: nabu_core::Error) -> Self {
-        let message = value.to_string();
-        let code = if message.contains("not found") {
-            "NOT_FOUND"
-        } else {
-            match &value {
-                nabu_core::Error::Validation(_) => "VALIDATION_ERROR",
-                nabu_core::Error::SemanticUnavailable(_) => "SEMANTIC_UNAVAILABLE",
-                nabu_core::Error::HomeUnavailable => "STORAGE_UNAVAILABLE",
-                nabu_core::Error::Io { source, .. }
-                    if source.kind() == std::io::ErrorKind::PermissionDenied =>
-                {
-                    "PERMISSION_DENIED"
-                }
-                nabu_core::Error::Io { .. } => "STORAGE_UNAVAILABLE",
-                nabu_core::Error::Sqlite { .. } => "INDEX_UNAVAILABLE",
-                nabu_core::Error::Json(_) => "VALIDATION_ERROR",
-                nabu_core::Error::TimeFormat(_) => "INTERNAL_ERROR",
-            }
-        };
-        let details = match value {
-            nabu_core::Error::Io { path, ref source }
-                if source.kind() == std::io::ErrorKind::PermissionDenied =>
-            {
-                json!({
-                    "path": path.display().to_string(),
-                    "attempted_operation": "filesystem access"
-                })
-            }
-            _ => json!({}),
-        };
+        let code = mcp_error_code(&value);
+        let message = mcp_error_message(&value);
+        let details = mcp_error_details(&value);
         Self::with_details(code, message, true, details)
     }
+}
+
+fn mcp_error_code(value: &nabu_core::Error) -> &'static str {
+    match value {
+        nabu_core::Error::Validation(message) if validation_message_is_not_found(message) => {
+            "NOT_FOUND"
+        }
+        nabu_core::Error::Validation(_) => "VALIDATION_ERROR",
+        nabu_core::Error::SemanticUnavailable(_) => "SEMANTIC_UNAVAILABLE",
+        nabu_core::Error::HomeUnavailable => "STORAGE_UNAVAILABLE",
+        nabu_core::Error::Io { source, .. }
+            if source.kind() == std::io::ErrorKind::PermissionDenied =>
+        {
+            "PERMISSION_DENIED"
+        }
+        nabu_core::Error::Io { .. } => "STORAGE_UNAVAILABLE",
+        nabu_core::Error::Sqlite { .. } => "INDEX_UNAVAILABLE",
+        nabu_core::Error::Json(_) => "VALIDATION_ERROR",
+        nabu_core::Error::TimeFormat(_) => "INTERNAL_ERROR",
+    }
+}
+
+fn mcp_error_message(value: &nabu_core::Error) -> String {
+    match value {
+        nabu_core::Error::Validation(message) if message.starts_with("raw line ") => {
+            "raw event not found for requested history pointer".to_string()
+        }
+        nabu_core::Error::Validation(message) if validation_message_is_not_found(message) => {
+            message.to_string()
+        }
+        nabu_core::Error::Io { source, .. }
+            if source.kind() == std::io::ErrorKind::PermissionDenied =>
+        {
+            "filesystem permission denied while accessing nabu storage".to_string()
+        }
+        nabu_core::Error::Io { .. } => "filesystem error while accessing nabu storage".to_string(),
+        nabu_core::Error::Sqlite { source, .. } => {
+            format!("sqlite index error while accessing nabu index: {source}")
+        }
+        _ => value.to_string(),
+    }
+}
+
+fn mcp_error_details(value: &nabu_core::Error) -> Value {
+    match value {
+        nabu_core::Error::Io { source, .. }
+            if source.kind() == std::io::ErrorKind::PermissionDenied =>
+        {
+            json!({
+                "attempted_operation": "filesystem access"
+            })
+        }
+        _ => json!({}),
+    }
+}
+
+fn validation_message_is_not_found(message: &str) -> bool {
+    message.starts_with("session not found for ")
+        || message.starts_with("event not found for ")
+        || (message.starts_with("raw line ") && message.split_once(" not found in ").is_some())
 }
 
 impl From<serde_json::Error> for ToolError {
@@ -1934,7 +1974,33 @@ mod tests {
 
         assert_eq!(error.code, "PERMISSION_DENIED");
         assert!(error.recoverable);
-        assert_eq!(error.details["path"], "/tmp/nabu-denied");
+        assert!(!error.message.contains("/tmp/nabu-denied"));
+        assert!(error.details.get("path").is_none());
         assert_eq!(error.details["attempted_operation"], "filesystem access");
+    }
+
+    #[test]
+    fn mcp_core_errors_do_not_leak_absolute_paths_or_use_broad_not_found_matching() {
+        let raw_line = ToolError::from(nabu_core::Error::Validation(
+            "raw line 99 not found in /Users/example/.nabu/raw/claude/session.jsonl".to_string(),
+        ));
+        assert_eq!(raw_line.code, "NOT_FOUND");
+        assert_eq!(
+            raw_line.message,
+            "raw event not found for requested history pointer"
+        );
+        assert!(!raw_line.message.contains("/Users/example"));
+
+        let not_really_not_found = ToolError::from(nabu_core::Error::Validation(
+            "query text says not found but is still invalid".to_string(),
+        ));
+        assert_eq!(not_really_not_found.code, "VALIDATION_ERROR");
+
+        let io_error = ToolError::from(nabu_core::Error::Io {
+            path: PathBuf::from("/Users/example/.nabu/raw/claude/session.jsonl"),
+            source: std::io::Error::from(std::io::ErrorKind::NotFound),
+        });
+        assert_eq!(io_error.code, "STORAGE_UNAVAILABLE");
+        assert!(!io_error.message.contains("/Users/example"));
     }
 }

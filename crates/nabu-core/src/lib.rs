@@ -78,6 +78,7 @@ const MAX_SEARCH_SNIPPET_CHARS: usize = 1000;
 const DEFAULT_SEARCH_SNIPPET_CHARS: usize = 240;
 const MAX_SESSION_LIMIT: usize = 500;
 const MAX_CONTEXT_EVENTS_PER_SIDE: usize = 500;
+const MAX_DIRECTORY_SIZE_DEPTH: usize = 64;
 const SEMANTIC_MODEL_ID: &str = "embeddinggemma-300m-q4";
 const SEMANTIC_MODEL_REPO: &str = "onnx-community/embeddinggemma-300m-ONNX";
 const SEMANTIC_VECTOR_DIMENSIONS: usize = 256;
@@ -7498,6 +7499,7 @@ fn index_stats(home: &Path) -> Result<DoctorStats> {
 }
 
 fn table_count(conn: &Connection, db_path: &Path, table: &str) -> Result<i64> {
+    let table = checked_sql_identifier(table)?;
     conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
         row.get(0)
     })
@@ -7588,15 +7590,31 @@ fn vector_storage_bytes(home: &Path) -> Result<u64> {
 }
 
 fn directory_size(path: &Path) -> Result<u64> {
-    if !path.exists() {
+    directory_size_inner(path, 0)
+}
+
+fn directory_size_inner(path: &Path, depth: usize) -> Result<u64> {
+    if depth > MAX_DIRECTORY_SIZE_DEPTH {
         return Ok(0);
     }
-    let metadata = fs::metadata(path).map_err(|source| Error::Io {
-        path: path.to_path_buf(),
-        source,
-    })?;
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(source) => {
+            return Err(Error::Io {
+                path: path.to_path_buf(),
+                source,
+            });
+        }
+    };
+    if metadata.file_type().is_symlink() {
+        return Ok(0);
+    }
     if metadata.is_file() {
         return Ok(metadata.len());
+    }
+    if !metadata.is_dir() {
+        return Ok(0);
     }
     let mut total = 0u64;
     for entry in fs::read_dir(path).map_err(|source| Error::Io {
@@ -7607,7 +7625,7 @@ fn directory_size(path: &Path) -> Result<u64> {
             path: path.to_path_buf(),
             source,
         })?;
-        total = total.saturating_add(directory_size(&entry.path())?);
+        total = total.saturating_add(directory_size_inner(&entry.path(), depth + 1)?);
     }
     Ok(total)
 }
@@ -7987,6 +8005,8 @@ fn ensure_table_column(
     column: &str,
     definition: &str,
 ) -> Result<()> {
+    let table = checked_sql_identifier(table)?;
+    let column = checked_sql_identifier(column)?;
     let exists = {
         let mut statement = conn
             .prepare(&format!("PRAGMA table_info({table})"))
@@ -8022,6 +8042,26 @@ fn ensure_table_column(
         })?;
     }
     Ok(())
+}
+
+fn checked_sql_identifier(identifier: &str) -> Result<&str> {
+    let mut chars = identifier.chars();
+    let Some(first) = chars.next() else {
+        return Err(Error::Validation(
+            "SQL identifier must not be empty".to_string(),
+        ));
+    };
+    if !(first == '_' || first.is_ascii_alphabetic()) {
+        return Err(Error::Validation(format!(
+            "invalid SQL identifier: {identifier}"
+        )));
+    }
+    if !chars.all(|character| character == '_' || character.is_ascii_alphanumeric()) {
+        return Err(Error::Validation(format!(
+            "invalid SQL identifier: {identifier}"
+        )));
+    }
+    Ok(identifier)
 }
 
 fn ensure_events_fts_schema(conn: &mut Connection, path: &Path) -> Result<()> {
@@ -13680,6 +13720,36 @@ mod tests {
             )
             .unwrap();
         assert!(plan.contains("idx_events_tool_captured"), "{plan}");
+    }
+
+    #[test]
+    fn schema_helpers_reject_non_identifier_names() {
+        let temp = tempdir().unwrap();
+        let home = temp.path().join("home");
+        init_home(&home).unwrap();
+        let db_path = home.join("index").join("harness.db");
+        let conn = open_index(&db_path).unwrap();
+
+        let count_error = table_count(&conn, &db_path, "events;DROP TABLE events").unwrap_err();
+        assert!(matches!(count_error, Error::Validation(_)));
+
+        let column_error =
+            ensure_table_column(&conn, &db_path, "checkpoints", "bad-column", "TEXT").unwrap_err();
+        assert!(matches!(column_error, Error::Validation(_)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn directory_size_does_not_follow_symlink_cycles() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("root");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("payload.txt"), b"12345").unwrap();
+        symlink(&root, root.join("cycle")).unwrap();
+
+        assert_eq!(directory_size(&root).unwrap(), 5);
     }
 
     #[test]

@@ -44,6 +44,12 @@ struct Cli {
     command: Command,
 }
 
+impl Cli {
+    fn renders_errors_as_json(&self) -> bool {
+        self.command.renders_errors_as_json()
+    }
+}
+
 #[derive(Debug, Subcommand)]
 enum Command {
     Init,
@@ -198,6 +204,21 @@ enum Command {
         #[command(subcommand)]
         command: McpCommand,
     },
+}
+
+impl Command {
+    fn renders_errors_as_json(&self) -> bool {
+        match self {
+            Command::Search { format, .. } | Command::Show { format, .. } => {
+                *format == OutputFormat::Json
+            }
+            Command::Doctor { json, .. } => *json,
+            Command::Mcp {
+                command: McpCommand::Validate { json, .. },
+            } => *json,
+            _ => false,
+        }
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -379,12 +400,17 @@ enum ExportFormat {
 }
 
 fn main() {
-    if let Err(error) = run() {
+    let cli = Cli::parse();
+    let render_errors_as_json = cli.renders_errors_as_json();
+    if let Err(error) = run(cli) {
         let exit_code = cli_exit_code(&error);
-        if std::env::args().any(|arg| arg == "--json") {
-            println!("{}", serde_json::to_string_pretty(&json_error(&error)).unwrap_or_else(|_| {
-                "{\"ok\":false,\"error\":{\"code\":\"INTERNAL_ERROR\",\"message\":\"failed to render error\",\"recoverable\":false,\"hint\":\"Retry with human output.\",\"details\":{}}}".to_string()
-            }));
+        if render_errors_as_json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&json_error(&error)).unwrap_or_else(|_| {
+                    "{\"ok\":false,\"error\":{\"code\":\"INTERNAL_ERROR\",\"message\":\"failed to render error\",\"recoverable\":false,\"hint\":\"Retry with human output.\",\"details\":{}}}".to_string()
+                })
+            );
         } else {
             eprintln!("{error}");
         }
@@ -392,11 +418,11 @@ fn main() {
     }
 }
 
-fn run() -> nabu_core::Result<()> {
-    let cli = Cli::parse();
-    let home = resolve_home(cli.home)?;
+fn run(cli: Cli) -> nabu_core::Result<()> {
+    let Cli { home, command } = cli;
+    let home = resolve_home(home)?;
 
-    match cli.command {
+    match command {
         Command::Init => {
             let report = init_home(&home)?;
             println!("initialized {}", report.home.display());
@@ -1120,7 +1146,7 @@ fn json_error(error: &Error) -> Value {
 
 fn cli_error_code(error: &Error) -> &'static str {
     match error {
-        Error::Validation(message) if message.contains("not found") => "NOT_FOUND",
+        Error::Validation(message) if cli_validation_message_is_not_found(message) => "NOT_FOUND",
         Error::SemanticUnavailable(_) => "SEMANTIC_UNAVAILABLE",
         Error::Validation(_) | Error::Json(_) => "VALIDATION_ERROR",
         Error::Io { source, .. } if source.kind() == std::io::ErrorKind::PermissionDenied => {
@@ -1130,6 +1156,12 @@ fn cli_error_code(error: &Error) -> &'static str {
         Error::Sqlite { .. } => "INDEX_UNAVAILABLE",
         Error::TimeFormat(_) => "INTERNAL_ERROR",
     }
+}
+
+fn cli_validation_message_is_not_found(message: &str) -> bool {
+    message.starts_with("session not found for ")
+        || message.starts_with("event not found for ")
+        || (message.starts_with("raw line ") && message.split_once(" not found in ").is_some())
 }
 
 fn cli_error_hint(code: &str) -> &'static str {
@@ -4040,6 +4072,22 @@ mod tests {
     use tempfile::tempdir;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn parsed_command_controls_json_error_rendering_not_raw_argv() {
+        let literal_query = Cli::try_parse_from(["nabu", "search", "--", "--json"]).unwrap();
+        assert!(!literal_query.renders_errors_as_json());
+
+        let json_search =
+            Cli::try_parse_from(["nabu", "search", "needle", "--format", "json"]).unwrap();
+        assert!(json_search.renders_errors_as_json());
+
+        let json_doctor = Cli::try_parse_from(["nabu", "doctor", "--json"]).unwrap();
+        assert!(json_doctor.renders_errors_as_json());
+
+        let json_mcp = Cli::try_parse_from(["nabu", "mcp", "validate", "all", "--json"]).unwrap();
+        assert!(json_mcp.renders_errors_as_json());
+    }
 
     #[test]
     fn human_progress_renderer_includes_terminal_status_and_counts() {

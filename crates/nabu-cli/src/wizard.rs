@@ -211,19 +211,36 @@ fn prompt_error(error: dialoguer::Error) -> Error {
     }
 }
 
+fn cancelled_select_index(options: &[&str]) -> Result<usize> {
+    options
+        .iter()
+        .position(|option| *option == "Quit")
+        .or_else(|| options.iter().position(|option| *option == "Back"))
+        .ok_or_else(|| Error::Validation("wizard prompt was cancelled".to_string()))
+}
+
 impl Prompter for TtyPrompter {
     fn select(&mut self, prompt: &str, options: &[&str]) -> Result<usize> {
         // `clear(true)` removes the menu after a pick and `report(false)`
         // suppresses the resolved-choice echo, so the menu leaves no scrollback
         // residue — the frame is redrawn cleanly on the next loop.
-        dialoguer::Select::with_theme(&self.theme)
+        let result = dialoguer::Select::with_theme(&self.theme)
             .with_prompt(prompt)
             .items(options)
             .default(0)
             .clear(true)
             .report(false)
-            .interact()
-            .map_err(prompt_error)
+            .interact_opt();
+        match result {
+            Ok(Some(index)) => Ok(index),
+            Ok(None) => cancelled_select_index(options),
+            Err(dialoguer::Error::IO(source))
+                if source.kind() == std::io::ErrorKind::Interrupted =>
+            {
+                cancelled_select_index(options)
+            }
+            Err(error) => Err(prompt_error(error)),
+        }
     }
 
     fn confirm(&mut self, prompt: &str, default: bool) -> Result<bool> {
@@ -1570,6 +1587,16 @@ mod tests {
     use super::*;
     use nabu_core::{CoverageSummary, DoctorCheck, StorageFootprint};
     use std::collections::VecDeque;
+
+    #[test]
+    fn cancelled_select_uses_visible_quit_or_back_item() {
+        assert_eq!(cancelled_select_index(&["Get started", "Quit"]).unwrap(), 1);
+        assert_eq!(cancelled_select_index(&["Repair", "Back"]).unwrap(), 1);
+        assert!(matches!(
+            cancelled_select_index(&["Codex", "Claude"]),
+            Err(Error::Validation(_))
+        ));
+    }
 
     /// Test prompter: replays scripted answers and records info output.
     pub(crate) struct ScriptedPrompter {

@@ -626,6 +626,59 @@ fn numeric_pointer_minimums_are_enforced() {
 }
 
 #[test]
+fn numeric_pagination_bounds_and_types_are_enforced() {
+    let temp = tempdir().unwrap();
+    let home = temp.path().join("home");
+    init_home(&home).unwrap();
+
+    let output = run_mcp(
+        &home,
+        vec![
+            json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {
+                    "name": "search_history",
+                    "arguments": {
+                        "query": "needle",
+                        "limit": 51
+                    }
+                }
+            }),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": {
+                    "name": "search_history",
+                    "arguments": {
+                        "query": "needle",
+                        "max_snippet_chars": 12.5
+                    }
+                }
+            }),
+        ],
+    );
+
+    let first_response = output.iter().find(|message| message["id"] == 1).unwrap();
+    let first = &first_response["result"]["structuredContent"]["error"];
+    assert_eq!(first["code"], "VALIDATION_ERROR");
+    assert!(first["message"]
+        .as_str()
+        .unwrap()
+        .contains("limit must be between 1 and 50"));
+
+    let second_response = output.iter().find(|message| message["id"] == 2).unwrap();
+    let second = &second_response["result"]["structuredContent"]["error"];
+    assert_eq!(second["code"], "VALIDATION_ERROR");
+    assert!(second["message"]
+        .as_str()
+        .unwrap()
+        .contains("max_snippet_chars must be an integer"));
+}
+
+#[test]
 fn export_session_redacts_agent_facing_content() {
     let temp = tempdir().unwrap();
     let home = temp.path().join("home");

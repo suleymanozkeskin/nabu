@@ -17,6 +17,9 @@ in `docs/release-notes.md`.
 - Cache redaction regexes and reduce whole-file reads in purge/Codex JSON
   ingest paths.
 - Add dedupe property coverage and project security/contributing docs.
+- Treat wizard menu cancellation as a clean Quit/Back, make CLI JSON error
+  rendering depend on parsed options, and harden MCP/core argument and error
+  boundaries.
 
 ## 0.1.0
 
