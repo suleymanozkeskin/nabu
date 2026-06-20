@@ -578,7 +578,9 @@ fn hydrate_search_result_payloads(results: &mut [SearchResult]) -> Result<()> {
 // are present sessions, so empty was a confidently-wrong answer.
 //
 // Resolution is tiered, most-specific first: exact session_id, then
-// filename_session_id, then unique id prefix. The first non-empty tier wins.
+// filename_session_id, then id prefix — every session whose id starts with the
+// input, so an ambiguous prefix widens the filter rather than emptying it
+// (fail-open, never fail-closed). The first non-empty tier wins.
 // `tool` is optional — when absent, resolution spans every tool, so the filter
 // never silently requires a tool arg. When nothing resolves the literal input
 // is returned unchanged: a genuinely-absent session then yields an empty
