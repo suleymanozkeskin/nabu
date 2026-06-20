@@ -17,9 +17,9 @@ use crate::bench::{run_ingest_bench, run_search_bench};
 use crate::mcp_config::{mcp_apply_all, mcp_validate_all};
 use crate::progress::ProgressEmitter;
 use crate::render::{
-    cli_exit_code, doctor_json_data, json_error, json_success, print_corroboration_human,
-    print_corroboration_markdown, print_purge_all_preview, print_purge_all_result,
-    print_tool_doctor_human, AlsoAt, OptionalValue,
+    cli_exit_code, doctor_json_data, json_error, json_success, print_config_change,
+    print_corroboration_human, print_corroboration_markdown, print_purge_all_preview,
+    print_purge_all_result, print_tool_doctor_human, AlsoAt, OptionalValue,
 };
 use clap::{Parser, Subcommand, ValueEnum};
 use nabu_adapters::{
@@ -731,9 +731,7 @@ fn run(cli: Cli) -> nabu_core::Result<()> {
         Command::Install { tool, dry_run } => match tool {
             AgentTool::Claude => {
                 let report = install_claude(&home, dry_run)?;
-                println!("{}", report.summary);
-                println!("target: {}", report.target_path.display());
-                println!("{}", report.diff);
+                print_config_change(&report);
             }
             AgentTool::All => {
                 for report in [
@@ -741,30 +739,22 @@ fn run(cli: Cli) -> nabu_core::Result<()> {
                     install_claude(&home, dry_run)?,
                     install_opencode(&home, dry_run)?,
                 ] {
-                    println!("{}", report.summary);
-                    println!("target: {}", report.target_path.display());
-                    println!("{}", report.diff);
+                    print_config_change(&report);
                 }
             }
             AgentTool::Opencode => {
                 let report = install_opencode(&home, dry_run)?;
-                println!("{}", report.summary);
-                println!("target: {}", report.target_path.display());
-                println!("{}", report.diff);
+                print_config_change(&report);
             }
             AgentTool::Codex => {
                 let report = install_codex(&home, dry_run)?;
-                println!("{}", report.summary);
-                println!("target: {}", report.target_path.display());
-                println!("{}", report.diff);
+                print_config_change(&report);
             }
         },
         Command::Uninstall { tool, dry_run } => match tool {
             AgentTool::Claude => {
                 let report = uninstall_claude(&home, dry_run)?;
-                println!("{}", report.summary);
-                println!("target: {}", report.target_path.display());
-                println!("{}", report.diff);
+                print_config_change(&report);
             }
             AgentTool::All => {
                 for report in [
@@ -772,22 +762,16 @@ fn run(cli: Cli) -> nabu_core::Result<()> {
                     uninstall_claude(&home, dry_run)?,
                     uninstall_opencode(&home, dry_run)?,
                 ] {
-                    println!("{}", report.summary);
-                    println!("target: {}", report.target_path.display());
-                    println!("{}", report.diff);
+                    print_config_change(&report);
                 }
             }
             AgentTool::Opencode => {
                 let report = uninstall_opencode(&home, dry_run)?;
-                println!("{}", report.summary);
-                println!("target: {}", report.target_path.display());
-                println!("{}", report.diff);
+                print_config_change(&report);
             }
             AgentTool::Codex => {
                 let report = uninstall_codex(&home, dry_run)?;
-                println!("{}", report.summary);
-                println!("target: {}", report.target_path.display());
-                println!("{}", report.diff);
+                print_config_change(&report);
             }
         },
         Command::Search {
@@ -1045,16 +1029,12 @@ fn run(cli: Cli) -> nabu_core::Result<()> {
             },
             McpCommand::Install { tool, dry_run } => {
                 for report in mcp_apply_all(&home, tool, McpConfigAction::Install, dry_run)? {
-                    println!("{}", report.summary);
-                    println!("target: {}", report.target_path.display());
-                    println!("{}", report.diff);
+                    print_config_change(&report);
                 }
             }
             McpCommand::Uninstall { tool, dry_run } => {
                 for report in mcp_apply_all(&home, tool, McpConfigAction::Uninstall, dry_run)? {
-                    println!("{}", report.summary);
-                    println!("target: {}", report.target_path.display());
-                    println!("{}", report.diff);
+                    print_config_change(&report);
                 }
             }
             McpCommand::Validate {

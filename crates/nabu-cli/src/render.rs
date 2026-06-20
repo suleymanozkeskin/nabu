@@ -403,3 +403,41 @@ pub(crate) fn print_corroboration_markdown(corroboration: Option<&Corroboration>
         );
     }
 }
+
+/// The summary/target/diff block printed for one applied config change. Returned
+/// as a string so it can be asserted without capturing stdout; byte-identical to
+/// the three `println!` calls it replaces (each line plus a trailing newline).
+pub(crate) fn render_config_change(report: &ConfigChangeReport) -> String {
+    format!(
+        "{}\ntarget: {}\n{}\n",
+        report.summary,
+        report.target_path.display(),
+        report.diff
+    )
+}
+
+pub(crate) fn print_config_change(report: &ConfigChangeReport) {
+    print!("{}", render_config_change(report));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn config_change_render_matches_the_three_line_block() {
+        let report = ConfigChangeReport {
+            tool: Tool::Codex,
+            target_path: PathBuf::from("/tmp/config.toml"),
+            changed: true,
+            dry_run: false,
+            summary: "installed Codex MCP server config".to_string(),
+            diff: "--- before\n--- after".to_string(),
+        };
+        assert_eq!(
+            render_config_change(&report),
+            "installed Codex MCP server config\ntarget: /tmp/config.toml\n--- before\n--- after\n"
+        );
+    }
+}
