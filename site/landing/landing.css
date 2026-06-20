@@ -1,0 +1,224 @@
+/* ============================================================
+   nabu landing — page styles on the design-system tokens.
+   Mono-forward, lapis & gold, sharp radii, hairline borders,
+   one gold register line per "first among equals" card.
+   ============================================================ */
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+body {
+  background: var(--bg-base);
+  color: var(--text-body);
+  font-family: var(--font-mono);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ---- buttons ---- */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  height: var(--control-sm);
+  padding: 0 var(--space-4);
+  border-radius: var(--radius-md);
+  border: var(--border-hair) solid transparent;
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  text-decoration: none;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease-out),
+              color var(--dur-fast) var(--ease-out),
+              border-color var(--dur-fast) var(--ease-out),
+              transform var(--dur-fast) var(--ease-out);
+}
+.btn:active { transform: translateY(1px); }
+.btn:focus-visible { outline: none; box-shadow: var(--ring-focus); }
+
+.btn-ghost { color: var(--text-muted); }
+.btn-ghost:hover { color: var(--text-strong); background: var(--accent-soft); }
+
+.btn-primary {
+  background: var(--accent);
+  color: var(--text-on-accent);
+  font-weight: var(--fw-semibold);
+}
+.btn-primary:hover { background: var(--accent-hover); }
+
+.btn-secondary {
+  background: var(--surface-2);
+  color: var(--text-body);
+  border-color: var(--border-default);
+}
+.btn-secondary:hover { border-color: var(--border-strong); color: var(--text-strong); }
+.btn-secondary.is-copied { color: var(--success); border-color: var(--success); }
+
+.kbd {
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+  color: var(--text-body);
+  background: var(--surface-2);
+  border: var(--border-hair) solid var(--border-default);
+  border-bottom-width: var(--border-thick);
+  border-radius: var(--radius-sm);
+  padding: 2px var(--space-2);
+}
+
+/* ---- nav ---- */
+.nav {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  padding: var(--space-4) var(--space-10);
+  border-bottom: var(--border-hair) solid var(--border-subtle);
+}
+.nav-brand { display: inline-flex; }
+.nav-links { margin-left: auto; display: flex; align-items: center; gap: var(--space-2); }
+
+/* ---- hero ---- */
+.hero {
+  max-width: var(--container-md);
+  margin: 0 auto;
+  padding: var(--space-20) var(--space-10) var(--space-10);
+  text-align: center;
+}
+.badge {
+  display: inline-block;
+  margin-bottom: var(--space-5);
+  font-size: var(--text-2xs);
+  letter-spacing: var(--ls-wider);
+  text-transform: uppercase;
+  color: var(--accent);
+  background: var(--accent-soft);
+  border: var(--border-hair) solid var(--accent-line);
+  border-radius: var(--radius-pill);
+  padding: var(--space-1) var(--space-3);
+}
+.hero-mark { width: 340px; max-width: 76%; display: block; margin: 0 auto var(--space-6); }
+.hero h1 {
+  font-family: var(--font-sans);
+  font-weight: var(--fw-semibold);
+  font-size: var(--text-2xl);
+  line-height: var(--lh-snug);
+  color: var(--text-strong);
+  margin: 0 auto var(--space-3);
+  max-width: 620px;
+}
+.lede {
+  font-family: var(--font-sans);
+  font-size: var(--text-lg);
+  line-height: var(--lh-normal);
+  color: var(--text-muted);
+  max-width: 580px;
+  margin: 0 auto var(--space-8);
+}
+
+/* ---- install command ---- */
+.install {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  width: max-content;
+  max-width: 100%;
+  margin: 0 auto var(--space-4);
+  background: var(--bg-sunken);
+  border: var(--border-hair) solid var(--border-default);
+  border-radius: var(--radius-md);
+  box-shadow: var(--inset-screen);
+  padding: var(--space-2) var(--space-2) var(--space-2) var(--space-4);
+  height: 48px;
+}
+.install .prompt { color: var(--accent); }
+.install .cmd { color: var(--text-strong); font-size: var(--text-md); }
+.install-alt {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--text-faint);
+  font-size: var(--text-xs);
+}
+
+/* ---- demo ---- */
+.demo {
+  max-width: var(--container-lg);
+  margin: var(--space-10) auto 0;
+  padding: 0 var(--space-10);
+}
+.demo img {
+  display: block;
+  width: 100%;
+  border: var(--border-hair) solid var(--border-default);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-lg);
+}
+
+/* ---- features ---- */
+.features {
+  max-width: var(--container-lg);
+  margin: 0 auto;
+  padding: var(--space-16) var(--space-10) var(--space-20);
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: var(--space-5);
+}
+.card {
+  position: relative;
+  background: var(--surface-card);
+  border: var(--border-hair) solid var(--border-default);
+  border-radius: var(--radius-lg);
+  padding: var(--space-6);
+  overflow: hidden;
+}
+/* the gold register line — one per "first among equals" panel */
+.card.register::before {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: var(--border-thick);
+  background: var(--grad-wordmark);
+}
+.card .glyph {
+  font-family: var(--font-cuneiform);
+  font-size: var(--text-3xl);
+  color: var(--accent);
+  margin-bottom: var(--space-3);
+  line-height: 1;
+}
+.card h2 {
+  font-size: var(--text-md);
+  font-weight: var(--fw-medium);
+  letter-spacing: var(--ls-wide);
+  color: var(--text-strong);
+  margin: 0 0 var(--space-2);
+}
+.card p {
+  font-family: var(--font-sans);
+  font-size: var(--text-sm);
+  line-height: var(--lh-relaxed);
+  color: var(--text-muted);
+  margin: 0;
+}
+
+/* ---- footer ---- */
+.footer {
+  border-top: var(--border-hair) solid var(--border-subtle);
+  padding: var(--space-5) var(--space-10);
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  color: var(--text-faint);
+  font-size: var(--text-xs);
+}
+.footer-glyph { font-family: var(--font-cuneiform); color: var(--text-muted); }
+.footer-tag { margin-left: auto; }
+
+/* ---- responsive ---- */
+@media (max-width: 760px) {
+  .features { grid-template-columns: 1fr; }
+  .nav, .hero, .demo, .features, .footer { padding-left: var(--space-5); padding-right: var(--space-5); }
+  .footer { flex-direction: column; gap: var(--space-2); text-align: center; }
+  .footer-tag { margin-left: 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .btn { transition: none; }
+}

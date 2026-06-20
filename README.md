@@ -1,4 +1,6 @@
-# nabu &nbsp;𒀭𒀝
+<p align="center">
+  <img src="docs/assets/nabu-wordmark.png" alt="nabu — 𒀭𒀝" width="440" />
+</p>
 
 [![CI](https://github.com/suleymanozkeskin/nabu/actions/workflows/ci.yml/badge.svg)](https://github.com/suleymanozkeskin/nabu/actions/workflows/ci.yml)
 [![crates.io](https://img.shields.io/crates/v/nabu-cli.svg)](https://crates.io/crates/nabu-cli)

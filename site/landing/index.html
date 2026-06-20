@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>nabu — the scribe for your coding agents</title>
+<meta name="description" content="nabu keeps a durable, local, cross-tool history of everything Codex, Claude Code, and OpenCode do — searchable long after the context window is gone." />
+<link rel="icon" type="image/svg+xml" href="../design-system/assets/logo/nabu-logo-transparent.svg" />
+<link rel="stylesheet" href="../design-system/styles.css" />
+<link rel="stylesheet" href="./landing.css" />
+</head>
+<body>
+  <!-- nav -->
+  <header class="nav">
+    <a class="nav-brand" href="#top" aria-label="nabu">
+      <img src="../design-system/assets/logo/nabu-logo-transparent.svg" alt="nabu" height="30" />
+    </a>
+    <nav class="nav-links">
+      <a class="btn btn-ghost" href="https://docs.rs/nabu-core">docs</a>
+      <a class="btn btn-ghost" href="https://github.com/suleymanozkeskin/nabu">github</a>
+      <a class="btn btn-primary" href="https://crates.io/crates/nabu-cli">install</a>
+    </nav>
+  </header>
+
+  <!-- hero -->
+  <section class="hero" id="top">
+    <span class="badge">𒀭𒀝 · the scribe release</span>
+    <img class="hero-mark" src="../design-system/assets/logo/nabu-logo-transparent.svg" alt="nabu" />
+    <h1>The god of writing, on your command line.</h1>
+    <p class="lede">
+      nabu keeps a durable, local, cross-tool history of everything Codex,
+      Claude&nbsp;Code, and OpenCode do — pressed into clay so nothing is lost
+      when the context window, the process, or the tool is gone.
+    </p>
+
+    <div class="install">
+      <span class="prompt">$</span>
+      <span class="cmd">cargo install nabu-cli</span>
+      <button class="btn btn-secondary" id="copy" type="button" aria-label="copy install command">copy</button>
+    </div>
+    <div class="install-alt">
+      <span>then</span><kbd class="kbd">nabu wizard</kbd><span>to connect your tools</span>
+    </div>
+  </section>
+
+  <!-- demo -->
+  <section class="demo">
+    <img src="../../demo/demo-full.gif" alt="nabu demo — title, the problem, and a real agent recovering a past fix over MCP" loading="lazy" />
+  </section>
+
+  <!-- features -->
+  <section class="features">
+    <article class="card register">
+      <div class="glyph" aria-hidden="true">𒁹</div>
+      <h2>capture</h2>
+      <p>Every session from Codex, Claude&nbsp;Code, and OpenCode, pressed to
+         local clay — automatically, with nothing sent anywhere.</p>
+    </article>
+    <article class="card register">
+      <div class="glyph" aria-hidden="true">𒀸</div>
+      <h2>recall</h2>
+      <p>Search the whole archive across tools. Find the fix, the decision, the
+         thread — long after the context window has dropped it.</p>
+    </article>
+    <article class="card register">
+      <div class="glyph" aria-hidden="true">𒂍</div>
+      <h2>over MCP</h2>
+      <p>Your agents read the archive themselves over MCP — recovering past work
+         instead of re-deriving it from zero.</p>
+    </article>
+  </section>
+
+  <!-- footer -->
+  <footer class="footer">
+    <span class="footer-glyph" aria-hidden="true">𒀭𒀝</span>
+    <span>nabu — named for the Mesopotamian god of scribes</span>
+    <span class="footer-tag">built on clay, shipped to dark mode</span>
+  </footer>
+
+  <script>
+    const btn = document.getElementById('copy');
+    btn.addEventListener('click', async () => {
+      try {
+        await navigator.clipboard.writeText('cargo install nabu-cli');
+        btn.textContent = 'copied';
+        btn.classList.add('is-copied');
+        setTimeout(() => { btn.textContent = 'copy'; btn.classList.remove('is-copied'); }, 1400);
+      } catch { /* clipboard unavailable */ }
+    });
+  </script>
+</body>
+</html>
