@@ -1,0 +1,46 @@
+/* ============================================================
+   nabu · typography tokens
+   ============================================================ */
+:root {
+  /* ---- Families ---- */
+  --font-mono: 'IBM Plex Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  --font-sans: 'IBM Plex Sans', ui-sans-serif, system-ui, -apple-system, sans-serif;
+  --font-cuneiform: 'Noto Sans Cuneiform', 'Segoe UI Historic', serif;
+
+  /* Mono is the brand voice — most UI uses it */
+  --font-ui:      var(--font-mono);
+  --font-display: var(--font-mono);
+  --font-body:    var(--font-sans);
+  --font-code:    var(--font-mono);
+
+  /* ---- Type scale (1.250 major-third-ish, tuned) ---- */
+  --text-2xs: 11px;
+  --text-xs:  12px;
+  --text-sm:  13px;
+  --text-md:  15px;   /* base UI */
+  --text-lg:  18px;
+  --text-xl:  22px;
+  --text-2xl: 28px;
+  --text-3xl: 36px;
+  --text-4xl: 48px;
+  --text-5xl: 64px;
+
+  /* ---- Weights ---- */
+  --fw-regular: 400;  /* @kind font */
+  --fw-medium:  500;  /* @kind font */
+  --fw-semibold:600;  /* @kind font */
+  --fw-bold:    700;  /* @kind font */
+
+  /* ---- Line heights ---- */
+  --lh-tight:   1.1;  /* @kind font */
+  --lh-snug:    1.3;  /* @kind font */
+  --lh-normal:  1.5;  /* @kind font */
+  --lh-relaxed: 1.7;  /* @kind font */
+
+  /* ---- Letter spacing ---- */
+  --ls-tight:  -0.01em; /* @kind font */
+  --ls-normal: 0;       /* @kind font */
+  --ls-wide:   0.04em;  /* @kind font */
+  --ls-wider:  0.12em;  /* @kind font */
+  --ls-block:  0.28em;  /* @kind font */
+}

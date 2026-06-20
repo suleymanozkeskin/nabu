@@ -1,0 +1,43 @@
+/* ============================================================
+   nabu · effects — radii, borders, shadows, motion
+   Crisp & pixel-adjacent: small radii, hairline borders,
+   restrained shadows, occasional clay glow.
+   ============================================================ */
+:root {
+  /* ---- Radii (sharp; the brand is pixel-blocky) ---- */
+  --radius-0:  0;
+  --radius-sm: 2px;
+  --radius-md: 4px;
+  --radius-lg: 6px;
+  --radius-pill: 999px;
+
+  /* ---- Border widths ---- */
+  --border-hair: 1px;
+  --border-thick: 2px;
+
+  /* ---- Shadows (low, cool, used sparingly) ---- */
+  --shadow-sm: 0 1px 2px rgba(0,0,0,0.4);
+  --shadow-md: 0 4px 14px rgba(0,0,0,0.45);
+  --shadow-lg: 0 18px 48px rgba(0,0,0,0.55);
+  --shadow-pop: 0 12px 32px rgba(0,0,0,0.6), 0 0 0 1px var(--border-default);
+
+  /* ---- Glows / focus ---- */
+  --glow-accent: 0 0 0 1px var(--accent-line), 0 0 18px rgba(217,162,63,0.18);
+  --ring-focus: 0 0 0 2px var(--bg-base), 0 0 0 4px var(--accent-line);
+
+  /* ---- Inset (terminal screen feel) ---- */
+  --inset-screen: inset 0 0 0 1px rgba(255,255,255,0.02), inset 0 1px 0 rgba(255,255,255,0.03);
+
+  /* ---- Scanline / grid texture (optional decorative) ---- */
+  --texture-grid: repeating-linear-gradient(0deg, transparent 0 23px, rgba(255,255,255,0.018) 23px 24px),
+                  repeating-linear-gradient(90deg, transparent 0 23px, rgba(255,255,255,0.018) 23px 24px); /* @kind other */
+
+  /* ---- Motion ---- */
+  --ease-out: cubic-bezier(0.2, 0.7, 0.2, 1); /* @kind other */
+  --ease-in-out: cubic-bezier(0.4, 0, 0.2, 1); /* @kind other */
+  --dur-fast: 90ms; /* @kind other */
+  --dur-base: 150ms; /* @kind other */
+  --dur-slow: 260ms; /* @kind other */
+}
+
+::selection { background: var(--selection-bg); }

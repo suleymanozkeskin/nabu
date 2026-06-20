@@ -182,18 +182,23 @@ impl TtyPrompter {
     fn new() -> Self {
         use console::Style;
         use dialoguer::theme::ColorfulTheme;
-        // A quiet, aligned theme: a 2-space gutter on every prompt, a cyan `?`,
+        // A quiet, aligned theme: a 2-space gutter on every prompt, a gold `?`,
         // and resolved prompts that recede into the scrollback instead of
-        // echoing loudly.
+        // echoing loudly. dialoguer's theme is typed against `console::Style`,
+        // which can't carry truecolor, so the accent uses the nearest 256 index.
         let theme = ColorfulTheme {
-            prompt_prefix: console::style("  ?".to_string()).cyan().bold(),
+            prompt_prefix: console::style("  ?".to_string())
+                .color256(crate::theme::GOLD_256)
+                .bold(),
             prompt_suffix: console::style("›".to_string()).dim(),
             success_prefix: console::style("  ·".to_string()).dim(),
             success_suffix: console::style("".to_string()),
             values_style: Style::new().dim(),
-            active_item_prefix: console::style("  ❯".to_string()).cyan().bold(),
+            active_item_prefix: console::style("  ❯".to_string())
+                .color256(crate::theme::GOLD_256)
+                .bold(),
             inactive_item_prefix: console::style("   ".to_string()),
-            active_item_style: Style::new().cyan().bold(),
+            active_item_style: Style::new().color256(crate::theme::GOLD_256).bold(),
             inactive_item_style: Style::new(),
             hint_style: Style::new().dim(),
             ..ColorfulTheme::default()
@@ -308,14 +313,14 @@ impl Prompter for TtyPrompter {
     fn step(&mut self, number: &str, title: &str) {
         println!(
             "\n  {} {} {}",
-            console::style(number).cyan().bold(),
-            console::style("·").cyan().bold(),
+            crate::theme::accent_bold(number),
+            crate::theme::accent_bold("·"),
             console::style(title).bold()
         );
     }
 
     fn success(&mut self, message: &str) {
-        println!("    {} {message}", console::style("✓").green().bold());
+        println!("    {} {message}", crate::theme::success_bold("✓"));
     }
 
     fn skip(&mut self, message: &str) {
@@ -327,11 +332,11 @@ impl Prompter for TtyPrompter {
     }
 
     fn warn(&mut self, message: &str) {
-        println!("    {} {message}", console::style("!").yellow().bold());
+        println!("    {} {message}", crate::theme::warning_bold("!"));
     }
 
     fn failure(&mut self, message: &str) {
-        println!("    {} {message}", console::style("✗").red().bold());
+        println!("    {} {message}", crate::theme::danger_bold("✗"));
     }
 
     fn note(&mut self, message: &str) {
@@ -340,9 +345,9 @@ impl Prompter for TtyPrompter {
 
     fn status(&mut self, on: bool, message: &str) {
         let mark = if on {
-            console::style("●").green()
+            crate::theme::success("●")
         } else {
-            console::style("○").dim()
+            console::style("○").dim().to_string()
         };
         println!("  {mark} {message}");
     }
@@ -355,7 +360,7 @@ impl Prompter for TtyPrompter {
     }
 
     fn command(&mut self, command: &str) {
-        println!("    {}", console::style(command).cyan());
+        println!("    {}", crate::theme::accent(command));
     }
 
     fn clear(&mut self) {

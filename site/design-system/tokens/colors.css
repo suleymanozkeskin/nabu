@@ -1,0 +1,98 @@
+/* ============================================================
+   nabu · color tokens
+   Mesopotamian palette — the royal/divine pairing of LAPIS
+   LAZULI + GOLD, grounded in CLAY/TERRACOTTA and PARCHMENT,
+   with CARNELIAN red and VERDIGRIS (copper patina) accents.
+   Inspired by Sumerian & Akkadian material culture (the
+   Standard of Ur, cylinder seals, clay tablets).
+   ============================================================ */
+:root {
+  /* ---- Lapis ramp (deep blue → surfaces; the night sky / royal) ---- */
+  --lapis-950: #0b0f1a;  /* sunken */
+  --lapis-900: #0e1322;  /* base background */
+  --lapis-850: #141b2e;
+  --lapis-800: #1a2238;
+  --lapis-700: #243150;
+  --lapis-600: #2f4068;
+  --lapis-500: #3c5288;
+  --lapis-400: #5871a8;
+  --lapis-300: #7e95c6;
+
+  /* ---- Gold ramp (divine accent; wordmark, highlights) ---- */
+  --gold-700: #8a5a23;
+  --gold-600: #b8802c;
+  --gold-500: #d9a23f;   /* primary accent */
+  --gold-400: #e8b44a;
+  --gold-300: #f1d18a;
+
+  /* ---- Clay / terracotta (warm earth, secondary) ---- */
+  --clay-700: #7c4026;
+  --clay-600: #9a512f;
+  --clay-500: #b56a43;
+  --clay-400: #c98a5e;
+
+  /* ---- Sand / parchment (warm light neutrals = text on dark) ---- */
+  --sand-50:  #f4ecdb;
+  --sand-100: #e8dcc4;
+  --sand-200: #d2c4a6;
+  --sand-300: #b3a886;
+  --sand-400: #8f856a;
+  --sand-500: #6b6450;
+  --sand-600: #4f4a3a;
+
+  /* ---- Carnelian (red stone; danger / heat) ---- */
+  --carnelian-600: #a83a2c;
+  --carnelian-500: #c4533f;
+  --carnelian-400: #d96b54;
+
+  /* ---- Verdigris (copper patina; calm / success / info-cool) ---- */
+  --verdigris-600: #3c7568;
+  --verdigris-500: #4f9385;
+  --verdigris-400: #6bb0a0;
+
+  /* ---- Wordmark gradient (bronze → gold → pale gold, L→R) ---- */
+  --grad-wordmark: linear-gradient(90deg, #8a5a23 0%, #d9a23f 50%, #f1d18a 100%); /* @kind color */
+
+  /* ---- Terminal semantic hues (re-mapped to the palette) ---- */
+  --term-green:  var(--verdigris-400);
+  --term-red:    var(--carnelian-400);
+  --term-yellow: var(--gold-400);
+  --term-blue:   var(--lapis-300);
+  --term-cyan:   var(--verdigris-400);
+  --term-magenta:var(--clay-400);
+
+  /* =========================================================
+     Semantic aliases — reference these in components
+     ========================================================= */
+  --bg-base:        var(--lapis-900);
+  --bg-sunken:      var(--lapis-950);
+  --surface-1:      var(--lapis-850);
+  --surface-2:      var(--lapis-800);
+  --surface-3:      var(--lapis-700);
+  --surface-card:   var(--lapis-850);
+  --surface-inset:  var(--bg-sunken);
+
+  --border-subtle:  var(--lapis-800);
+  --border-default: var(--lapis-700);
+  --border-strong:  var(--lapis-600);
+  --border-focus:   var(--gold-500);
+
+  --text-strong:    var(--sand-50);
+  --text-body:      var(--sand-200);
+  --text-muted:     var(--sand-400);
+  --text-faint:     var(--sand-500);
+  --text-on-accent: #2a1c08;
+
+  --accent:         var(--gold-500);
+  --accent-hover:   var(--gold-400);
+  --accent-press:   var(--gold-600);
+  --accent-soft:    rgba(217, 162, 63, 0.14);
+  --accent-line:    rgba(217, 162, 63, 0.40);
+
+  --success:        var(--verdigris-400);
+  --danger:         var(--carnelian-400);
+  --warning:        var(--gold-400);
+  --info:           var(--lapis-300);
+
+  --selection-bg:   var(--accent-soft);
+}

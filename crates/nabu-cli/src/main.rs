@@ -7,6 +7,7 @@ mod opencode_http;
 mod paths;
 mod progress;
 mod render;
+mod theme;
 mod wizard;
 
 #[cfg(test)]
