@@ -1,3 +1,4 @@
+mod backup;
 mod jsonc_edit;
 mod opencode_http;
 mod wizard;
@@ -5,6 +6,7 @@ mod wizard;
 #[cfg(test)]
 mod testsupport;
 
+use crate::backup::{backup_cli_config, read_text_or_empty, text_diff, write_text_config};
 use clap::{Parser, Subcommand, ValueEnum};
 use nabu_adapters::{
     claude_status, codex_status, install_claude, install_codex, install_opencode, opencode_status,
@@ -25,7 +27,6 @@ use nabu_core::{
     SearchMode, SearchOptions, SessionOptions, Source, Tool, SCHEMA_VERSION,
 };
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 use std::borrow::Cow;
 use std::collections::BTreeSet;
 use std::fs::{self, File, OpenOptions};
@@ -2756,134 +2757,11 @@ fn ensure_object(value: &mut Value) {
     }
 }
 
-fn read_text_or_empty(path: &PathBuf) -> nabu_core::Result<String> {
-    if !path.exists() {
-        return Ok(String::new());
-    }
-    fs::read_to_string(path).map_err(|source| Error::Io {
-        path: path.clone(),
-        source,
-    })
-}
-
-fn write_text_config(path: &PathBuf, content: &str, mode: u32) -> nabu_core::Result<()> {
-    let final_mode = file_mode_or(path, mode)?;
-    if let Some(parent) = path.parent() {
-        if !parent.exists() {
-            fs::create_dir_all(parent).map_err(|source| Error::Io {
-                path: parent.to_path_buf(),
-                source,
-            })?;
-            chmod_path(parent, 0o700)?;
-        }
-    }
-    fs::write(path, content).map_err(|source| Error::Io {
-        path: path.clone(),
-        source,
-    })?;
-    chmod_path(path, final_mode)
-}
-
-fn backup_cli_config(
-    home: &Path,
-    tool: Tool,
-    operation: &str,
-    path: &Path,
-) -> nabu_core::Result<()> {
-    if !path.exists() {
-        return Ok(());
-    }
-    let content = fs::read(path).map_err(|source| Error::Io {
-        path: path.to_path_buf(),
-        source,
-    })?;
-    let now = OffsetDateTime::now_utc();
-    let created_at = now.format(&Rfc3339)?;
-    let stamp = backup_stamp(now);
-    let hash = sha256_hex(&content);
-    let backup_path = path.with_file_name(format!(
-        "{}.nabu-backup.{}.{}.bak",
-        path.file_name()
-            .and_then(|value| value.to_str())
-            .unwrap_or("config"),
-        stamp,
-        &hash[..8]
-    ));
-    fs::write(&backup_path, &content).map_err(|source| Error::Io {
-        path: backup_path.clone(),
-        source,
-    })?;
-    chmod_path(&backup_path, 0o600)?;
-
-    let backups_dir = home.join("backups");
-    fs::create_dir_all(&backups_dir).map_err(|source| Error::Io {
-        path: backups_dir.clone(),
-        source,
-    })?;
-    chmod_path(&backups_dir, 0o700)?;
-    let manifest_path = backups_dir.join("manifest.jsonl");
-    let record = json!({
-        "created_at": created_at,
-        "tool": tool.as_str(),
-        "operation": operation,
-        "original_path": path.display().to_string(),
-        "backup_path": backup_path.display().to_string(),
-        "sha256": hash
-    });
-    let mut manifest = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&manifest_path)
-        .map_err(|source| Error::Io {
-            path: manifest_path.clone(),
-            source,
-        })?;
-    manifest
-        .write_all(serde_json::to_string(&record)?.as_bytes())
-        .map_err(|source| Error::Io {
-            path: manifest_path.clone(),
-            source,
-        })?;
-    manifest.write_all(b"\n").map_err(|source| Error::Io {
-        path: manifest_path.clone(),
-        source,
-    })?;
-    chmod_path(&manifest_path, 0o600)
-}
-
-fn text_diff(before: &str, after: &str) -> String {
-    let mut diff = String::with_capacity(before.len() + after.len() + 24);
-    diff.push_str("--- before\n");
-    diff.push_str(before);
-    diff.push_str("\n--- after\n");
-    diff.push_str(after);
-    diff.push('\n');
-    diff
-}
-
 fn mcp_operation_name(action: McpConfigAction) -> &'static str {
     match action {
         McpConfigAction::Install => "mcp-install",
         McpConfigAction::Uninstall => "mcp-uninstall",
     }
-}
-
-fn backup_stamp(time: OffsetDateTime) -> String {
-    format!(
-        "{:04}{:02}{:02}T{:02}{:02}{:02}Z",
-        time.year(),
-        time.month() as u8,
-        time.day(),
-        time.hour(),
-        time.minute(),
-        time.second()
-    )
-}
-
-fn sha256_hex(content: &[u8]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(content);
-    hex::encode(hasher.finalize())
 }
 
 fn command_in_path(command: &str) -> bool {
@@ -2894,47 +2772,6 @@ fn command_in_path(command: &str) -> bool {
         path.push(command);
         path.is_file()
     })
-}
-
-#[cfg(unix)]
-fn file_mode_or(path: &Path, fallback: u32) -> nabu_core::Result<u32> {
-    use std::os::unix::fs::PermissionsExt;
-
-    match fs::metadata(path) {
-        Ok(metadata) => Ok(metadata.permissions().mode() & 0o777),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(fallback),
-        Err(source) => Err(Error::Io {
-            path: path.to_path_buf(),
-            source,
-        }),
-    }
-}
-
-#[cfg(not(unix))]
-fn file_mode_or(_path: &Path, fallback: u32) -> nabu_core::Result<u32> {
-    Ok(fallback)
-}
-
-#[cfg(unix)]
-fn chmod_path(path: &Path, mode: u32) -> nabu_core::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-
-    let mut permissions = fs::metadata(path)
-        .map_err(|source| Error::Io {
-            path: path.to_path_buf(),
-            source,
-        })?
-        .permissions();
-    permissions.set_mode(mode);
-    fs::set_permissions(path, permissions).map_err(|source| Error::Io {
-        path: path.to_path_buf(),
-        source,
-    })
-}
-
-#[cfg(not(unix))]
-fn chmod_path(_path: &Path, _mode: u32) -> nabu_core::Result<()> {
-    Ok(())
 }
 
 fn print_tool_doctor_human(home: &Path, tool: DoctorTool) -> nabu_core::Result<()> {
