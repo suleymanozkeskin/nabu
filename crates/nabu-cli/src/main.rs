@@ -18,8 +18,8 @@ use crate::mcp_config::{mcp_apply_all, mcp_validate_all};
 use crate::progress::ProgressEmitter;
 use crate::render::{
     cli_exit_code, doctor_json_data, json_error, json_success, print_config_change,
-    print_corroboration_human, print_corroboration_markdown, print_purge_all_preview,
-    print_purge_all_result, print_tool_doctor_human, AlsoAt, OptionalValue,
+    print_purge_all_preview, print_purge_all_result, print_search_page, print_session_page,
+    print_tool_doctor_human,
 };
 use clap::{Parser, Subcommand, ValueEnum};
 use nabu_adapters::{
@@ -559,175 +559,8 @@ fn run(cli: Cli) -> nabu_core::Result<()> {
                 report.discontinuities
             );
         }
-        Command::Embed { command } => match command {
-            EmbedCommand::Status => {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&json_success(serde_json::to_value(
-                        embedding_model_status(&home)
-                    )?))?
-                );
-            }
-            EmbedCommand::Download {
-                model,
-                yes,
-                json_progress,
-            } => {
-                let progress = ProgressEmitter::new(json_progress);
-                progress.emit(
-                    "embed.download",
-                    "model_acquisition",
-                    "started",
-                    0,
-                    Some(1),
-                    "checking model acquisition request",
-                );
-                if model != "embeddinggemma-300m-q4" {
-                    progress.emit(
-                        "embed.download",
-                        "model_acquisition",
-                        "failed",
-                        0,
-                        Some(1),
-                        "unsupported model",
-                    );
-                    return Err(Error::Validation(format!(
-                        "unsupported embedding model: {model}"
-                    )));
-                }
-                let disclosure = embedding_model_disclosure(&home, &model)?;
-                progress.emit_embedding_download_disclosure(&disclosure);
-                if !yes {
-                    progress.emit(
-                        "embed.download",
-                        "model_acquisition",
-                        "failed",
-                        0,
-                        Some(1),
-                        "explicit consent required",
-                    );
-                    return Err(Error::Validation(
-                        "embed download requires --yes after reviewing the printed model license and measured footprint"
-                            .to_string(),
-                    ));
-                }
-                let report =
-                    download_embedding_model_with_progress(&home, &model, |download_progress| {
-                        progress.emit(
-                            "embed.download",
-                            "model_acquisition",
-                            &download_progress.phase,
-                            download_progress.downloaded_files,
-                            Some(download_progress.total_files),
-                            &download_progress.file,
-                        );
-                    })?;
-                progress.emit(
-                    "embed.download",
-                    "model_acquisition",
-                    "completed",
-                    report.downloaded_files,
-                    Some(report.total_files),
-                    "model cache ready",
-                );
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&json_success(serde_json::to_value(report)?))?
-                );
-            }
-            EmbedCommand::Prune { yes, json_progress } => {
-                let progress = ProgressEmitter::new(json_progress);
-                progress.emit(
-                    "embed.prune",
-                    "model_cache",
-                    "started",
-                    0,
-                    Some(1),
-                    "preparing model-cache prune",
-                );
-                if !yes {
-                    progress.emit(
-                        "embed.prune",
-                        "model_cache",
-                        "failed",
-                        0,
-                        Some(1),
-                        "explicit consent required",
-                    );
-                    return Err(Error::Validation(
-                        "embed prune requires --yes because it removes local model cache files"
-                            .to_string(),
-                    ));
-                }
-                let footprint = prune_embedding_cache(&home)?;
-                progress.emit(
-                    "embed.prune",
-                    "model_cache",
-                    "completed",
-                    1,
-                    Some(1),
-                    "model cache pruned",
-                );
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&json_success(serde_json::to_value(footprint)?))?
-                );
-            }
-        },
-        Command::Bench { command } => match command {
-            BenchCommand::Ingest {
-                events,
-                seed_events,
-                iterations,
-                json_progress,
-            } => {
-                let progress = ProgressEmitter::new(json_progress);
-                progress.emit(
-                    "bench.ingest",
-                    "bench",
-                    "started",
-                    0,
-                    Some(iterations),
-                    "starting ingest benchmark",
-                );
-                let report = run_ingest_bench(&events, seed_events, iterations)?;
-                progress.emit(
-                    "bench.ingest",
-                    "bench",
-                    "completed",
-                    iterations,
-                    Some(iterations),
-                    "ingest benchmark completed",
-                );
-                println!("{}", serde_json::to_string_pretty(&report)?);
-            }
-            BenchCommand::Search {
-                query,
-                iterations,
-                limit,
-                json_progress,
-            } => {
-                let progress = ProgressEmitter::new(json_progress);
-                progress.emit(
-                    "bench.search",
-                    "bench",
-                    "started",
-                    0,
-                    Some(iterations),
-                    "starting search benchmark",
-                );
-                let report = run_search_bench(&home, &query, iterations, limit)?;
-                progress.emit(
-                    "bench.search",
-                    "bench",
-                    "completed",
-                    iterations,
-                    Some(iterations),
-                    "search benchmark completed",
-                );
-                println!("{}", serde_json::to_string_pretty(&report)?);
-            }
-        },
+        Command::Embed { command } => run_embed_command(&home, command)?,
+        Command::Bench { command } => run_bench_command(&home, command)?,
         Command::Install { tool, dry_run } => match tool {
             AgentTool::Claude => {
                 let report = install_claude(&home, dry_run)?;
@@ -814,61 +647,7 @@ fn run(cli: Cli) -> nabu_core::Result<()> {
                     corroborate,
                 },
             )?;
-            match format {
-                OutputFormat::Json => {
-                    println!("{}", serde_json::to_string_pretty(&page)?);
-                }
-                OutputFormat::Markdown => {
-                    println!(
-                        "returned: {}  truncated: {}  next_offset: {}  max_snippet_chars_applied: {}",
-                        page.returned,
-                        page.truncated,
-                        OptionalValue(page.continuation.as_ref().map(|continuation| continuation.next_offset)),
-                        page.max_snippet_chars_applied
-                    );
-                    for result in page.results {
-                        println!(
-                            "- `{}` `{}` `{}` score={:.3} `{}` {}:{}{}\n  {}",
-                            result.tool,
-                            result.session_id,
-                            result.canonical_type,
-                            result.score,
-                            result.timestamp,
-                            result.raw_file,
-                            result.raw_line,
-                            AlsoAt(&result.also_at),
-                            result.snippet
-                        );
-                        print_corroboration_markdown(result.corroboration.as_ref());
-                    }
-                }
-                OutputFormat::Human => {
-                    println!(
-                        "returned={} truncated={} next_offset={} max_snippet_chars_applied={}",
-                        page.returned,
-                        page.truncated,
-                        OptionalValue(
-                            page.continuation
-                                .as_ref()
-                                .map(|continuation| continuation.next_offset)
-                        ),
-                        page.max_snippet_chars_applied
-                    );
-                    for result in page.results {
-                        println!(
-                            "{} {} {}:{} score={:.3}{} {}",
-                            result.tool,
-                            result.session_id,
-                            result.raw_file,
-                            result.raw_line,
-                            result.score,
-                            AlsoAt(&result.also_at),
-                            result.snippet
-                        );
-                        print_corroboration_human(result.corroboration.as_ref());
-                    }
-                }
-            }
+            print_search_page(page, format)?;
         }
         Command::Show {
             tool,
@@ -899,41 +678,7 @@ fn run(cli: Cli) -> nabu_core::Result<()> {
                     corroborate,
                 },
             )?;
-            match format {
-                OutputFormat::Json => {
-                    println!("{}", serde_json::to_string_pretty(&page)?);
-                }
-                OutputFormat::Markdown => {
-                    println!(
-                        "mode: {}  truncated: {}  next_after_raw_line: {}",
-                        page.mode,
-                        page.truncated,
-                        OptionalValue(page.next_after_raw_line)
-                    );
-                    for event in page.events {
-                        println!(
-                            "## {} {}:{}\n\n{}\n",
-                            event.canonical_type, event.raw_file, event.raw_line, event.text
-                        );
-                        print_corroboration_markdown(event.corroboration.as_ref());
-                    }
-                }
-                OutputFormat::Human => {
-                    println!(
-                        "mode={} truncated={} next_after_raw_line={}",
-                        page.mode,
-                        page.truncated,
-                        OptionalValue(page.next_after_raw_line)
-                    );
-                    for event in page.events {
-                        println!(
-                            "{} {}:{} {}",
-                            event.canonical_type, event.raw_file, event.raw_line, event.text
-                        );
-                        print_corroboration_human(event.corroboration.as_ref());
-                    }
-                }
-            }
+            print_session_page(page, format)?;
         }
         Command::Tail {
             tool,
@@ -1023,34 +768,216 @@ fn run(cli: Cli) -> nabu_core::Result<()> {
                 print_tool_doctor_human(&home, tool)?;
             }
         }
-        Command::Mcp { command } => match command {
-            McpCommand::Serve { transport } => match transport {
-                McpTransport::Stdio => nabu_mcp::serve_stdio(home)?,
-            },
-            McpCommand::Install { tool, dry_run } => {
-                for report in mcp_apply_all(&home, tool, McpConfigAction::Install, dry_run)? {
-                    print_config_change(&report);
-                }
-            }
-            McpCommand::Uninstall { tool, dry_run } => {
-                for report in mcp_apply_all(&home, tool, McpConfigAction::Uninstall, dry_run)? {
-                    print_config_change(&report);
-                }
-            }
-            McpCommand::Validate {
-                tool,
-                json: as_json,
-            } => {
-                let value = mcp_validate_all(&home, tool)?;
-                if as_json {
-                    println!("{}", serde_json::to_string_pretty(&json_success(value))?);
-                } else {
-                    println!("{}", value);
-                }
-            }
-        },
+        Command::Mcp { command } => run_mcp_command(&home, command)?,
     }
 
+    Ok(())
+}
+
+fn run_mcp_command(home: &Path, command: McpCommand) -> nabu_core::Result<()> {
+    match command {
+        McpCommand::Serve { transport } => match transport {
+            McpTransport::Stdio => nabu_mcp::serve_stdio(home.to_path_buf())?,
+        },
+        McpCommand::Install { tool, dry_run } => {
+            for report in mcp_apply_all(home, tool, McpConfigAction::Install, dry_run)? {
+                print_config_change(&report);
+            }
+        }
+        McpCommand::Uninstall { tool, dry_run } => {
+            for report in mcp_apply_all(home, tool, McpConfigAction::Uninstall, dry_run)? {
+                print_config_change(&report);
+            }
+        }
+        McpCommand::Validate {
+            tool,
+            json: as_json,
+        } => {
+            let value = mcp_validate_all(home, tool)?;
+            if as_json {
+                println!("{}", serde_json::to_string_pretty(&json_success(value))?);
+            } else {
+                println!("{}", value);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn run_embed_command(home: &Path, command: EmbedCommand) -> nabu_core::Result<()> {
+    match command {
+        EmbedCommand::Status => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&json_success(serde_json::to_value(
+                    embedding_model_status(home)
+                )?))?
+            );
+        }
+        EmbedCommand::Download {
+            model,
+            yes,
+            json_progress,
+        } => {
+            let progress = ProgressEmitter::new(json_progress);
+            progress.emit(
+                "embed.download",
+                "model_acquisition",
+                "started",
+                0,
+                Some(1),
+                "checking model acquisition request",
+            );
+            if model != "embeddinggemma-300m-q4" {
+                progress.emit(
+                    "embed.download",
+                    "model_acquisition",
+                    "failed",
+                    0,
+                    Some(1),
+                    "unsupported model",
+                );
+                return Err(Error::Validation(format!(
+                    "unsupported embedding model: {model}"
+                )));
+            }
+            let disclosure = embedding_model_disclosure(home, &model)?;
+            progress.emit_embedding_download_disclosure(&disclosure);
+            if !yes {
+                progress.emit(
+                    "embed.download",
+                    "model_acquisition",
+                    "failed",
+                    0,
+                    Some(1),
+                    "explicit consent required",
+                );
+                return Err(Error::Validation(
+                        "embed download requires --yes after reviewing the printed model license and measured footprint"
+                            .to_string(),
+                    ));
+            }
+            let report =
+                download_embedding_model_with_progress(home, &model, |download_progress| {
+                    progress.emit(
+                        "embed.download",
+                        "model_acquisition",
+                        &download_progress.phase,
+                        download_progress.downloaded_files,
+                        Some(download_progress.total_files),
+                        &download_progress.file,
+                    );
+                })?;
+            progress.emit(
+                "embed.download",
+                "model_acquisition",
+                "completed",
+                report.downloaded_files,
+                Some(report.total_files),
+                "model cache ready",
+            );
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&json_success(serde_json::to_value(report)?))?
+            );
+        }
+        EmbedCommand::Prune { yes, json_progress } => {
+            let progress = ProgressEmitter::new(json_progress);
+            progress.emit(
+                "embed.prune",
+                "model_cache",
+                "started",
+                0,
+                Some(1),
+                "preparing model-cache prune",
+            );
+            if !yes {
+                progress.emit(
+                    "embed.prune",
+                    "model_cache",
+                    "failed",
+                    0,
+                    Some(1),
+                    "explicit consent required",
+                );
+                return Err(Error::Validation(
+                    "embed prune requires --yes because it removes local model cache files"
+                        .to_string(),
+                ));
+            }
+            let footprint = prune_embedding_cache(home)?;
+            progress.emit(
+                "embed.prune",
+                "model_cache",
+                "completed",
+                1,
+                Some(1),
+                "model cache pruned",
+            );
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&json_success(serde_json::to_value(footprint)?))?
+            );
+        }
+    }
+    Ok(())
+}
+
+fn run_bench_command(home: &Path, command: BenchCommand) -> nabu_core::Result<()> {
+    match command {
+        BenchCommand::Ingest {
+            events,
+            seed_events,
+            iterations,
+            json_progress,
+        } => {
+            let progress = ProgressEmitter::new(json_progress);
+            progress.emit(
+                "bench.ingest",
+                "bench",
+                "started",
+                0,
+                Some(iterations),
+                "starting ingest benchmark",
+            );
+            let report = run_ingest_bench(&events, seed_events, iterations)?;
+            progress.emit(
+                "bench.ingest",
+                "bench",
+                "completed",
+                iterations,
+                Some(iterations),
+                "ingest benchmark completed",
+            );
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
+        BenchCommand::Search {
+            query,
+            iterations,
+            limit,
+            json_progress,
+        } => {
+            let progress = ProgressEmitter::new(json_progress);
+            progress.emit(
+                "bench.search",
+                "bench",
+                "started",
+                0,
+                Some(iterations),
+                "starting search benchmark",
+            );
+            let report = run_search_bench(home, &query, iterations, limit)?;
+            progress.emit(
+                "bench.search",
+                "bench",
+                "completed",
+                iterations,
+                Some(iterations),
+                "search benchmark completed",
+            );
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
+    }
     Ok(())
 }
 

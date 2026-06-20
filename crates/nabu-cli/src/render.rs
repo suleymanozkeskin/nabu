@@ -9,11 +9,11 @@
 use crate::mcp_config::{
     claude_mcp_entry_installed, codex_mcp_entry_installed, opencode_mcp_entry_installed,
 };
-use crate::DoctorTool;
+use crate::{DoctorTool, OutputFormat};
 use nabu_adapters::{claude_status, codex_status, opencode_status, ConfigChangeReport};
 use nabu_core::{
     doctor_with_options, latest_event, Corroboration, Error, PurgeAction, PurgeAllReport,
-    PurgeTier, Tool,
+    PurgeTier, SearchPage, SessionPage, Tool,
 };
 use serde_json::{json, Value};
 use std::path::Path;
@@ -418,6 +418,110 @@ pub(crate) fn render_config_change(report: &ConfigChangeReport) -> String {
 
 pub(crate) fn print_config_change(report: &ConfigChangeReport) {
     print!("{}", render_config_change(report));
+}
+
+pub(crate) fn print_search_page(page: SearchPage, format: OutputFormat) -> nabu_core::Result<()> {
+    match format {
+        OutputFormat::Json => {
+            println!("{}", serde_json::to_string_pretty(&page)?);
+        }
+        OutputFormat::Markdown => {
+            println!(
+                "returned: {}  truncated: {}  next_offset: {}  max_snippet_chars_applied: {}",
+                page.returned,
+                page.truncated,
+                OptionalValue(
+                    page.continuation
+                        .as_ref()
+                        .map(|continuation| continuation.next_offset)
+                ),
+                page.max_snippet_chars_applied
+            );
+            for result in page.results {
+                println!(
+                    "- `{}` `{}` `{}` score={:.3} `{}` {}:{}{}\n  {}",
+                    result.tool,
+                    result.session_id,
+                    result.canonical_type,
+                    result.score,
+                    result.timestamp,
+                    result.raw_file,
+                    result.raw_line,
+                    AlsoAt(&result.also_at),
+                    result.snippet
+                );
+                print_corroboration_markdown(result.corroboration.as_ref());
+            }
+        }
+        OutputFormat::Human => {
+            println!(
+                "returned={} truncated={} next_offset={} max_snippet_chars_applied={}",
+                page.returned,
+                page.truncated,
+                OptionalValue(
+                    page.continuation
+                        .as_ref()
+                        .map(|continuation| continuation.next_offset)
+                ),
+                page.max_snippet_chars_applied
+            );
+            for result in page.results {
+                println!(
+                    "{} {} {}:{} score={:.3}{} {}",
+                    result.tool,
+                    result.session_id,
+                    result.raw_file,
+                    result.raw_line,
+                    result.score,
+                    AlsoAt(&result.also_at),
+                    result.snippet
+                );
+                print_corroboration_human(result.corroboration.as_ref());
+            }
+        }
+    }
+
+    Ok(())
+}
+
+pub(crate) fn print_session_page(page: SessionPage, format: OutputFormat) -> nabu_core::Result<()> {
+    match format {
+        OutputFormat::Json => {
+            println!("{}", serde_json::to_string_pretty(&page)?);
+        }
+        OutputFormat::Markdown => {
+            println!(
+                "mode: {}  truncated: {}  next_after_raw_line: {}",
+                page.mode,
+                page.truncated,
+                OptionalValue(page.next_after_raw_line)
+            );
+            for event in page.events {
+                println!(
+                    "## {} {}:{}\n\n{}\n",
+                    event.canonical_type, event.raw_file, event.raw_line, event.text
+                );
+                print_corroboration_markdown(event.corroboration.as_ref());
+            }
+        }
+        OutputFormat::Human => {
+            println!(
+                "mode={} truncated={} next_after_raw_line={}",
+                page.mode,
+                page.truncated,
+                OptionalValue(page.next_after_raw_line)
+            );
+            for event in page.events {
+                println!(
+                    "{} {}:{} {}",
+                    event.canonical_type, event.raw_file, event.raw_line, event.text
+                );
+                print_corroboration_human(event.corroboration.as_ref());
+            }
+        }
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
