@@ -85,6 +85,13 @@ pub(crate) fn chmod(_path: &Path, _mode: u32) -> Result<()> {
     Ok(())
 }
 
+pub(crate) fn set_if_exists(path: &Path, mode: u32) -> Result<()> {
+    if path.exists() {
+        chmod(path, mode)?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

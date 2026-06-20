@@ -4,7 +4,11 @@
 //! kept as a sibling test module so lib.rs stays a thin facade.
 
 use super::*;
-use serde_json::json;
+#[cfg(feature = "semantic")]
+use rusqlite::params;
+use rusqlite::Connection;
+use serde::Deserialize;
+use serde_json::{json, Value};
 use std::fs;
 use tempfile::tempdir;
 

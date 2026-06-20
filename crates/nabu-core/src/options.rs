@@ -1,10 +1,12 @@
 //! Serializable DTOs, option inputs, and report structs returned across the
 //! public API (search, session, purge, backfill, doctor, embedding model).
 
-use crate::{SearchMode, StoredEvent, Tool, DEFAULT_SEARCH_SNIPPET_CHARS};
-use serde::Serialize;
+use crate::{Error, EventEnvelope, Result, Tool, DEFAULT_SEARCH_SNIPPET_CHARS};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::str::FromStr;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SearchOptions {
@@ -302,4 +304,209 @@ pub struct DoctorStats {
     pub messages: i64,
     pub tool_events: i64,
     pub compactions: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InitReport {
+    pub home: PathBuf,
+    pub db_path: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AppendReport {
+    pub raw_file: PathBuf,
+    pub raw_offset: u64,
+    pub session_id: String,
+    pub dedupe_key: String,
+    pub appended: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct IndexReport {
+    pub indexed_events: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IndexOptions {
+    pub embed: bool,
+}
+
+impl Default for IndexOptions {
+    fn default() -> Self {
+        Self { embed: true }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct FileIngestReport {
+    pub appended_events: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct SearchResult {
+    pub tool: Tool,
+    pub session_id: String,
+    pub canonical_type: String,
+    pub timestamp: String,
+    pub score: f64,
+    pub snippet: String,
+    pub raw_file: String,
+    pub raw_line: i64,
+    pub raw_offset: Option<i64>,
+    pub compaction_state: String,
+    pub payload: Value,
+    pub also_at: Vec<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub corroboration: Option<Corroboration>,
+    #[serde(skip)]
+    pub retrieval_key: String,
+    #[serde(skip)]
+    pub corroboration_text: String,
+    #[serde(skip)]
+    pub cwd: Option<String>,
+    #[serde(skip)]
+    pub project_root: Option<String>,
+}
+
+#[derive(Debug)]
+pub(crate) struct RankedSearchResult {
+    pub(crate) event_id: i64,
+    pub(crate) result: SearchResult,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Corroboration {
+    pub repo: Option<String>,
+    pub refs: Vec<CorroboratedRef>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CorroboratedRef {
+    pub kind: String,
+    #[serde(rename = "ref")]
+    pub reference: String,
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SearchContinuation {
+    pub next_offset: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct SearchPage {
+    pub results: Vec<SearchResult>,
+    pub truncated: bool,
+    pub returned: usize,
+    pub total_estimated: Option<usize>,
+    pub continuation: Option<SearchContinuation>,
+    pub mode_requested: SearchMode,
+    pub mode_applied: SearchMode,
+    pub semantic_available: bool,
+    pub limit_applied: usize,
+    pub offset_applied: usize,
+    pub max_snippet_chars_applied: usize,
+    pub include_payload: bool,
+    pub include_deltas: bool,
+    pub dedupe: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct StoredEvent {
+    pub tool: Tool,
+    pub session_id: String,
+    pub canonical_type: String,
+    pub timestamp: String,
+    pub text: String,
+    pub raw_file: String,
+    pub raw_line: i64,
+    pub raw_offset: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub corroboration: Option<Corroboration>,
+    #[serde(skip)]
+    pub cwd: Option<String>,
+    #[serde(skip)]
+    pub project_root: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct SessionSummary {
+    pub tool: Tool,
+    pub session_id: String,
+    pub project_root: Option<String>,
+    pub cwd: Option<String>,
+    pub started_at: Option<String>,
+    pub updated_at: Option<String>,
+    pub event_count: i64,
+    pub message_count: i64,
+    pub compaction_count: i64,
+    pub raw_file: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct SessionPage {
+    pub tool: Tool,
+    pub session_id: String,
+    pub raw_file: String,
+    pub events: Vec<StoredEvent>,
+    pub truncated: bool,
+    pub next_after_raw_line: Option<i64>,
+    pub mode: String,
+    pub limit_events_applied: Option<usize>,
+    pub after_raw_line: Option<i64>,
+    pub around_raw_line: Option<i64>,
+    pub before_applied: Option<usize>,
+    pub after_applied: Option<usize>,
+    pub include_deltas: bool,
+    pub canonical_type: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct EventPointer {
+    pub envelope: EventEnvelope,
+    pub searchable_text: String,
+    pub raw_file: String,
+    pub raw_line: i64,
+    pub raw_offset: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub corroboration: Option<Corroboration>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+#[derive(Default)]
+pub enum SearchMode {
+    #[default]
+    Auto,
+    Lexical,
+    Hybrid,
+}
+
+impl SearchMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SearchMode::Auto => "auto",
+            SearchMode::Lexical => "lexical",
+            SearchMode::Hybrid => "hybrid",
+        }
+    }
+}
+
+impl FromStr for SearchMode {
+    type Err = Error;
+
+    fn from_str(value: &str) -> Result<Self> {
+        match value {
+            "auto" => Ok(SearchMode::Auto),
+            "lexical" => Ok(SearchMode::Lexical),
+            "hybrid" => Ok(SearchMode::Hybrid),
+            _ => Err(Error::Validation(format!(
+                "unsupported search mode: {value}"
+            ))),
+        }
+    }
 }

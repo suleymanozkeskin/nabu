@@ -5,7 +5,7 @@
 
 use crate::{
     compaction_state_for, embed_index_if_available_with_progress, ensure_semantic_vector_schema,
-    hash_line, init_home, insert_event_file_rows, insert_vector_unit_rows,
+    file_paths_for_payload, hash_line, init_home, insert_vector_unit_rows,
     message_text_for_document, open_index, raw_index_checkpoint_is_current,
     resolved_payload_for_envelope, role_for, search_document_for_event, source_file_metadata,
     string_field, tool_status_for, write_raw_index_checkpoint, CanonicalType,
@@ -467,4 +467,47 @@ pub(crate) fn recalculate_all_session_counts(conn: &Connection, db_path: &Path) 
         path: db_path.to_path_buf(),
         source,
     })
+}
+
+fn insert_event_file_rows(
+    conn: &Connection,
+    path: &Path,
+    event_id: i64,
+    envelope: &EventEnvelope,
+    payload: &Value,
+) -> Result<()> {
+    let relationship = match envelope.canonical_type {
+        CanonicalType::FileChanged => "edited",
+        _ => "mentioned",
+    };
+    for file_path in file_paths_for_payload(payload) {
+        conn.execute(
+            "INSERT OR IGNORE INTO files(path) VALUES (?1)",
+            [&file_path],
+        )
+        .map_err(|source| Error::Sqlite {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        let file_id: i64 = conn
+            .query_row(
+                "SELECT id FROM files WHERE path = ?1",
+                [&file_path],
+                |row| row.get(0),
+            )
+            .map_err(|source| Error::Sqlite {
+                path: path.to_path_buf(),
+                source,
+            })?;
+        conn.execute(
+            "INSERT OR IGNORE INTO event_files(event_id, file_id, relationship)
+             VALUES (?1, ?2, ?3)",
+            params![event_id, file_id, relationship],
+        )
+        .map_err(|source| Error::Sqlite {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    }
+    Ok(())
 }

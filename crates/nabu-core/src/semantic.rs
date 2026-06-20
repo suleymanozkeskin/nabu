@@ -5,7 +5,11 @@
 //! re-exports the same names in both builds (hard constraint 4).
 
 use crate::*;
+#[cfg(feature = "semantic")]
+use rusqlite::params;
 use rusqlite::Connection;
+#[cfg(feature = "semantic")]
+use serde_json::Value;
 
 pub(crate) const SEMANTIC_MODEL_ID: &str = "embeddinggemma-300m-q4";
 pub(crate) const SEMANTIC_MODEL_REPO: &str = "onnx-community/embeddinggemma-300m-ONNX";
