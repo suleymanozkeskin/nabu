@@ -173,7 +173,9 @@ CREATE INDEX IF NOT EXISTS idx_events_canonical_captured ON events(canonical_typ
 CREATE INDEX IF NOT EXISTS idx_events_session_captured ON events(tool, session_id, captured_at);
 CREATE INDEX IF NOT EXISTS idx_events_tool_captured ON events(tool, captured_at);
 CREATE INDEX IF NOT EXISTS idx_messages_session_sequence ON messages(tool, session_id, sequence);
+CREATE INDEX IF NOT EXISTS idx_tool_events_session ON tool_events(tool, session_id);
 CREATE INDEX IF NOT EXISTS idx_tool_events_name ON tool_events(tool_name);
+CREATE INDEX IF NOT EXISTS idx_compactions_session ON compactions(tool, session_id);
 
 -- Semantic feature only, after sqlite-vec has been registered:
 --

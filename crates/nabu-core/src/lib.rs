@@ -2095,6 +2095,7 @@ where
     })?;
 
     let mut indexed_events = 0usize;
+    let mut touched_sessions = HashSet::new();
     for tool in Tool::all() {
         let raw_dir = home.join("raw").join(tool.as_str());
         if !raw_dir.exists() {
@@ -2121,11 +2122,17 @@ where
 
             let raw_report = index_raw_file(&tx, tool, &path)?;
             indexed_events += raw_report.indexed_events;
+            touched_sessions.extend(
+                raw_report
+                    .touched_sessions
+                    .iter()
+                    .map(|session_id| (tool, session_id.clone())),
+            );
             write_raw_index_checkpoint(&tx, &db_path, tool, &path, source_meta, raw_report)?;
         }
     }
 
-    recalculate_session_counts(&tx)?;
+    recalculate_touched_session_counts(&tx, &db_path, &touched_sessions)?;
     tx.commit().map_err(|source| Error::Sqlite {
         path: db_path.clone(),
         source,
@@ -4951,7 +4958,7 @@ fn delete_indexed_events(
         path: db_path.clone(),
         source,
     })?;
-    recalculate_session_counts(&tx)?;
+    recalculate_all_session_counts(&tx, &db_path)?;
     tx.commit().map_err(|source| Error::Sqlite {
         path: db_path.clone(),
         source,
@@ -7712,7 +7719,7 @@ fn rewrite_opencode_server_url(content: &str, url: Option<&str>) -> String {
 
 fn initialize_database(path: &Path) -> Result<()> {
     register_semantic_extension_if_enabled();
-    let conn = Connection::open(path).map_err(|source| Error::Sqlite {
+    let mut conn = Connection::open(path).map_err(|source| Error::Sqlite {
         path: path.to_path_buf(),
         source,
     })?;
@@ -7734,7 +7741,7 @@ fn initialize_database(path: &Path) -> Result<()> {
             source,
         })?;
     ensure_checkpoint_schema(&conn, path)?;
-    ensure_events_fts_schema(&conn, path)?;
+    ensure_events_fts_schema(&mut conn, path)?;
     ensure_supporting_indexes(&conn, path)?;
     ensure_semantic_vector_schema(&conn, path)?;
     conn.execute_batch(
@@ -7757,7 +7764,7 @@ fn initialize_database(path: &Path) -> Result<()> {
 
 fn open_index(path: &Path) -> Result<Connection> {
     register_semantic_extension_if_enabled();
-    let conn = Connection::open(path).map_err(|source| Error::Sqlite {
+    let mut conn = Connection::open(path).map_err(|source| Error::Sqlite {
         path: path.to_path_buf(),
         source,
     })?;
@@ -7772,7 +7779,7 @@ fn open_index(path: &Path) -> Result<Connection> {
         source,
     })?;
     ensure_checkpoint_schema(&conn, path)?;
-    ensure_events_fts_schema(&conn, path)?;
+    ensure_events_fts_schema(&mut conn, path)?;
     ensure_supporting_indexes(&conn, path)?;
     Ok(conn)
 }
@@ -7860,7 +7867,7 @@ fn ensure_table_column(
     Ok(())
 }
 
-fn ensure_events_fts_schema(conn: &Connection, path: &Path) -> Result<()> {
+fn ensure_events_fts_schema(conn: &mut Connection, path: &Path) -> Result<()> {
     let columns = {
         let mut statement = conn
             .prepare("PRAGMA table_info(events_fts)")
@@ -7900,26 +7907,76 @@ fn ensure_events_fts_schema(conn: &Connection, path: &Path) -> Result<()> {
         .map(|sql| sql.contains("content=''") || sql.contains("content=\"\""))
         .unwrap_or(false);
 
-    if columns.iter().any(|column| column == "searchable_text") || !contentless {
-        conn.execute_batch("DROP TABLE IF EXISTS events_fts;")
+    let legacy_fts = columns.iter().any(|column| column == "searchable_text") || !contentless;
+    let incomplete_fts =
+        contentless && !legacy_fts && events_fts_missing_boundary_rows(conn, path)?;
+
+    if legacy_fts || incomplete_fts {
+        let tx = conn.transaction().map_err(|source| Error::Sqlite {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        tx.execute_batch("DROP TABLE IF EXISTS events_fts;")
             .map_err(|source| Error::Sqlite {
                 path: path.to_path_buf(),
                 source,
             })?;
-        conn.execute_batch(EVENTS_FTS_SCHEMA)
+        tx.execute_batch(EVENTS_FTS_SCHEMA)
             .map_err(|source| Error::Sqlite {
                 path: path.to_path_buf(),
                 source,
             })?;
-        rebuild_events_fts(conn, path)?;
+        rebuild_events_fts(&tx, path)?;
+        tx.commit().map_err(|source| Error::Sqlite {
+            path: path.to_path_buf(),
+            source,
+        })?;
     }
 
     Ok(())
 }
 
+fn events_fts_missing_boundary_rows(conn: &Connection, path: &Path) -> Result<bool> {
+    // Legacy crash-window recovery heuristic, not a full FTS integrity scan.
+    let (min_id, max_id): (Option<i64>, Option<i64>) = conn
+        .query_row("SELECT MIN(id), MAX(id) FROM events", [], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })
+        .map_err(|source| Error::Sqlite {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    let Some(min_id) = min_id else {
+        return Ok(false);
+    };
+    let max_id = max_id.expect("MAX(id) exists when MIN(id) exists");
+
+    for event_id in [min_id, max_id] {
+        let exists = conn
+            .query_row(
+                "SELECT rowid FROM events_fts WHERE rowid = ?1 LIMIT 1",
+                [event_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()
+            .map_err(|source| Error::Sqlite {
+                path: path.to_path_buf(),
+                source,
+            })?
+            .is_some();
+        if !exists {
+            return Ok(true);
+        }
+    }
+
+    Ok(false)
+}
+
 fn ensure_supporting_indexes(conn: &Connection, path: &Path) -> Result<()> {
     conn.execute_batch(
-        "CREATE INDEX IF NOT EXISTS idx_events_tool_captured ON events(tool, captured_at);",
+        "CREATE INDEX IF NOT EXISTS idx_events_tool_captured ON events(tool, captured_at);
+         CREATE INDEX IF NOT EXISTS idx_tool_events_session ON tool_events(tool, session_id);
+         CREATE INDEX IF NOT EXISTS idx_compactions_session ON compactions(tool, session_id);",
     )
     .map_err(|source| Error::Sqlite {
         path: path.to_path_buf(),
@@ -8028,6 +8085,7 @@ struct RawIndexFileReport {
     indexed_events: usize,
     bytes_read: u64,
     last_line_hash: Option<String>,
+    touched_sessions: HashSet<String>,
 }
 
 fn index_raw_file(conn: &Connection, tool: Tool, path: &Path) -> Result<RawIndexFileReport> {
@@ -8041,6 +8099,7 @@ fn index_raw_file(conn: &Connection, tool: Tool, path: &Path) -> Result<RawIndex
     let mut raw_offset = 0u64;
     let mut indexed = 0usize;
     let mut last_hash = None;
+    let mut touched_sessions = HashSet::new();
 
     loop {
         line.clear();
@@ -8065,6 +8124,7 @@ fn index_raw_file(conn: &Connection, tool: Tool, path: &Path) -> Result<RawIndex
 
         if insert_indexed_event(conn, path, raw_line, raw_offset as i64, &parsed)? {
             indexed += 1;
+            touched_sessions.insert(parsed.session_id.clone());
         }
         raw_offset += bytes as u64;
     }
@@ -8073,6 +8133,7 @@ fn index_raw_file(conn: &Connection, tool: Tool, path: &Path) -> Result<RawIndex
         indexed_events: indexed,
         bytes_read: raw_offset,
         last_line_hash: last_hash,
+        touched_sessions,
     })
 }
 
@@ -9169,7 +9230,42 @@ fn looks_like_file_path(value: &str) -> bool {
         || value.starts_with("~/")
 }
 
-fn recalculate_session_counts(conn: &Connection) -> Result<()> {
+fn recalculate_touched_session_counts(
+    conn: &Connection,
+    db_path: &Path,
+    touched_sessions: &HashSet<(Tool, String)>,
+) -> Result<()> {
+    for (tool, session_id) in touched_sessions {
+        conn.execute(
+            "UPDATE sessions
+             SET event_count = (
+               SELECT COUNT(*) FROM events
+               WHERE events.tool = ?1 AND events.session_id = ?2
+             ),
+             message_count = (
+               SELECT COUNT(*) FROM messages
+               WHERE messages.tool = ?1 AND messages.session_id = ?2
+             ),
+             tool_event_count = (
+               SELECT COUNT(*) FROM tool_events
+               WHERE tool_events.tool = ?1 AND tool_events.session_id = ?2
+             ),
+             compaction_count = (
+               SELECT COUNT(*) FROM compactions
+               WHERE compactions.tool = ?1 AND compactions.session_id = ?2
+             )
+             WHERE sessions.tool = ?1 AND sessions.session_id = ?2;",
+            params![tool.as_str(), session_id],
+        )
+        .map_err(|source| Error::Sqlite {
+            path: db_path.to_path_buf(),
+            source,
+        })?;
+    }
+    Ok(())
+}
+
+fn recalculate_all_session_counts(conn: &Connection, db_path: &Path) -> Result<()> {
     conn.execute_batch(
         "UPDATE sessions
          SET event_count = (
@@ -9190,7 +9286,7 @@ fn recalculate_session_counts(conn: &Connection) -> Result<()> {
          );",
     )
     .map_err(|source| Error::Sqlite {
-        path: PathBuf::from("harness.db"),
+        path: db_path.to_path_buf(),
         source,
     })
 }
@@ -10347,6 +10443,41 @@ mod tests {
         assert_eq!(integrity, "ok");
         assert_eq!(user_version, 1);
         assert_eq!(opencode_server_url(&home).unwrap(), None);
+    }
+
+    #[test]
+    fn open_index_rebuilds_current_shaped_but_empty_fts_table() {
+        let temp = tempdir().unwrap();
+        let home = temp.path().join("home");
+        init_home(&home).unwrap();
+        ingest_hook_event(
+            &home,
+            Tool::Claude,
+            json!({
+                "session_id": "fts-recovery-session",
+                "hook_event_name": "UserPromptSubmit",
+                "message_id": "fts-recovery-1",
+                "cwd": "/tmp/nabu-fixture",
+                "project_root": "/tmp/nabu-fixture",
+                "prompt": "interrupted fts rebuild recovery marker"
+            }),
+        )
+        .unwrap();
+        index_once(&home).unwrap();
+
+        let db_path = home.join("index").join("harness.db");
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch("DROP TABLE IF EXISTS events_fts;")
+                .unwrap();
+            conn.execute_batch(EVENTS_FTS_SCHEMA).unwrap();
+        }
+
+        open_index(&db_path).unwrap();
+
+        let results = search_history(&home, "interrupted fts rebuild recovery", 10).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].session_id, "fts-recovery-session");
     }
 
     #[cfg(feature = "semantic")]

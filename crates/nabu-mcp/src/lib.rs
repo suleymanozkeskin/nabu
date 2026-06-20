@@ -6,6 +6,7 @@ use nabu_core::{
 };
 use serde_json::{json, Value};
 use std::io::{BufRead, Write};
+use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::mpsc::{channel, sync_channel};
@@ -148,15 +149,11 @@ where
                     rx.recv()
                 };
                 let Ok(line) = line else { break };
-                match handle_message(home, &line) {
-                    Ok(Some(response)) => {
-                        // A send error means the writer thread is gone (shutdown).
-                        if resp_tx.send(response).is_err() {
-                            break;
-                        }
+                if let Some(response) = handle_message_safely(home, &line) {
+                    // A send error means the writer thread is gone (shutdown).
+                    if resp_tx.send(response).is_err() {
+                        break;
                     }
-                    Ok(None) => {}
-                    Err(error) => eprintln!("nabu mcp error: {error}"),
                 }
             });
         }
@@ -191,6 +188,23 @@ where
         let write_result = writer_handle.join().expect("writer thread panicked");
         read_result.and(write_result)
     })
+}
+
+fn handle_message_safely(home: &Path, line: &str) -> Option<Value> {
+    match panic::catch_unwind(AssertUnwindSafe(|| handle_message(home, line))) {
+        Ok(Ok(response)) => response,
+        Ok(Err(error)) => Some(protocol_error_response(line, error)),
+        Err(_) => Some(error_response(
+            request_id_or_null(line),
+            -32603,
+            "internal error",
+            json!({
+                "code": "internal_error",
+                "message": "MCP request handler panicked",
+                "recoverable": true
+            }),
+        )),
+    }
 }
 
 fn handle_message(home: &Path, line: &str) -> nabu_core::Result<Option<Value>> {
@@ -242,6 +256,56 @@ fn handle_message(home: &Path, line: &str) -> nabu_core::Result<Option<Value>> {
         ),
     };
     Ok(Some(response))
+}
+
+fn request_id_or_null(line: &str) -> Value {
+    serde_json::from_str::<Value>(line)
+        .ok()
+        .and_then(|request| request.get("id").cloned())
+        .unwrap_or(Value::Null)
+}
+
+fn protocol_error_response(line: &str, error: Error) -> Value {
+    let id = request_id_or_null(line);
+    match error {
+        Error::Json(source) => {
+            let (code, message, data_code) = if source.is_syntax() || source.is_eof() {
+                (-32700, "parse error", "parse_error")
+            } else {
+                (-32600, "invalid request", "invalid_request")
+            };
+            error_response(
+                id,
+                code,
+                message,
+                json!({
+                    "code": data_code,
+                    "message": source.to_string(),
+                    "recoverable": true
+                }),
+            )
+        }
+        Error::Validation(message) => error_response(
+            id,
+            -32600,
+            "invalid request",
+            json!({
+                "code": "invalid_request",
+                "message": message,
+                "recoverable": true
+            }),
+        ),
+        error => error_response(
+            id,
+            -32603,
+            "internal error",
+            json!({
+                "code": "internal_error",
+                "message": error.to_string(),
+                "recoverable": true
+            }),
+        ),
+    }
 }
 
 fn ok_response(id: Value, result: Value) -> Value {

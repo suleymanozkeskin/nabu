@@ -79,6 +79,35 @@ fn tool_errors_are_structured_and_recoverable() {
 }
 
 #[test]
+fn protocol_errors_return_jsonrpc_error_frames_and_do_not_stop_workers() {
+    let temp = tempdir().unwrap();
+    let home = temp.path().join("home");
+    init_home(&home).unwrap();
+
+    let output = run_mcp_lines(
+        &home,
+        vec![
+            json!({"jsonrpc":"2.0","id":"bad-request","params":{}}).to_string(),
+            json!({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}).to_string(),
+        ],
+    );
+
+    let protocol_error = output
+        .iter()
+        .find(|response| response["id"] == "bad-request")
+        .unwrap();
+    assert_eq!(protocol_error["error"]["code"], -32600);
+    assert_eq!(protocol_error["error"]["message"], "invalid request");
+    assert_eq!(
+        protocol_error["error"]["data"]["message"],
+        "json-rpc method is required"
+    );
+
+    let tools_response = output.iter().find(|response| response["id"] == 2).unwrap();
+    assert!(tools_response["result"]["tools"].as_array().unwrap().len() >= 7);
+}
+
+#[test]
 fn search_history_description_teaches_citation_first_payload_opt_in_loop() {
     let temp = tempdir().unwrap();
     let home = temp.path().join("home");
@@ -571,12 +600,17 @@ fn concurrent_requests_all_receive_exactly_one_response() {
 }
 
 fn run_mcp(home: &std::path::Path, messages: Vec<Value>) -> Vec<Value> {
-    let input = messages
-        .into_iter()
-        .map(|message| message.to_string())
-        .collect::<Vec<_>>()
-        .join("\n")
-        + "\n";
+    run_mcp_lines(
+        home,
+        messages
+            .into_iter()
+            .map(|message| message.to_string())
+            .collect(),
+    )
+}
+
+fn run_mcp_lines(home: &std::path::Path, messages: Vec<String>) -> Vec<Value> {
+    let input = messages.join("\n") + "\n";
     let mut output = Vec::new();
     serve_with_io(home.to_path_buf(), Cursor::new(input), &mut output).unwrap();
     String::from_utf8(output)
