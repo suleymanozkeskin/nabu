@@ -2284,6 +2284,17 @@ where
     init_home(home)?;
     let cache_path = semantic_model_cache_path(home);
     create_dir_0700(&cache_path)?;
+    if semantic_model_files_present(home) {
+        return Ok(EmbeddingDownloadReport {
+            model_id: SEMANTIC_MODEL_ID.to_string(),
+            cache_path: cache_path.display().to_string(),
+            downloaded_files: 0,
+            total_files: SEMANTIC_MODEL_REMOTE_FILES.len(),
+            downloaded_bytes: 0,
+            on_disk_bytes: directory_size(&cache_path).unwrap_or(0),
+            license_summary: gemma_terms_summary().to_string(),
+        });
+    }
     let transient_cache = cache_path.join(".hf-download-cache");
     if transient_cache.exists() {
         fs::remove_dir_all(&transient_cache).map_err(|source| Error::Io {
@@ -10840,6 +10851,26 @@ mod tests {
 
     #[cfg(feature = "semantic")]
     #[test]
+    fn semantic_model_download_is_noop_when_cache_is_complete() {
+        let temp = tempdir().unwrap();
+        let home = temp.path().join("home");
+        init_home(&home).unwrap();
+        write_fake_semantic_model_files(&home);
+
+        let mut progress = Vec::new();
+        let report = download_embedding_model_with_progress(&home, SEMANTIC_MODEL_ID, |event| {
+            progress.push(event)
+        })
+        .unwrap();
+
+        assert!(progress.is_empty());
+        assert_eq!(report.downloaded_files, 0);
+        assert_eq!(report.total_files, SEMANTIC_MODEL_REMOTE_FILES.len());
+        assert!(report.on_disk_bytes > 0);
+    }
+
+    #[cfg(feature = "semantic")]
+    #[test]
     fn semantic_embedding_batches_by_length_and_streams_progress() {
         let mut units = vec![
             UnembeddedUnit {
@@ -10951,11 +10982,9 @@ mod tests {
 
     #[cfg(feature = "semantic")]
     #[test]
-    fn semantic_no_embed_defers_vectors_until_later_default_index_when_model_present() {
-        let Some(model_home) = semantic_test_model_home() else {
-            eprintln!("skipping semantic no-embed acceptance: local model cache not present");
-            return;
-        };
+    #[ignore = "semantic acceptance requires a local embedding model cache"]
+    fn semantic_acceptance_no_embed_defers_vectors_until_later_default_index() {
+        let model_home = required_semantic_test_model_home();
         let temp = tempdir().unwrap();
         let home = temp.path().join("home");
         init_home(&home).unwrap();
@@ -11003,13 +11032,9 @@ mod tests {
 
     #[cfg(feature = "semantic")]
     #[test]
-    fn hybrid_beats_lexical_on_labeled_retrieval_fixture_when_model_present() {
-        let Some(model_home) = semantic_test_model_home() else {
-            eprintln!(
-                "skipping semantic retrieval quality acceptance: local model cache not present"
-            );
-            return;
-        };
+    #[ignore = "semantic acceptance requires a local embedding model cache"]
+    fn semantic_acceptance_hybrid_beats_lexical_on_labeled_retrieval_fixture() {
+        let model_home = required_semantic_test_model_home();
         let fixture = semantic_retrieval_fixture();
         assert!(!fixture.events.is_empty());
         assert!(!fixture.queries.is_empty());
@@ -11150,6 +11175,14 @@ mod tests {
             fs::create_dir_all(path.parent().unwrap()).unwrap();
             fs::write(path, b"not a real model").unwrap();
         }
+    }
+
+    #[cfg(feature = "semantic")]
+    fn required_semantic_test_model_home() -> PathBuf {
+        semantic_test_model_home().expect(
+            "semantic acceptance tests require NABU_SEMANTIC_MODEL_DIR or \
+             NABU_SEMANTIC_TEST_HOME to point at a downloaded embeddinggemma-300m-q4 cache",
+        )
     }
 
     #[cfg(feature = "semantic")]

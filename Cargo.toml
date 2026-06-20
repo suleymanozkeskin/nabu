@@ -36,4 +36,4 @@ sha2 = "0.10"
 sqlite-vec = "=0.1.9"
 tempfile = "3"
 thiserror = "2"
-time = { version = "=0.3.44", features = ["formatting", "parsing"] }
+time = { version = "0.3", features = ["formatting", "parsing"] }

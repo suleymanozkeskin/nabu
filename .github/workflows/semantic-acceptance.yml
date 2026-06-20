@@ -1,0 +1,42 @@
+name: Semantic Acceptance
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 4 * * 1"
+
+env:
+  CARGO_TERM_COLOR: always
+  NABU_SEMANTIC_TEST_HOME: ${{ github.workspace }}/.semantic-test-home
+  NABU_SEMANTIC_INTRA_THREADS: "2"
+
+jobs:
+  semantic-acceptance:
+    name: semantic acceptance
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust 1.88
+        uses: dtolnay/rust-toolchain@1.88.0
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Cache semantic model
+        uses: actions/cache@v4
+        with:
+          path: .semantic-test-home/models/embeddinggemma-300m-q4
+          key: semantic-model-embeddinggemma-300m-q4-v1
+
+      - name: Download semantic model
+        run: |
+          cargo run -p nabu-cli --features semantic -- \
+            --home "$NABU_SEMANTIC_TEST_HOME" \
+            embed download --yes --json-progress
+
+      - name: Run semantic acceptance tests
+        run: |
+          cargo test -p nabu-core --features semantic semantic_acceptance -- \
+            --ignored --nocapture

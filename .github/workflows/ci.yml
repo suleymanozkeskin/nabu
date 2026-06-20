@@ -58,3 +58,18 @@ jobs:
 
       - name: Test workspace (semantic feature)
         run: cargo test --workspace --features semantic
+
+  supply-chain:
+    name: supply-chain
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: cargo-deny
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          rust-version: "1.88.0"
+          command: check
+          arguments: --all-features
+          command-arguments: all
