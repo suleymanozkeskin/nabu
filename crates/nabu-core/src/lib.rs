@@ -105,33 +105,8 @@ const SEMANTIC_EMBED_COLLECT_BATCH_SIZE: usize = 4096;
 #[cfg(feature = "semantic")]
 const SEMANTIC_EMBED_PROGRESS_INTERVAL: StdDuration = StdDuration::from_secs(2);
 
-pub type Result<T> = std::result::Result<T, Error>;
-
-#[derive(Debug, thiserror::Error)]
-pub enum Error {
-    #[error("validation error: {0}")]
-    Validation(String),
-    #[error("home directory could not be resolved; set --home or NABU_HOME")]
-    HomeUnavailable,
-    #[error("filesystem error at {path}: {source}")]
-    Io {
-        path: PathBuf,
-        #[source]
-        source: std::io::Error,
-    },
-    #[error("sqlite error at {path}: {source}")]
-    Sqlite {
-        path: PathBuf,
-        #[source]
-        source: rusqlite::Error,
-    },
-    #[error("semantic search unavailable: {0}")]
-    SemanticUnavailable(String),
-    #[error("json error: {0}")]
-    Json(#[from] serde_json::Error),
-    #[error("time formatting error: {0}")]
-    TimeFormat(#[from] time::error::Format),
-}
+mod error;
+pub use error::{Error, Result};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
