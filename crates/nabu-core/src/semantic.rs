@@ -764,12 +764,15 @@ fn vector_search_results_for_k(
             let tool_text: String = row.get(1)?;
             let searchable_text = row.get::<_, String>(6).unwrap_or_default();
             let distance = row.get::<_, f64>(5)?;
+            let canonical_type: String = row.get(3)?;
+            let summary_kind = crate::summary_kind_for_canonical_str(&canonical_type);
             Ok(RankedSearchResult {
                 event_id: row.get(0)?,
                 result: SearchResult {
                     tool: Tool::from_str(&tool_text).map_err(|_| rusqlite::Error::InvalidQuery)?,
                     session_id: row.get(2)?,
-                    canonical_type: row.get(3)?,
+                    canonical_type,
+                    summary_kind,
                     timestamp: row.get(4)?,
                     score: 1.0 / (1.0 + distance),
                     snippet: match_centered_snippet(

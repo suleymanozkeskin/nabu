@@ -1,7 +1,7 @@
 //! Serializable DTOs, option inputs, and report structs returned across the
 //! public API (search, session, purge, backfill, doctor, embedding model).
 
-use crate::{Error, EventEnvelope, Result, Tool, DEFAULT_SEARCH_SNIPPET_CHARS};
+use crate::{Error, EventEnvelope, Result, SummaryKind, Tool, DEFAULT_SEARCH_SNIPPET_CHARS};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -347,6 +347,11 @@ pub struct SearchResult {
     pub tool: Tool,
     pub session_id: String,
     pub canonical_type: String,
+    /// Set when `canonical_type` is a one-line phase handover (session start/end
+    /// or post-compaction recap); `None` for ordinary events. Derived from the
+    /// canonical type only — see [`SummaryKind`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summary_kind: Option<SummaryKind>,
     pub timestamp: String,
     pub score: f64,
     pub snippet: String,
@@ -420,6 +425,11 @@ pub struct StoredEvent {
     pub tool: Tool,
     pub session_id: String,
     pub canonical_type: String,
+    /// Set when `canonical_type` is a one-line phase handover (session start/end
+    /// or post-compaction recap); `None` for ordinary events. Derived from the
+    /// canonical type only — see [`SummaryKind`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summary_kind: Option<SummaryKind>,
     pub timestamp: String,
     pub text: String,
     pub raw_file: String,
