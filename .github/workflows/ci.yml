@@ -73,3 +73,27 @@ jobs:
           command: check
           arguments: --all-features
           command-arguments: all
+
+  public-api:
+    name: nabu-core public API
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-public-api
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-public-api
+
+      # nabu-core/src/lib.rs is a facade; a dropped or renamed `pub use` can pass
+      # the workspace build because no downstream file references every symbol.
+      # This diffs the full public surface against the committed snapshot.
+      - name: Check public API snapshot
+        run: ./scripts/check-public-api.sh
