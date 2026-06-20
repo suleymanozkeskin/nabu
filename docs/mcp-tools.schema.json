@@ -5,7 +5,7 @@
       "type": "object",
       "properties": {
         "query": { "type": "string", "minLength": 1 },
-        "tool": { "type": "string", "enum": ["codex", "claude", "opencode"] },
+        "tool": { "type": "string", "enum": ["codex", "claude", "opencode", "all"], "description": "Restrict to one tool, or \"all\" for a single cross-tool search over codex, claude, and opencode. Omitting tool is equivalent to \"all\". Each hit still carries its own tool plus raw_file/raw_line/raw_offset/session_id coordinates." },
         "session_id": { "type": "string" },
         "cwd": { "type": "string" },
         "since": { "type": "string" },
@@ -28,7 +28,7 @@
     "list_sessions": {
       "type": "object",
       "properties": {
-        "tool": { "type": "string", "enum": ["codex", "claude", "opencode"] },
+        "tool": { "type": "string", "enum": ["codex", "claude", "opencode", "all"], "description": "Restrict to one tool, or \"all\" to list sessions across codex, claude, and opencode in one call. Omitting tool is equivalent to \"all\"; each session still carries its own tool." },
         "cwd": { "type": "string" },
         "since": { "type": "string" },
         "limit": { "type": "integer", "minimum": 1, "maximum": 100, "default": 20 }
@@ -89,7 +89,7 @@
       "type": "object",
       "properties": {
         "query": { "type": "string", "minLength": 1 },
-        "tool": { "type": "string", "enum": ["codex", "claude", "opencode"] },
+        "tool": { "type": "string", "enum": ["codex", "claude", "opencode", "all"], "description": "Restrict to one tool, or \"all\" to gather cited context across codex, claude, and opencode in one call. Omitting tool is equivalent to \"all\"; each hit still carries its own tool and coordinates." },
         "session_id": { "type": "string" },
         "cwd": { "type": "string" },
         "since": { "type": "string" },
