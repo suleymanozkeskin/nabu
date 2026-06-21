@@ -73,7 +73,7 @@
                 src="../design-system/assets/logo/nabu-logo-transparent.svg"
                 alt="nabu"
             />
-            <h1>The god of wisdom, on your command line.</h1>
+            <h1>The god of wisdom, helping your agents.</h1>
             <p class="lede">
                 nabu is a local and comprehensive solution to the AI-agent
                 memory problem, unifying memory across different tools.
@@ -147,6 +147,28 @@
             </article>
         </section>
 
+        <!-- wire into your agent -->
+        <section class="wire">
+            <h2 class="wire-title">Teach your agent to remember</h2>
+            <p class="wire-lede">
+                Add two lines to your <code>CLAUDE.md</code> or
+                <code>AGENTS.md</code> so the agent reaches for nabu when a
+                thread picks up where a past session left off.
+            </p>
+            <div class="snippet">
+                <pre id="agent-rule"><code># Cross-session memory (nabu)
+If the user indicates a topic was already discussed or solved in a previous session, call the nabu MCP and build your context as you need.</code></pre>
+                <button
+                    class="btn btn-secondary"
+                    id="copy-rule"
+                    type="button"
+                    aria-label="copy the agent rule"
+                >
+                    copy
+                </button>
+            </div>
+        </section>
+
         <!-- footer -->
         <footer class="footer">
             <span class="footer-glyph" aria-hidden="true">𒀭𒀝</span>
@@ -161,22 +183,27 @@
         </footer>
 
         <script>
-            const btn = document.getElementById("copy");
-            btn.addEventListener("click", async () => {
-                try {
-                    await navigator.clipboard.writeText(
-                        "cargo install nabu-cli",
-                    );
-                    btn.textContent = "copied";
-                    btn.classList.add("is-copied");
-                    setTimeout(() => {
-                        btn.textContent = "copy";
-                        btn.classList.remove("is-copied");
-                    }, 1400);
-                } catch {
-                    /* clipboard unavailable */
-                }
-            });
+            function wireCopy(buttonId, getText) {
+                const btn = document.getElementById(buttonId);
+                btn.addEventListener("click", async () => {
+                    try {
+                        await navigator.clipboard.writeText(getText());
+                        btn.textContent = "copied";
+                        btn.classList.add("is-copied");
+                        setTimeout(() => {
+                            btn.textContent = "copy";
+                            btn.classList.remove("is-copied");
+                        }, 1400);
+                    } catch {
+                        /* clipboard unavailable */
+                    }
+                });
+            }
+            wireCopy("copy", () => "cargo install nabu-cli");
+            wireCopy(
+                "copy-rule",
+                () => document.getElementById("agent-rule").innerText,
+            );
         </script>
     </body>
 </html>
