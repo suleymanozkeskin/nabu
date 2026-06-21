@@ -34,26 +34,23 @@ jobs:
       - name: Stage static site
         run: |
           set -euo pipefail
-          # The landing's asset paths are relative to site/landing/ and reach
-          # ../design-system and ../../demo, so the published root must contain
-          # both site/ and demo/. Stage exactly what the page references.
-          mkdir -p _site/site _site/demo
-          cp -R site/landing _site/site/landing
-          cp -R site/design-system _site/site/design-system
+          # Host the landing at the publish root so https://<user>.github.io/nabu/
+          # serves it directly — no redirect, no /site/landing/ URL. The landing
+          # is authored under site/landing/ with paths relative to that dir
+          # (../design-system, ../../demo); rewrite those to the flattened root
+          # layout below. landing.css references no assets, so it is copied as-is.
+          mkdir -p _site/demo
+          cp site/landing/landing.css _site/landing.css
+          cp -R site/design-system _site/design-system
           cp demo/demo-full.gif _site/demo/demo-full.gif
-          # Root redirect so https://<user>.github.io/nabu/ lands on the page.
-          # Relative paths keep working under the /nabu/ project base path.
-          # Inline dark background (--lapis-900) and matching link color so the
-          # brief redirect frame doesn't flash white before bouncing.
-          cat > _site/index.html <<'HTML'
-          <!doctype html>
-          <meta charset="utf-8">
-          <title>nabu, the memory MCP for your coding agents</title>
-          <meta http-equiv="refresh" content="0; url=./site/landing/">
-          <link rel="canonical" href="./site/landing/">
-          <style>html{background:#0e1322;color:#d2c4a6;font-family:system-ui,sans-serif}a{color:#d2c4a6}</style>
-          <a href="./site/landing/">nabu, the memory MCP for your coding agents</a>
-          HTML
+          sed -E \
+            -e 's#\.\./\.\./demo/#demo/#g' \
+            -e 's#\.\./design-system/#design-system/#g' \
+            site/landing/index.html > _site/index.html
+          # Fail loudly if any unrewritten ../ path remains.
+          if grep -nE '\.\./' _site/index.html; then
+            echo "::error::unrewritten relative path in staged index.html"; exit 1
+          fi
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
