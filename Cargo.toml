@@ -20,7 +20,7 @@ categories = ["command-line-utilities", "development-tools"]
 
 [workspace.dependencies]
 clap = { version = "4", features = ["derive"] }
-console = "0.15"
+console = "0.16"
 dialoguer = { version = "0.11", default-features = false }
 fs2 = "0.4"
 # Keep the semantic stack pinned as a tested set while fastembed depends on the
