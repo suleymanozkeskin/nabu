@@ -28,9 +28,9 @@ path = "src/main.rs"
 clap.workspace = true
 console.workspace = true
 dialoguer.workspace = true
-nabu-adapters = { path = "../nabu-adapters", version = "0.1.0" }
-nabu-core = { path = "../nabu-core", version = "0.1.0" }
-nabu-mcp = { path = "../nabu-mcp", version = "0.1.0" }
+nabu-adapters = { path = "../nabu-adapters", version = "0.1.1" }
+nabu-core = { path = "../nabu-core", version = "0.1.1" }
+nabu-mcp = { path = "../nabu-mcp", version = "0.1.1" }
 hex.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
