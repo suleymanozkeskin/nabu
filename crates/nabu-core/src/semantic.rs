@@ -752,6 +752,20 @@ fn vector_search_results_for_k(
         );
         params.push(SqlValue::Text(format!("%{command}%")));
     }
+    if let Some(ref_filter) = options.ref_filter.as_deref() {
+        let ref_match = crate::normalize_ref_filter(ref_filter);
+        sql.push_str(
+            " AND EXISTS (
+                SELECT 1
+                FROM event_refs er
+                WHERE er.event_id = e.id
+                  AND er.ref_kind = ?
+                  AND er.ref_value LIKE ? ESCAPE '\\'
+              )",
+        );
+        params.push(SqlValue::Text(ref_match.kind.to_string()));
+        params.push(SqlValue::Text(ref_match.value_pattern));
+    }
     sql.push_str(" ORDER BY ve.distance LIMIT ?");
     params.push(SqlValue::Integer(row_limit as i64));
 
@@ -859,6 +873,7 @@ fn vector_search_filter_count(options: &SearchOptions) -> usize {
         options.canonical_type.is_some(),
         options.file.is_some(),
         options.command.is_some(),
+        options.ref_filter.is_some(),
     ]
     .into_iter()
     .filter(|present| *present)
