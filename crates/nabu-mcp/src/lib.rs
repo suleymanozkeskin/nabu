@@ -726,6 +726,9 @@ fn tool_recall_answer(home: &Path, arguments: &Value) -> Result<Value, ToolError
             "also_at": hit.also_at,
             "context": context
         });
+        if let Some(summary_kind) = &hit.summary_kind {
+            hit_value["summary_kind"] = serde_json::to_value(summary_kind)?;
+        }
         if let Some(corroboration) = &hit.corroboration {
             hit_value["corroboration"] = serde_json::to_value(corroboration)?;
         }

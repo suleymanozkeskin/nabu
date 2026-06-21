@@ -4292,6 +4292,162 @@ fn assert_reconciles_opencode(home: &Path, temp_root: &Path) {
         .any(|event| event.source_event_id.as_deref() == Some("opencode-reconcile-gap")));
 }
 
+#[test]
+fn summary_kind_classifies_phase_handover_types_only() {
+    // The summary-bearing canonical types that actually exist.
+    assert_eq!(
+        CanonicalType::SessionStarted.summary_kind(),
+        Some(SummaryKind::SessionStart)
+    );
+    assert_eq!(
+        CanonicalType::SessionEnded.summary_kind(),
+        Some(SummaryKind::SessionEnd)
+    );
+    assert_eq!(
+        CanonicalType::CompactionAfter.summary_kind(),
+        Some(SummaryKind::Compaction)
+    );
+
+    // Ordinary events and non-summary lifecycle events are not flagged.
+    for canonical_type in [
+        CanonicalType::SessionResumed,
+        CanonicalType::UserMessage,
+        CanonicalType::AssistantDelta,
+        CanonicalType::AssistantMessage,
+        CanonicalType::ToolCall,
+        CanonicalType::ToolResult,
+        CanonicalType::PermissionRequested,
+        CanonicalType::PermissionReplied,
+        CanonicalType::FileChanged,
+        CanonicalType::CompactionBefore,
+        CanonicalType::SourceDiscontinuity,
+        CanonicalType::Error,
+    ] {
+        assert_eq!(
+            canonical_type.summary_kind(),
+            None,
+            "{canonical_type:?} must not be a summary"
+        );
+    }
+
+    // String resolution matches the typed classifier; unknown types are None.
+    assert_eq!(
+        summary_kind_for_canonical_str("session.started"),
+        Some(SummaryKind::SessionStart)
+    );
+    assert_eq!(summary_kind_for_canonical_str("user.message"), None);
+    assert_eq!(summary_kind_for_canonical_str("not.a.real.type"), None);
+}
+
+#[test]
+fn search_flags_summary_events_and_not_ordinary_events() {
+    let temp = tempdir().unwrap();
+    let home = temp.path().join("home");
+    init_home(&home).unwrap();
+
+    // A session-start handover (summary-bearing canonical type).
+    ingest_hook_event(
+        &home,
+        Tool::Claude,
+        json!({
+            "session_id": "summary-surface-session",
+            "hook_event_name": "SessionStart",
+            "cwd": "/tmp/nabu-fixture",
+            "project_root": "/tmp/nabu-fixture",
+            "matter": "phase handover surfacing marker"
+        }),
+    )
+    .unwrap();
+    // An ordinary user message sharing the search term.
+    ingest_hook_event(
+        &home,
+        Tool::Claude,
+        json!({
+            "session_id": "summary-surface-session",
+            "hook_event_name": "UserPromptSubmit",
+            "message_id": "summary-surface-user-1",
+            "cwd": "/tmp/nabu-fixture",
+            "project_root": "/tmp/nabu-fixture",
+            "prompt": "phase handover surfacing marker followup"
+        }),
+    )
+    .unwrap();
+    index_once(&home).unwrap();
+
+    let results = search_history(&home, "phase handover surfacing marker", 10).unwrap();
+    assert!(results.len() >= 2, "expected both events, got {results:?}");
+
+    let summary_hit = results
+        .iter()
+        .find(|result| result.canonical_type == "session.started")
+        .expect("session.started hit present");
+    assert_eq!(summary_hit.summary_kind, Some(SummaryKind::SessionStart));
+    // Invariant #13: coordinates always present on every hit.
+    assert!(!summary_hit.raw_file.is_empty());
+    assert!(summary_hit.raw_offset.is_some());
+    assert_eq!(summary_hit.session_id, "summary-surface-session");
+
+    let ordinary_hit = results
+        .iter()
+        .find(|result| result.canonical_type == "user.message")
+        .expect("user.message hit present");
+    assert_eq!(ordinary_hit.summary_kind, None);
+}
+
+#[test]
+fn session_page_flags_summary_events() {
+    let temp = tempdir().unwrap();
+    let home = temp.path().join("home");
+    init_home(&home).unwrap();
+
+    ingest_hook_event(
+        &home,
+        Tool::Claude,
+        json!({
+            "session_id": "summary-page-session",
+            "hook_event_name": "SessionStart",
+            "cwd": "/tmp/nabu-fixture",
+            "matter": "session page summary marker"
+        }),
+    )
+    .unwrap();
+    ingest_hook_event(
+        &home,
+        Tool::Claude,
+        json!({
+            "session_id": "summary-page-session",
+            "hook_event_name": "UserPromptSubmit",
+            "message_id": "summary-page-user-1",
+            "cwd": "/tmp/nabu-fixture",
+            "prompt": "session page ordinary marker"
+        }),
+    )
+    .unwrap();
+    index_once(&home).unwrap();
+
+    let page = get_session_page(
+        &home,
+        Tool::Claude,
+        "summary-page-session",
+        SessionOptions::default(),
+    )
+    .unwrap();
+
+    let started = page
+        .events
+        .iter()
+        .find(|event| event.canonical_type == "session.started")
+        .expect("session.started event present");
+    assert_eq!(started.summary_kind, Some(SummaryKind::SessionStart));
+
+    let user = page
+        .events
+        .iter()
+        .find(|event| event.canonical_type == "user.message")
+        .expect("user.message event present");
+    assert_eq!(user.summary_kind, None);
+}
+
 fn valid_envelope_json() -> Value {
     json!({
         "schema_version": 1,

@@ -72,7 +72,10 @@ mod error;
 pub use error::{Error, Result};
 
 mod event;
-pub use event::{CanonicalType, DedupeParts, EventEnvelope, Source, Tool};
+pub use event::{
+    summary_kind_for_canonical_str, CanonicalType, DedupeParts, EventEnvelope, Source, SummaryKind,
+    Tool,
+};
 
 mod identity;
 pub use identity::{dedupe_key, sanitize_session_id};

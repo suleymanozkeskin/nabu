@@ -226,12 +226,15 @@ fn lexical_search_ranked_results(
         .query_map(params_from_iter(params), |row| {
             let tool_text: String = row.get(1)?;
             let searchable_text = row.get::<_, String>(7).unwrap_or_default();
+            let canonical_type: String = row.get(3)?;
+            let summary_kind = crate::summary_kind_for_canonical_str(&canonical_type);
             Ok(RankedSearchResult {
                 event_id: row.get(0)?,
                 result: SearchResult {
                     tool: Tool::from_str(&tool_text).map_err(|_| rusqlite::Error::InvalidQuery)?,
                     session_id: row.get(2)?,
-                    canonical_type: row.get(3)?,
+                    canonical_type,
+                    summary_kind,
                     timestamp: row.get(4)?,
                     score: row.get(5)?,
                     snippet: match_centered_snippet(

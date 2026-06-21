@@ -13,7 +13,7 @@ use crate::{DoctorTool, OutputFormat};
 use nabu_adapters::{claude_status, codex_status, opencode_status, ConfigChangeReport};
 use nabu_core::{
     doctor_with_options, latest_event, Corroboration, Error, PurgeAction, PurgeAllReport,
-    PurgeTier, SearchPage, SessionPage, Tool,
+    PurgeTier, SearchPage, SessionPage, SummaryKind, Tool,
 };
 use serde_json::{json, Value};
 use std::path::Path;
@@ -358,6 +358,20 @@ impl std::fmt::Display for OptionalField<'_> {
     }
 }
 
+/// Renders a leading `[summary:<kind>]` marker for one-line phase-handover
+/// events (session start/end, post-compaction recap) and nothing otherwise, so
+/// these high-value hits stand out in search and session output.
+pub(crate) struct SummaryMarker(pub(crate) Option<SummaryKind>);
+
+impl std::fmt::Display for SummaryMarker {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.0 {
+            Some(kind) => write!(formatter, "[summary:{}] ", kind.as_str()),
+            None => Ok(()),
+        }
+    }
+}
+
 pub(crate) fn print_corroboration_human(corroboration: Option<&Corroboration>) {
     let Some(corroboration) = corroboration else {
         return;
@@ -439,7 +453,8 @@ pub(crate) fn print_search_page(page: SearchPage, format: OutputFormat) -> nabu_
             );
             for result in page.results {
                 println!(
-                    "- `{}` `{}` `{}` score={:.3} `{}` {}:{}{}\n  {}",
+                    "- {}`{}` `{}` `{}` score={:.3} `{}` {}:{}{}\n  {}",
+                    SummaryMarker(result.summary_kind),
                     result.tool,
                     result.session_id,
                     result.canonical_type,
@@ -467,7 +482,8 @@ pub(crate) fn print_search_page(page: SearchPage, format: OutputFormat) -> nabu_
             );
             for result in page.results {
                 println!(
-                    "{} {} {}:{} score={:.3}{} {}",
+                    "{}{} {} {}:{} score={:.3}{} {}",
+                    SummaryMarker(result.summary_kind),
                     result.tool,
                     result.session_id,
                     result.raw_file,
@@ -498,8 +514,12 @@ pub(crate) fn print_session_page(page: SessionPage, format: OutputFormat) -> nab
             );
             for event in page.events {
                 println!(
-                    "## {} {}:{}\n\n{}\n",
-                    event.canonical_type, event.raw_file, event.raw_line, event.text
+                    "## {}{} {}:{}\n\n{}\n",
+                    SummaryMarker(event.summary_kind),
+                    event.canonical_type,
+                    event.raw_file,
+                    event.raw_line,
+                    event.text
                 );
                 print_corroboration_markdown(event.corroboration.as_ref());
             }
@@ -513,8 +533,12 @@ pub(crate) fn print_session_page(page: SessionPage, format: OutputFormat) -> nab
             );
             for event in page.events {
                 println!(
-                    "{} {}:{} {}",
-                    event.canonical_type, event.raw_file, event.raw_line, event.text
+                    "{}{} {}:{} {}",
+                    SummaryMarker(event.summary_kind),
+                    event.canonical_type,
+                    event.raw_file,
+                    event.raw_line,
+                    event.text
                 );
                 print_corroboration_human(event.corroboration.as_ref());
             }

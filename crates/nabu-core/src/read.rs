@@ -39,10 +39,13 @@ pub fn session_events(home: &Path, tool: Tool, session_id: &str) -> Result<Vec<S
     let rows = statement
         .query_map((tool.as_str(), session_id), |row| {
             let tool_text: String = row.get(0)?;
+            let canonical_type: String = row.get(2)?;
+            let summary_kind = crate::summary_kind_for_canonical_str(&canonical_type);
             Ok(StoredEvent {
                 tool: Tool::from_str(&tool_text).map_err(|_| rusqlite::Error::InvalidQuery)?,
                 session_id: row.get(1)?,
-                canonical_type: row.get(2)?,
+                canonical_type,
+                summary_kind,
                 timestamp: row.get(3)?,
                 text: row.get(4)?,
                 raw_file: row.get(5)?,
@@ -211,10 +214,13 @@ pub fn get_session_page(
     let rows = statement
         .query_map(params_from_iter(params), |row| {
             let tool_text: String = row.get(0)?;
+            let canonical_type: String = row.get(2)?;
+            let summary_kind = crate::summary_kind_for_canonical_str(&canonical_type);
             Ok(StoredEvent {
                 tool: Tool::from_str(&tool_text).map_err(|_| rusqlite::Error::InvalidQuery)?,
                 session_id: row.get(1)?,
-                canonical_type: row.get(2)?,
+                canonical_type,
+                summary_kind,
                 timestamp: row.get(3)?,
                 text: row.get(4)?,
                 raw_file: row.get(5)?,
@@ -405,6 +411,11 @@ pub fn latest_event(home: &Path, tool: Tool) -> Result<Option<StoredEvent>> {
         path: db_path.clone(),
         source,
     })?;
+    let canonical_type: String = row.get(2).map_err(|source| Error::Sqlite {
+        path: db_path.clone(),
+        source,
+    })?;
+    let summary_kind = crate::summary_kind_for_canonical_str(&canonical_type);
     Ok(Some(StoredEvent {
         tool: Tool::from_str(&tool_text)
             .map_err(|_| Error::Validation("invalid tool".to_string()))?,
@@ -412,10 +423,8 @@ pub fn latest_event(home: &Path, tool: Tool) -> Result<Option<StoredEvent>> {
             path: db_path.clone(),
             source,
         })?,
-        canonical_type: row.get(2).map_err(|source| Error::Sqlite {
-            path: db_path.clone(),
-            source,
-        })?,
+        canonical_type,
+        summary_kind,
         timestamp: row.get(3).map_err(|source| Error::Sqlite {
             path: db_path.clone(),
             source,
