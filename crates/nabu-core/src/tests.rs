@@ -3435,6 +3435,106 @@ fn search_dedupes_twins_only_at_retrieval_layer() {
 }
 
 #[test]
+fn search_dedupes_adjacent_whitespace_divergent_twins() {
+    // Two adjacent native captures of the same assistant answer that differ
+    // only by internal whitespace (one has the body split across a newline,
+    // the other collapses it to a single space). Before normalization the
+    // retrieval_key was sha256 over the raw rendered text, so the embedded
+    // whitespace produced two distinct hashes and the twin survived dedupe.
+    let temp = tempdir().unwrap();
+    let home = temp.path().join("home");
+    let source = temp.path().join("codex-sessions");
+    init_home(&home).unwrap();
+    fs::create_dir_all(&source).unwrap();
+
+    let session_id = "019b0000-0000-7000-8000-000000000077";
+    fs::write(
+        source.join(format!("rollout-2026-06-18T00-00-00-{session_id}.jsonl")),
+        format!(
+            "{{\"timestamp\":\"2026-06-18T00:00:00Z\",\"type\":\"session_meta\",\"payload\":{{\"id\":\"{session_id}\",\"cwd\":\"/tmp/native-codex\"}}}}\n\
+             {{\"timestamp\":\"2026-06-18T00:00:01Z\",\"type\":\"response_item\",\"payload\":{{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{{\"type\":\"output_text\",\"text\":\"whitespace twin answer\\nmarker line\"}}]}}}}\n\
+             {{\"timestamp\":\"2026-06-18T00:00:01Z\",\"type\":\"event_msg\",\"payload\":{{\"type\":\"agent_message\",\"message\":\"whitespace twin answer   marker line\"}}}}\n"
+        ),
+    )
+    .unwrap();
+    backfill_since(&home, Some(Tool::Codex), &source, None).unwrap();
+    index_once(&home).unwrap();
+
+    let deduped = search_history_page(
+        &home,
+        "whitespace twin answer marker",
+        SearchOptions::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        deduped.results.len(),
+        1,
+        "whitespace-divergent twin must collapse to one hit"
+    );
+    assert_eq!(
+        deduped.results[0].also_at.len(),
+        1,
+        "the collapsed twin's raw_line must be recorded in also_at"
+    );
+    let primary_line = deduped.results[0].raw_line;
+    let collapsed_line = deduped.results[0].also_at[0];
+    assert_ne!(
+        primary_line, collapsed_line,
+        "also_at records the other event's raw_line, not the primary's"
+    );
+
+    let not_deduped = search_history_page(
+        &home,
+        "whitespace twin answer marker",
+        SearchOptions {
+            dedupe: false,
+            ..SearchOptions::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        not_deduped.results.len(),
+        2,
+        "without dedupe both adjacent twins remain visible"
+    );
+}
+
+#[test]
+fn search_dedupe_keeps_distinct_events_separate() {
+    // Guard against over-collapsing: two genuinely different assistant answers
+    // in the same session must NOT be merged by the normalized retrieval_key.
+    let temp = tempdir().unwrap();
+    let home = temp.path().join("home");
+    let source = temp.path().join("codex-sessions");
+    init_home(&home).unwrap();
+    fs::create_dir_all(&source).unwrap();
+
+    let session_id = "019b0000-0000-7000-8000-000000000088";
+    fs::write(
+        source.join(format!("rollout-2026-06-18T00-00-00-{session_id}.jsonl")),
+        format!(
+            "{{\"timestamp\":\"2026-06-18T00:00:00Z\",\"type\":\"session_meta\",\"payload\":{{\"id\":\"{session_id}\",\"cwd\":\"/tmp/native-codex\"}}}}\n\
+             {{\"timestamp\":\"2026-06-18T00:00:01Z\",\"type\":\"response_item\",\"payload\":{{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{{\"type\":\"output_text\",\"text\":\"distinct marker alpha answer\"}}]}}}}\n\
+             {{\"timestamp\":\"2026-06-18T00:00:02Z\",\"type\":\"response_item\",\"payload\":{{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{{\"type\":\"output_text\",\"text\":\"distinct marker beta answer\"}}]}}}}\n"
+        ),
+    )
+    .unwrap();
+    backfill_since(&home, Some(Tool::Codex), &source, None).unwrap();
+    index_once(&home).unwrap();
+
+    let deduped =
+        search_history_page(&home, "distinct marker answer", SearchOptions::default()).unwrap();
+    assert_eq!(
+        deduped.results.len(),
+        2,
+        "distinct answers must not collapse under normalized dedupe"
+    );
+    for result in &deduped.results {
+        assert!(result.also_at.is_empty());
+    }
+}
+
+#[test]
 fn doctor_fast_and_deep_report_their_integrity_scope() {
     let temp = tempdir().unwrap();
     let home = temp.path().join("home");

@@ -781,7 +781,7 @@ fn vector_search_results_for_k(
                     payload: Value::Null,
                     also_at: Vec::new(),
                     corroboration: None,
-                    retrieval_key: sha256_hex(searchable_text.as_bytes()),
+                    retrieval_key: retrieval_key_for_text(&searchable_text),
                     corroboration_text: searchable_text,
                     cwd: row.get(11)?,
                     project_root: row.get(12)?,

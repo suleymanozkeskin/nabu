@@ -247,7 +247,7 @@ fn lexical_search_ranked_results(
                     payload: Value::Null,
                     also_at: Vec::new(),
                     corroboration: None,
-                    retrieval_key: sha256_hex(searchable_text.as_bytes()),
+                    retrieval_key: retrieval_key_for_text(&searchable_text),
                     corroboration_text: searchable_text,
                     cwd: row.get(12)?,
                     project_root: row.get(13)?,
@@ -479,6 +479,24 @@ fn dedupe_ranked_search_results(
         }
     }
     Ok(deduped)
+}
+
+// Retrieval-layer dedupe identity for a hit's text. Hashing the rendered
+// `searchable_text` verbatim made the key sensitive to whitespace that carries
+// no semantic content: two captures of the same answer that differ only by an
+// embedded newline vs. a space (e.g. a native `output_text` block vs. its
+// `agent_message` twin) hashed to different keys and survived dedupe as adjacent
+// duplicates. Normalizing collapses any run of Unicode whitespace to a single
+// space and trims the ends, so whitespace-only divergence yields one key while
+// genuinely distinct text stays distinct. The normalization is applied to the
+// dedupe key only; `searchable_text`, snippets, and `corroboration_text` keep
+// their original bytes.
+pub(crate) fn retrieval_key_for_text(searchable_text: &str) -> String {
+    let normalized = searchable_text
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    sha256_hex(normalized.as_bytes())
 }
 
 fn retrieval_twin_key(result: &SearchResult) -> (String, String, String) {

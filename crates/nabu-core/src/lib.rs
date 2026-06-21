@@ -139,7 +139,8 @@ pub(crate) use search::corroborate_text;
 pub(crate) use search::search_history_filtered;
 #[cfg(feature = "semantic")]
 pub(crate) use search::{
-    match_centered_snippet, resolve_session_filter_ids, unique_ranked_results_by_event,
+    match_centered_snippet, resolve_session_filter_ids, retrieval_key_for_text,
+    unique_ranked_results_by_event,
 };
 pub use search::{search_history, search_history_page};
 
