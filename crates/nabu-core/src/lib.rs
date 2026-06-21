@@ -35,11 +35,20 @@ pub(crate) use db::{
     ensure_semantic_vector_schema, initialize_database, open_index, table_count, table_exists,
 };
 const MAX_SEARCH_LIMIT: usize = 50;
-const MAX_SEARCH_SNIPPET_CHARS: usize = 1000;
-pub(crate) const DEFAULT_SEARCH_SNIPPET_CHARS: usize = 240;
+/// Hard upper bound on per-result snippet length. Callers may request up to this
+/// many characters; requests above it are clamped.
+pub const MAX_SEARCH_SNIPPET_CHARS: usize = 1000;
+/// Default per-result snippet length applied when a caller omits
+/// `max_snippet_chars`. Sized for triage: ~500 chars (a few sentences of
+/// match-centered context) is enough to tell a real bug from discussion of one
+/// without a `get_session` round-trip, while staying far inside the MCP
+/// response-size budget even at the maximum result count.
+pub const DEFAULT_SEARCH_SNIPPET_CHARS: usize = 500;
 const MAX_SESSION_LIMIT: usize = 500;
 const MAX_CONTEXT_EVENTS_PER_SIDE: usize = 500;
 const MAX_DIRECTORY_SIZE_DEPTH: usize = 64;
+mod concept_expansion;
+pub(crate) use concept_expansion::expand_query_terms;
 mod semantic;
 #[cfg(all(test, feature = "semantic"))]
 pub(crate) use semantic::{
@@ -65,7 +74,10 @@ mod error;
 pub use error::{Error, Result};
 
 mod event;
-pub use event::{CanonicalType, DedupeParts, EventEnvelope, Source, Tool};
+pub use event::{
+    summary_kind_for_canonical_str, CanonicalType, DedupeParts, EventEnvelope, Source, SummaryKind,
+    Tool,
+};
 
 mod identity;
 pub use identity::{dedupe_key, sanitize_session_id};
@@ -87,14 +99,15 @@ pub use semantic_api::{Embedder, EmbeddingUnit, EmbeddingUnitKind};
 mod options;
 pub(crate) use options::RankedSearchResult;
 pub use options::{
-    AppendReport, BackfillCoverageSession, BackfillDryRunReport, BackfillImportPreview,
-    BackfillProgress, BackfillReport, CorroboratedRef, Corroboration, CoverageSummary, DoctorCheck,
-    DoctorReport, DoctorStats, EmbeddingDownloadProgress, EmbeddingDownloadReport,
-    EmbeddingIndexProgress, EmbeddingModelDisclosure, EmbeddingModelStatus, EventOptions,
-    EventPointer, FileIngestReport, IndexOptions, IndexReport, InitReport, PurgeAction,
-    PurgeAllArtifact, PurgeAllOptions, PurgeAllReport, PurgeReport, PurgeTier, SearchContinuation,
-    SearchMode, SearchOptions, SearchPage, SearchResult, SessionOptions, SessionPage,
-    SessionSummary, StorageFootprint, StoredEvent,
+    native_jsonl_line_command, AppendReport, BackfillCoverageSession, BackfillDryRunReport,
+    BackfillImportPreview, BackfillProgress, BackfillReport, CorroboratedRef, Corroboration,
+    CoverageSummary, DoctorCheck, DoctorReport, DoctorStats, EmbeddingDownloadProgress,
+    EmbeddingDownloadReport, EmbeddingIndexProgress, EmbeddingModelDisclosure,
+    EmbeddingModelStatus, EventOptions, EventPointer, FileIngestReport, FileTouch, IndexOptions,
+    IndexReport, InitReport, PurgeAction, PurgeAllArtifact, PurgeAllOptions, PurgeAllReport,
+    PurgeReport, PurgeTier, SearchContinuation, SearchMode, SearchOptions, SearchPage,
+    SearchResult, SessionOptions, SessionPage, SessionSummary, StorageFootprint, StoredEvent,
+    ToolUsage, SESSION_PROMPT_SNIPPET_CHARS, SESSION_TOP_FILES, SESSION_TOP_TOOLS,
 };
 
 mod purge;
@@ -139,7 +152,8 @@ pub(crate) use search::corroborate_text;
 pub(crate) use search::search_history_filtered;
 #[cfg(feature = "semantic")]
 pub(crate) use search::{
-    match_centered_snippet, resolve_session_filter_ids, unique_ranked_results_by_event,
+    match_centered_snippet, normalize_ref_filter, resolve_session_filter_ids,
+    retrieval_key_for_text, unique_ranked_results_by_event,
 };
 pub use search::{search_history, search_history_page};
 
@@ -153,6 +167,9 @@ pub use export::{export_session_jsonl_with_options, export_session_markdown_with
 mod redact;
 pub use redact::{redact_export_json, redact_export_text};
 pub(crate) use redact::{redact_json_value, redact_text};
+
+mod provenance;
+pub(crate) use provenance::extract_refs;
 
 mod raw;
 pub(crate) use raw::{

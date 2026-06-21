@@ -11,7 +11,8 @@ use nabu_core::{
     doctor_with_options, export_session_jsonl_with_options, export_session_markdown_with_options,
     get_event_by_pointer_with_options, get_session_page, list_sessions, redact_export_json,
     redact_export_text, search_history_page, Error, EventOptions, SearchMode, SearchOptions,
-    SearchResult, SessionOptions, StoredEvent, Tool,
+    SearchResult, SessionOptions, StoredEvent, Tool, DEFAULT_SEARCH_SNIPPET_CHARS,
+    MAX_SEARCH_SNIPPET_CHARS,
 };
 use serde_json::{json, Value};
 use std::io::{BufRead, Write};
@@ -341,17 +342,17 @@ fn tool_descriptions() -> Value {
     json!([
         {
             "name": "search_history",
-            "description": "Search indexed local agent history citation-first: returns score, snippet, tool, session_id, raw_line, and payload=null by default. Drill into hits with get_session around_raw_line/before/after, get_event, or include_payload=true for full payloads. Page with offset; include_deltas restores deltas; dedupe=false restores adjacent twin rows. Set corroborate=true to add local read-only git existence checks for mentioned commits, branches, and files; PR refs are reported unresolved/needs_network and never fetched.",
+            "description": "Search indexed local agent history citation-first: returns score, snippet, tool, session_id, raw_line, and payload=null by default. Searches every tool (codex, claude, opencode) in one call by default; pass tool=\"all\" for the explicit cross-tool form or a specific tool name to narrow — do not fan out one query per tool. Each hit carries its own tool plus raw_file/raw_line/raw_offset/session_id. Drill into hits with get_session around_raw_line/before/after, get_event, or include_payload=true for full payloads. Page with offset; include_deltas restores deltas; dedupe=false restores adjacent twin rows. Set corroborate=true to add local read-only git existence checks for mentioned commits, branches, and files; PR refs are reported unresolved/needs_network and never fetched. Use this for controllable, interactive drill-down; if you instead want ranked hits plus their surrounding context assembled in one cited call, use recall_answer.",
             "inputSchema": tool_schema("search_history")
         },
         {
             "name": "list_sessions",
-            "description": "List recent captured sessions with counts and raw-file pointers.",
+            "description": "List recent captured sessions with triage metadata: first_user_prompt (what the session was about), last_canonical_type (what state it ended in), top_tools and top_files (what it did), plus event/message/tool/compaction counts, timestamps, and raw-file pointers. Lists across every tool by default; pass tool=\"all\" for the explicit cross-tool form or a specific tool name to narrow. Triage which session to open from this output alone, then drill in with get_session or export_session.",
             "inputSchema": tool_schema("list_sessions")
         },
         {
             "name": "get_session",
-            "description": "Read a faithful non-deduped page or context window from one session. Use around_raw_line with before/after to inspect context around a search hit; include_deltas=true restores assistant deltas. Set corroborate=true for local read-only git annotations; PR refs require network and remain unresolved.",
+            "description": "Read a faithful non-deduped page or context window from one session. Page forward from after_raw_line (default 0 reads from the start); when more events remain the response sets truncated=true and returns next_after_raw_line (mirrored in continuation.next_after_raw_line) — call again with after_raw_line=next_after_raw_line to resume with no gap or overlap, until truncated=false. The cursor always reflects the events actually returned, including when a large page is trimmed to the MCP size cap, so resuming never skips events. Use around_raw_line with before/after to inspect context around a search hit; a window clipped by the size cap sets window_truncated=true and still returns a forward next_after_raw_line. include_deltas=true restores assistant deltas. Set corroborate=true for local read-only git annotations; PR refs require network and remain unresolved.",
             "inputSchema": tool_schema("get_session")
         },
         {
@@ -371,7 +372,7 @@ fn tool_descriptions() -> Value {
         },
         {
             "name": "recall_answer",
-            "description": "Assemble cited context windows for a query in one read-only call. It does not write an answer, call an LLM, mutate history, or make network requests. Set corroborate=true to annotate hits/context with local read-only git existence checks; PR refs remain unresolved/needs_network.",
+            "description": "One-shot: assemble cited context windows for a question in a single read-only call. Runs the search_history ranking, then for each hit attaches the surrounding before/after events from that session. Every hit and every context event carries tool, session_id, raw_file, raw_line, and raw_offset so the caller can cite without a follow-up. It does not write an answer, call an LLM, mutate history, or make network requests. Set corroborate=true to annotate hits/context with local read-only git existence checks; PR refs remain unresolved/needs_network. Reach for this when you want ranked hits plus their context in one shot for a cited handoff. Prefer search_history then get_session when you need controllable, interactive drill-down: paging, picking exact raw lines, restoring deltas, or widening one window without re-ranking.",
             "inputSchema": tool_schema("recall_answer")
         }
     ])
@@ -458,7 +459,13 @@ fn tool_search_history(home: &Path, arguments: &Value) -> Result<Value, ToolErro
     }
     let limit = clamped_usize(arguments, "limit", 10, 1, 50)?;
     let offset = optional_usize_min(arguments, "offset", 0)?.unwrap_or(0);
-    let max_snippet_chars = clamped_usize(arguments, "max_snippet_chars", 240, 1, 1000)?;
+    let max_snippet_chars = clamped_usize(
+        arguments,
+        "max_snippet_chars",
+        DEFAULT_SEARCH_SNIPPET_CHARS,
+        1,
+        MAX_SEARCH_SNIPPET_CHARS,
+    )?;
     let options = SearchOptions {
         tool: optional_tool(arguments, "tool")?,
         session_id: optional_string(arguments, "session_id"),
@@ -467,6 +474,7 @@ fn tool_search_history(home: &Path, arguments: &Value) -> Result<Value, ToolErro
         canonical_type: optional_string(arguments, "canonical_type"),
         file: optional_string(arguments, "file"),
         command: optional_string(arguments, "command"),
+        ref_filter: optional_string(arguments, "ref"),
         limit,
         offset,
         include_payload: optional_bool(arguments, "include_payload", false),
@@ -475,6 +483,7 @@ fn tool_search_history(home: &Path, arguments: &Value) -> Result<Value, ToolErro
         max_snippet_chars,
         mode: optional_search_mode(arguments)?,
         corroborate: optional_bool(arguments, "corroborate", false),
+        expand_concepts: optional_bool(arguments, "expand_concepts", false),
     };
     let redact = optional_bool(arguments, "redact", false);
     let mut value = serde_json::to_value(search_history_page(home, query, options)?)?;
@@ -660,6 +669,7 @@ fn tool_recall_answer(home: &Path, arguments: &Value) -> Result<Value, ToolError
             canonical_type: optional_string(arguments, "canonical_type"),
             file: optional_string(arguments, "file"),
             command: optional_string(arguments, "command"),
+            ref_filter: optional_string(arguments, "ref"),
             limit,
             offset: 0,
             include_payload: false,
@@ -668,6 +678,7 @@ fn tool_recall_answer(home: &Path, arguments: &Value) -> Result<Value, ToolError
             max_snippet_chars: 240,
             mode: optional_search_mode(arguments)?,
             corroborate,
+            expand_concepts: optional_bool(arguments, "expand_concepts", false),
         },
     )?;
 
@@ -719,6 +730,9 @@ fn tool_recall_answer(home: &Path, arguments: &Value) -> Result<Value, ToolError
             "also_at": hit.also_at,
             "context": context
         });
+        if let Some(summary_kind) = &hit.summary_kind {
+            hit_value["summary_kind"] = serde_json::to_value(summary_kind)?;
+        }
         if let Some(corroboration) = &hit.corroboration {
             hit_value["corroboration"] = serde_json::to_value(corroboration)?;
         }
@@ -952,7 +966,7 @@ fn handle_prompt_get(params: &Value) -> Value {
             "Before continuing, call search_history with a concise project query. It is citation-first and payload-light by default; page with offset and drill into relevant hits using get_session around_raw_line/before/after or get_event. Cite tool, session_id, and raw_line."
         }
         "prepare_handoff_summary" => {
-            "Call list_sessions, then get_session with around_raw_line windows or export_session for full-fidelity handoff content. Produce a compact handoff summary with citations including tool, session_id, raw_line or raw_offset."
+            "For a question-driven handoff, call recall_answer once: it returns ranked hits with their surrounding context windows already cited (tool, session_id, raw_line, raw_offset), no follow-up needed. When you instead need to walk specific sessions, call list_sessions, then get_session with around_raw_line windows or export_session for full-fidelity content. Produce a compact handoff summary with citations including tool, session_id, raw_line or raw_offset."
         }
         _ => "Unknown prompt. Call prompts/list to discover available nabu prompts.",
     };
@@ -1002,7 +1016,7 @@ fn prompt_descriptions() -> Value {
         },
         {
             "name": "prepare_handoff_summary",
-            "description": "Retrieve relevant sessions and prepare a cited handoff.",
+            "description": "Assemble a cited handoff: recall_answer for one-shot question-driven context, or list_sessions/get_session to walk specific sessions.",
             "arguments": []
         }
     ])
@@ -1029,21 +1043,23 @@ fn tool_schema(name: &str) -> Value {
             "type": "object",
             "properties": {
                 "query": { "type": "string", "minLength": 1 },
-                "tool": { "type": "string", "enum": ["codex", "claude", "opencode"] },
+                "tool": { "type": "string", "enum": ["codex", "claude", "opencode", "all"], "description": "Restrict to one tool, or \"all\" for a single cross-tool search over codex, claude, and opencode. Omitting tool is equivalent to \"all\". Each hit still carries its own tool plus raw_file/raw_line/raw_offset/session_id coordinates." },
                 "session_id": { "type": "string" },
                 "cwd": { "type": "string" },
                 "since": { "type": "string" },
                 "canonical_type": { "type": "string" },
                 "file": { "type": "string" },
                 "command": { "type": "string" },
+                "ref": { "type": "string", "description": "Filter to events whose extracted provenance refs match, e.g. '#54' (a PR reference) or a commit SHA prefix." },
                 "mode": { "type": "string", "enum": ["auto", "lexical", "hybrid"], "default": "auto" },
                 "limit": { "type": "integer", "minimum": 1, "maximum": 50, "default": 10 },
                 "offset": { "type": "integer", "minimum": 0, "default": 0 },
                 "include_payload": { "type": "boolean", "default": false },
                 "include_deltas": { "type": "boolean", "default": false },
                 "dedupe": { "type": "boolean", "default": true },
-                "max_snippet_chars": { "type": "integer", "minimum": 1, "maximum": 1000, "default": 240 },
+                "max_snippet_chars": { "type": "integer", "minimum": 1, "maximum": 1000, "default": 500, "description": "Per-result match-centered snippet length in characters. Defaults to 500 — enough context to triage a candidate (real bug vs. discussion of one) without a get_session round-trip. Raise toward 1000 for denser context or lower to save tokens; oversized pages are still trimmed to fit the response budget with a continuation cursor." },
                 "corroborate": { "type": "boolean", "default": false, "description": "When true, annotate results with local read-only git checks for mentioned commits, branches, and files. PR refs are unresolved with reason=needs_network; no fetch or forge call is made." },
+                "expand_concepts": { "type": "boolean", "default": false, "description": "When true, OR-expand query terms with curated concept synonyms (e.g. bug~error/failure, perf~latency) to widen lexical recall. Literal-term hits keep their ranking; only the candidate set grows." },
                 "redact": { "type": "boolean", "default": false }
             },
             "required": ["query"],
@@ -1052,7 +1068,7 @@ fn tool_schema(name: &str) -> Value {
         "list_sessions" => json!({
             "type": "object",
             "properties": {
-                "tool": { "type": "string", "enum": ["codex", "claude", "opencode"] },
+                "tool": { "type": "string", "enum": ["codex", "claude", "opencode", "all"], "description": "Restrict to one tool, or \"all\" to list sessions across codex, claude, and opencode in one call. Omitting tool is equivalent to \"all\"; each session still carries its own tool." },
                 "cwd": { "type": "string" },
                 "since": { "type": "string" },
                 "limit": { "type": "integer", "minimum": 1, "maximum": 100, "default": 20 }
@@ -1065,8 +1081,8 @@ fn tool_schema(name: &str) -> Value {
                 "tool": { "type": "string", "enum": ["codex", "claude", "opencode"] },
                 "session_id": { "type": "string", "minLength": 1 },
                 "limit_events": { "type": "integer", "minimum": 1, "maximum": 500, "default": 100 },
-                "after_raw_line": { "type": "integer", "minimum": 0 },
-                "around_raw_line": { "type": "integer", "minimum": 1 },
+                "after_raw_line": { "type": "integer", "minimum": 0, "description": "Page forward: return events with raw_line greater than this. Pass the response's next_after_raw_line to fetch the next page with no gap or overlap; 0 (default) reads from the start." },
+                "around_raw_line": { "type": "integer", "minimum": 1, "description": "Context window: return before/after events around this raw_line (wins over after_raw_line). If the window is clipped by the MCP size cap the response sets window_truncated=true and returns a forward next_after_raw_line to keep reading." },
                 "before": { "type": "integer", "minimum": 0, "maximum": 500, "default": 5 },
                 "after": { "type": "integer", "minimum": 0, "maximum": 500, "default": 5 },
                 "canonical_type": { "type": "string" },
@@ -1113,18 +1129,20 @@ fn tool_schema(name: &str) -> Value {
             "type": "object",
             "properties": {
                 "query": { "type": "string", "minLength": 1 },
-                "tool": { "type": "string", "enum": ["codex", "claude", "opencode"] },
+                "tool": { "type": "string", "enum": ["codex", "claude", "opencode", "all"], "description": "Restrict to one tool, or \"all\" to gather cited context across codex, claude, and opencode in one call. Omitting tool is equivalent to \"all\"; each hit still carries its own tool and coordinates." },
                 "session_id": { "type": "string" },
                 "cwd": { "type": "string" },
                 "since": { "type": "string" },
                 "canonical_type": { "type": "string" },
                 "file": { "type": "string" },
                 "command": { "type": "string" },
+                "ref": { "type": "string", "description": "Filter to events whose extracted provenance refs match, e.g. '#54' (a PR reference) or a commit SHA prefix." },
                 "mode": { "type": "string", "enum": ["auto", "lexical", "hybrid"], "default": "auto" },
                 "limit": { "type": "integer", "minimum": 1, "maximum": 10, "default": 5 },
                 "before": { "type": "integer", "minimum": 0, "maximum": 20, "default": 5 },
                 "after": { "type": "integer", "minimum": 0, "maximum": 20, "default": 5 },
                 "corroborate": { "type": "boolean", "default": false, "description": "When true, annotate hits and context with local read-only git checks. PR refs are unresolved with reason=needs_network." },
+                "expand_concepts": { "type": "boolean", "default": false, "description": "When true, OR-expand query terms with curated concept synonyms (e.g. bug~error/failure) to widen lexical recall. Literal-term hits keep their ranking." },
                 "redact": { "type": "boolean", "default": false }
             },
             "required": ["query"],
@@ -1248,6 +1266,14 @@ fn fit_session_response(mut value: Value) -> Value {
         return value;
     }
 
+    // True when core paged around a specific line (`around_raw_line`) rather than
+    // forward from `after_raw_line`. Window responses carry no forward cursor from
+    // core; if the budget clips one, the caller must still be able to continue.
+    let window_mode = value
+        .get("around_raw_line")
+        .map(|line| !line.is_null())
+        .unwrap_or(false);
+
     let Some(events) = value.get("events").and_then(Value::as_array).cloned() else {
         return enforce_size_bound(value, false);
     };
@@ -1263,7 +1289,6 @@ fn fit_session_response(mut value: Value) -> Value {
         return enforce_size_bound(value, false);
     };
     let mut kept = Vec::new();
-    let mut last_raw_line = None;
     for event in events {
         let separator = usize::from(!kept.is_empty());
         let event = if value_fits_budget(&budget, &event, separator) {
@@ -1279,19 +1304,53 @@ fn fit_session_response(mut value: Value) -> Value {
         if !budget.try_reserve_value(&event, separator) {
             break;
         }
-        last_raw_line = event.get("raw_line").and_then(Value::as_i64);
         kept.push(event);
     }
 
-    let returned = kept.len();
-    if let Some(last_raw_line) = last_raw_line {
-        value["next_after_raw_line"] = json!(last_raw_line);
-        value["continuation"] = json!({ "next_after_raw_line": last_raw_line });
-    }
     value["events"] = Value::Array(kept);
-    value["returned"] = json!(returned);
+    value["returned"] = json!(value
+        .get("events")
+        .and_then(Value::as_array)
+        .map_or(0, Vec::len));
     trim_array_response_to_limit(&mut value, "events");
+    // Recompute the forward cursor from what actually survived trimming. Core's
+    // inherited `next_after_raw_line` describes the events it queried, not the
+    // smaller set that fit the MCP budget; resuming from it would silently skip
+    // events. Deriving it here keeps continuation gap-free and never stale.
+    apply_session_cursor(&mut value, window_mode);
     value
+}
+
+/// Set or clear the forward continuation cursor so it always points just past
+/// the last event in `value["events"]`. With no events left, the cursor is
+/// removed entirely rather than left pointing past data the caller never saw.
+/// In window mode an additional `window_truncated` flag records that the
+/// requested context window was clipped to fit the budget.
+fn apply_session_cursor(value: &mut Value, window_mode: bool) {
+    let last_raw_line = value
+        .get("events")
+        .and_then(Value::as_array)
+        .and_then(|events| events.last())
+        .and_then(|event| event.get("raw_line"))
+        .and_then(Value::as_i64);
+    match last_raw_line {
+        Some(last_raw_line) => {
+            value["next_after_raw_line"] = json!(last_raw_line);
+            value["continuation"] = json!({ "next_after_raw_line": last_raw_line });
+            if window_mode {
+                value["window_truncated"] = json!(true);
+            }
+        }
+        None => {
+            // Nothing fit. Drop any inherited cursor; a stale one would resume
+            // past unreturned events. The caller must shrink the request
+            // (smaller limit_events / narrower window) or use export_session.
+            if let Some(object) = value.as_object_mut() {
+                object.remove("next_after_raw_line");
+                object.remove("continuation");
+            }
+        }
+    }
 }
 
 fn fit_event_response(mut value: Value) -> Value {
@@ -1505,25 +1564,16 @@ fn trim_array_response_to_limit(value: &mut Value, array_field: &str) {
         .map(|serialized| serialized.len() > MAX_MCP_BYTES)
         .unwrap_or(false)
     {
-        let (returned, last_raw_line) = {
+        let returned = {
             let Some(items) = value.get_mut(array_field).and_then(Value::as_array_mut) else {
                 break;
             };
             if items.pop().is_none() {
                 break;
             }
-            let returned = items.len();
-            let last_raw_line = items
-                .last()
-                .and_then(|event| event.get("raw_line"))
-                .and_then(Value::as_i64);
-            (returned, last_raw_line)
+            items.len()
         };
         value["returned"] = json!(returned);
-        if let Some(last_raw_line) = last_raw_line {
-            value["next_after_raw_line"] = json!(last_raw_line);
-            value["continuation"] = json!({ "next_after_raw_line": last_raw_line });
-        }
     }
 }
 
@@ -1565,14 +1615,26 @@ fn required_tool(arguments: &Value, key: &str) -> Result<Tool, ToolError> {
     })
 }
 
+/// Parse an optional cross-tool `tool` filter for the search/list surfaces.
+///
+/// An absent key and the explicit value `"all"` both map to `None`, which the
+/// core search applies as "no tool filter" — one query spanning codex, claude,
+/// and opencode. `"all"` is the discoverable, self-documenting spelling of the
+/// default; it never changes the meaning of omitting the key. A concrete tool
+/// name resolves to `Some(tool)`. This helper is for the cross-tool surfaces
+/// only (`search_history`, `list_sessions`, `recall_answer`); the single-session
+/// surfaces use `required_tool`, which rejects `"all"`.
 fn optional_tool(arguments: &Value, key: &str) -> Result<Option<Tool>, ToolError> {
     let Some(value) = arguments.get(key).and_then(Value::as_str) else {
         return Ok(None);
     };
+    if value == "all" {
+        return Ok(None);
+    }
     Tool::from_str(value).map(Some).map_err(|_| {
         ToolError::new(
             "VALIDATION_ERROR",
-            format!("{key} must be codex, claude, or opencode"),
+            format!("{key} must be codex, claude, opencode, or all"),
             true,
         )
     })
@@ -1919,11 +1981,332 @@ mod tests {
         .unwrap();
 
         assert_eq!(response["jsonrpc"], "2.0");
-        assert!(response["result"]["structuredContent"]["results"]
+        let results = response["result"]["structuredContent"]["results"]
             .as_array()
-            .unwrap()
+            .unwrap();
+        let hit = results
             .iter()
-            .any(|result| result["session_id"] == "fixture-session"));
+            .find(|result| result["session_id"] == "fixture-session")
+            .expect("fixture hit present");
+
+        // Item 14: the native handoff command survives serialization and
+        // response fitting, and is line-addressed to the hit's raw_file/raw_line.
+        let raw_file = hit["raw_file"].as_str().unwrap();
+        let raw_line = hit["raw_line"].as_i64().unwrap();
+        assert_eq!(
+            hit["native_command"].as_str().unwrap(),
+            format!("sed -n '{raw_line}p' '{raw_file}' | jq .")
+        );
+    }
+
+    fn ingest_prompt(home: &Path, tool: Tool, session_id: &str, prompt: &str) {
+        ingest_hook_event(
+            home,
+            tool,
+            json!({
+                "session_id": session_id,
+                "hook_event_name": "UserPromptSubmit",
+                "message_id": format!("mcp-{session_id}"),
+                "cwd": "/tmp/nabu-fixture",
+                "project_root": "/tmp/nabu-fixture",
+                "prompt": prompt
+            }),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn search_history_tool_all_returns_hits_from_multiple_tools_in_one_call() {
+        let temp = tempdir().unwrap();
+        let home = temp.path().join("home");
+        init_home(&home).unwrap();
+        ingest_prompt(
+            &home,
+            Tool::Claude,
+            "claude-session",
+            "nabu crosstool marker from claude",
+        );
+        ingest_prompt(
+            &home,
+            Tool::Codex,
+            "codex-session",
+            "nabu crosstool marker from codex",
+        );
+        index_once(&home).unwrap();
+
+        let response = handle_message(
+            &home,
+            &json!({
+                "jsonrpc": "2.0",
+                "id": 7,
+                "method": "tools/call",
+                "params": {
+                    "name": "search_history",
+                    "arguments": {
+                        "query": "nabu crosstool marker",
+                        "tool": "all",
+                        "limit": 10
+                    }
+                }
+            })
+            .to_string(),
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_ne!(response["result"]["isError"], true);
+        let results = response["result"]["structuredContent"]["results"]
+            .as_array()
+            .unwrap();
+
+        // A single call spans more than one tool.
+        let tools: std::collections::BTreeSet<&str> = results
+            .iter()
+            .filter_map(|hit| hit["tool"].as_str())
+            .collect();
+        assert!(
+            tools.contains("claude") && tools.contains("codex"),
+            "tool=all must return hits from more than one tool in one call, got {tools:?}"
+        );
+
+        // Invariant #13: every hit carries its own per-hit tool + coordinates.
+        for hit in results {
+            assert!(hit["tool"].is_string(), "hit missing tool: {hit}");
+            assert!(hit["raw_file"].is_string(), "hit missing raw_file: {hit}");
+            assert!(hit["raw_line"].is_number(), "hit missing raw_line: {hit}");
+            // raw_offset is carried on every hit (Option<i64>; null only when the
+            // raw store lacks byte offsets). The key must always be present.
+            assert!(
+                hit.get("raw_offset").is_some(),
+                "hit missing raw_offset key: {hit}"
+            );
+            assert!(
+                hit["session_id"].is_string(),
+                "hit missing session_id: {hit}"
+            );
+        }
+    }
+
+    #[test]
+    fn search_history_tool_all_matches_omitting_tool() {
+        let temp = tempdir().unwrap();
+        let home = temp.path().join("home");
+        init_home(&home).unwrap();
+        ingest_prompt(&home, Tool::Claude, "claude-session", "nabu parity marker");
+        ingest_prompt(&home, Tool::Codex, "codex-session", "nabu parity marker");
+        index_once(&home).unwrap();
+
+        let call = |tool: Option<&str>| {
+            let mut arguments = json!({ "query": "nabu parity marker", "limit": 10 });
+            if let Some(tool) = tool {
+                arguments["tool"] = json!(tool);
+            }
+            let response = handle_message(
+                &home,
+                &json!({
+                    "jsonrpc": "2.0",
+                    "id": 8,
+                    "method": "tools/call",
+                    "params": { "name": "search_history", "arguments": arguments }
+                })
+                .to_string(),
+            )
+            .unwrap()
+            .unwrap();
+            response["result"]["structuredContent"]["results"]
+                .as_array()
+                .unwrap()
+                .len()
+        };
+
+        // "all" is the explicit spelling of omitting tool; both search every tool.
+        assert_eq!(call(Some("all")), call(None));
+        assert!(call(Some("all")) >= 2);
+    }
+
+    #[test]
+    fn single_session_surfaces_reject_tool_all() {
+        let temp = tempdir().unwrap();
+        let home = temp.path().join("home");
+        init_home(&home).unwrap();
+
+        for name in ["get_session", "get_event", "export_session"] {
+            let response = handle_message(
+                &home,
+                &json!({
+                    "jsonrpc": "2.0",
+                    "id": 9,
+                    "method": "tools/call",
+                    "params": {
+                        "name": name,
+                        "arguments": {
+                            "tool": "all",
+                            "session_id": "any-session"
+                        }
+                    }
+                })
+                .to_string(),
+            )
+            .unwrap()
+            .unwrap();
+
+            assert_eq!(
+                response["result"]["isError"], true,
+                "{name} must reject tool=all"
+            );
+            let error = &response["result"]["structuredContent"]["error"];
+            assert_eq!(error["code"], "VALIDATION_ERROR", "{name}");
+            assert!(
+                error["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("codex, claude, or opencode"),
+                "{name} error should name the accepted single tools, got {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn search_history_applies_default_snippet_length_when_omitted() {
+        let temp = tempdir().unwrap();
+        let home = temp.path().join("home");
+        init_home(&home).unwrap();
+        ingest_hook_event(
+            &home,
+            Tool::Claude,
+            json!({
+                "session_id": "snippet-default",
+                "hook_event_name": "UserPromptSubmit",
+                "message_id": "snippet-default-1",
+                "cwd": "/tmp/nabu-fixture",
+                "project_root": "/tmp/nabu-fixture",
+                "prompt": "nabu triage marker for snippet default"
+            }),
+        )
+        .unwrap();
+        index_once(&home).unwrap();
+
+        let value = tool_search_history(
+            &home,
+            &json!({
+                "query": "nabu triage marker",
+                "limit": 5
+            }),
+        )
+        .unwrap();
+
+        assert_eq!(
+            value["max_snippet_chars_applied"],
+            json!(DEFAULT_SEARCH_SNIPPET_CHARS)
+        );
+        assert_eq!(DEFAULT_SEARCH_SNIPPET_CHARS, 500);
+    }
+
+    #[test]
+    fn search_history_honors_override_and_clamps_above_maximum() {
+        let temp = tempdir().unwrap();
+        let home = temp.path().join("home");
+        init_home(&home).unwrap();
+        ingest_hook_event(
+            &home,
+            Tool::Claude,
+            json!({
+                "session_id": "snippet-clamp",
+                "hook_event_name": "UserPromptSubmit",
+                "message_id": "snippet-clamp-1",
+                "cwd": "/tmp/nabu-fixture",
+                "project_root": "/tmp/nabu-fixture",
+                "prompt": "nabu clamp marker for snippet override"
+            }),
+        )
+        .unwrap();
+        index_once(&home).unwrap();
+
+        let overridden = tool_search_history(
+            &home,
+            &json!({
+                "query": "nabu clamp marker",
+                "max_snippet_chars": 120
+            }),
+        )
+        .unwrap();
+        assert_eq!(overridden["max_snippet_chars_applied"], json!(120));
+
+        // Above the schema maximum the request is rejected before reaching core.
+        let rejected = tool_search_history(
+            &home,
+            &json!({
+                "query": "nabu clamp marker",
+                "max_snippet_chars": MAX_SEARCH_SNIPPET_CHARS + 1
+            }),
+        );
+        assert!(rejected.is_err());
+        assert_eq!(rejected.unwrap_err().code, "VALIDATION_ERROR");
+    }
+
+    #[test]
+    fn large_page_at_default_snippet_length_fits_response_budget() {
+        let temp = tempdir().unwrap();
+        let home = temp.path().join("home");
+        init_home(&home).unwrap();
+
+        // A long, repetitive body so each match-centered snippet saturates the
+        // default length, plus enough distinct events to fill the maximum page.
+        let body = "nabu budget marker ".repeat(400);
+        for index in 0..60 {
+            ingest_hook_event(
+                &home,
+                Tool::Claude,
+                json!({
+                    "session_id": format!("budget-{index}"),
+                    "hook_event_name": "UserPromptSubmit",
+                    "message_id": format!("budget-msg-{index}"),
+                    "cwd": "/tmp/nabu-fixture",
+                    "project_root": "/tmp/nabu-fixture",
+                    "prompt": format!("event {index} {body}")
+                }),
+            )
+            .unwrap();
+        }
+        index_once(&home).unwrap();
+
+        let value = tool_search_history(
+            &home,
+            &json!({
+                "query": "nabu budget marker",
+                "limit": 50
+            }),
+        )
+        .unwrap();
+
+        let serialized = serde_json::to_vec(&value).unwrap();
+        // A maxed-out 50-result page of saturated default-length snippets stays
+        // well inside the response budget: 50 x 500 chars plus per-result
+        // metadata is ~43 KiB against the ~256 KiB ceiling. `fit_search_response`
+        // therefore never has to drop results for size at the default.
+        assert!(
+            serialized.len() <= MAX_MCP_BYTES,
+            "fitted response is {} bytes, over the {MAX_MCP_BYTES}-byte budget",
+            serialized.len()
+        );
+        assert_eq!(value["max_snippet_chars_applied"], json!(500));
+
+        let results = value["results"].as_array().unwrap();
+        assert_eq!(results.len(), 50, "expected a full page");
+        // Every snippet honors the default cap (match-centered slices may end a
+        // few chars short on word/char boundaries, never over).
+        for result in results {
+            let snippet = result["snippet"].as_str().unwrap();
+            assert!(
+                snippet.chars().count() <= DEFAULT_SEARCH_SNIPPET_CHARS,
+                "snippet exceeds default cap: {} chars",
+                snippet.chars().count()
+            );
+        }
+        // 60 events were indexed but the page holds 50, so logical pagination
+        // (not budget trimming) marks it truncated with a forward cursor.
+        assert_eq!(value["truncated"], json!(true));
+        assert_eq!(value["continuation"]["next_offset"], json!(50));
     }
 
     #[test]
@@ -2011,5 +2394,122 @@ mod tests {
         });
         assert_eq!(io_error.code, "STORAGE_UNAVAILABLE");
         assert!(!io_error.message.contains("/Users/example"));
+    }
+
+    fn recall_answer_structured(home: &Path, query: &str) -> Value {
+        let response = handle_message(
+            home,
+            &json!({
+                "jsonrpc": "2.0",
+                "id": 7,
+                "method": "tools/call",
+                "params": {
+                    "name": "recall_answer",
+                    "arguments": { "query": query, "limit": 5, "before": 3, "after": 3 }
+                }
+            })
+            .to_string(),
+        )
+        .unwrap()
+        .unwrap();
+        response["result"]["structuredContent"].clone()
+    }
+
+    #[test]
+    fn recall_answer_hits_and_context_carry_citation_coordinates() {
+        let temp = tempdir().unwrap();
+        let home = temp.path().join("home");
+        init_home(&home).unwrap();
+        // Three events in one session so the matched hit has surrounding context
+        // to assemble into a before/after window.
+        for (n, prompt) in [
+            "earlier nabu setup note",
+            "nabu recall marker for the cited window",
+            "later nabu cleanup note",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            ingest_hook_event(
+                &home,
+                Tool::Claude,
+                json!({
+                    "session_id": "recall-session",
+                    "hook_event_name": "UserPromptSubmit",
+                    "message_id": format!("recall-user-{n}"),
+                    "cwd": "/tmp/nabu-recall",
+                    "project_root": "/tmp/nabu-recall",
+                    "prompt": prompt
+                }),
+            )
+            .unwrap();
+        }
+        index_once(&home).unwrap();
+
+        let structured = recall_answer_structured(&home, "nabu recall marker cited window");
+
+        // No answer text is generated; the tool only assembles cited context.
+        assert!(structured.get("answer").is_none());
+        let hits = structured["hits"].as_array().unwrap();
+        assert!(!hits.is_empty(), "recall_answer returned no hits");
+
+        // Context events are merged across hits and emitted once, attached to the
+        // first hit whose window covers them; so context lives somewhere across the
+        // hit set, not necessarily on every hit.
+        let mut total_context_events = 0;
+        for hit in hits {
+            // Invariant #13: every hit carries raw_file/raw_line/raw_offset/session_id.
+            assert_eq!(hit["session_id"], "recall-session");
+            assert!(hit["tool"].is_string());
+            assert!(hit["raw_file"].is_string());
+            assert!(hit["raw_line"].is_i64());
+            assert!(hit.get("raw_offset").is_some());
+
+            // Each assembled context event must also be independently citable.
+            for event in hit["context"].as_array().unwrap() {
+                total_context_events += 1;
+                assert!(event["tool"].is_string());
+                assert_eq!(event["session_id"], "recall-session");
+                assert!(event["raw_file"].is_string());
+                assert!(event["raw_line"].is_i64());
+                assert!(event.get("raw_offset").is_some());
+            }
+        }
+        assert!(
+            total_context_events >= 2,
+            "expected assembled surrounding context across hits"
+        );
+    }
+
+    #[test]
+    fn recall_answer_description_advertises_no_llm_no_network_one_shot_niche() {
+        let description = tool_descriptions()
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| tool["name"] == "recall_answer")
+            .and_then(|tool| tool["description"].as_str())
+            .map(str::to_string)
+            .unwrap();
+
+        // No-LLM / no-network / read-only contract is explicit.
+        assert!(description.contains("call an LLM"));
+        assert!(description.contains("network"));
+        assert!(description.contains("read-only"));
+        // One-shot niche and the trade-off against the drill-down path are stated.
+        assert!(description.contains("One-shot"));
+        assert!(description.contains("get_session"));
+        assert!(description.contains("drill-down"));
+        // Cites without a follow-up: it advertises the coordinates it echoes.
+        assert!(description.contains("raw_line"));
+        assert!(description.contains("raw_offset"));
+    }
+
+    #[test]
+    fn handoff_prompt_routes_one_shot_to_recall_answer() {
+        let prompt = handle_prompt_get(&json!({ "name": "prepare_handoff_summary" }));
+        let text = prompt["messages"][0]["content"]["text"].as_str().unwrap();
+        assert!(text.contains("recall_answer"));
+        assert!(text.contains("get_session"));
     }
 }

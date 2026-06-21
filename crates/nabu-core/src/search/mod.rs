@@ -6,11 +6,11 @@
 pub(crate) mod corroborate;
 
 use crate::{
-    normalize_date_or_duration, open_index, open_raw_offset_reader, raw_envelope_for_line_scan,
-    read_raw_envelope_at_offset, resolved_payload_for_envelope, semantic_search_available,
-    sha256_hex, vector_search_results, Error, RankedSearchResult, Result, SearchContinuation,
-    SearchMode, SearchOptions, SearchPage, SearchResult, Tool, MAX_SEARCH_LIMIT,
-    MAX_SEARCH_SNIPPET_CHARS,
+    expand_query_terms, native_jsonl_line_command, normalize_date_or_duration, open_index,
+    open_raw_offset_reader, raw_envelope_for_line_scan, read_raw_envelope_at_offset,
+    resolved_payload_for_envelope, semantic_search_available, sha256_hex, vector_search_results,
+    Error, RankedSearchResult, Result, SearchContinuation, SearchMode, SearchOptions, SearchPage,
+    SearchResult, Tool, MAX_SEARCH_LIMIT, MAX_SEARCH_SNIPPET_CHARS,
 };
 pub(crate) use corroborate::corroborate_text;
 use rusqlite::params_from_iter;
@@ -66,7 +66,7 @@ pub fn search_history_page(home: &Path, query: &str, options: SearchOptions) -> 
             Err(error) => return Err(error),
         }
     }
-    let query_terms = searchable_terms(query)?;
+    let query_terms = effective_search_terms(query, options.expand_concepts)?;
     let fts_query = quoted_fts_terms(&query_terms);
     let limit = options.limit.clamp(1, MAX_SEARCH_LIMIT);
     let offset = options.offset;
@@ -126,7 +126,55 @@ pub fn search_history_page(home: &Path, query: &str, options: SearchOptions) -> 
         include_payload: options.include_payload,
         include_deltas: options.include_deltas,
         dedupe: options.dedupe,
+        expand_concepts: options.expand_concepts,
     })
+}
+
+/// How a `ref=` search filter compares against the stored `event_refs` rows.
+pub(crate) struct RefFilterMatch {
+    /// `pr` or `commit`.
+    pub(crate) kind: &'static str,
+    /// A `LIKE` pattern (with `\` as the escape character) applied to
+    /// `event_refs.ref_value`.
+    pub(crate) value_pattern: String,
+}
+
+/// Resolve a raw `ref=` filter string into the `event_refs` row it should match.
+///
+/// PR forms (`#54`, `54`, `PR #54`, `org/repo#54`) normalize to an exact match
+/// on the `pr` kind value `#54`. A bare hex token is treated as a `commit` SHA
+/// and matched by case-insensitive prefix (`abc123` matches `abc123def...`), so
+/// abbreviated SHAs resolve the way they are written in transcripts. Any `%`/`_`
+/// in the input is escaped so it cannot act as a wildcard.
+pub(crate) fn normalize_ref_filter(raw: &str) -> RefFilterMatch {
+    let trimmed = raw.trim();
+    let pr_digits = trimmed
+        .strip_prefix('#')
+        .or_else(|| trimmed.rsplit_once('#').map(|(_, tail)| tail))
+        .map(str::trim)
+        .filter(|tail| !tail.is_empty() && tail.bytes().all(|byte| byte.is_ascii_digit()));
+    if let Some(digits) = pr_digits.or_else(|| {
+        // `ref=54` (no `#`) is a PR number when it is purely decimal.
+        (!trimmed.is_empty() && trimmed.bytes().all(|byte| byte.is_ascii_digit()))
+            .then_some(trimmed)
+    }) {
+        let normalized = digits.trim_start_matches('0');
+        let normalized = if normalized.is_empty() {
+            "0"
+        } else {
+            normalized
+        };
+        return RefFilterMatch {
+            kind: "pr",
+            value_pattern: escape_like(&format!("#{normalized}")),
+        };
+    }
+    // Otherwise treat the input as a commit SHA (or SHA prefix), matched by
+    // prefix against the lowercased stored value.
+    RefFilterMatch {
+        kind: "commit",
+        value_pattern: format!("{}%", escape_like(&trimmed.to_ascii_lowercase())),
+    }
 }
 
 fn lexical_search_ranked_results(
@@ -212,6 +260,20 @@ fn lexical_search_ranked_results(
         );
         params.push(SqlValue::Text(format!("%{command}%")));
     }
+    if let Some(ref_filter) = options.ref_filter.as_deref() {
+        let ref_match = normalize_ref_filter(ref_filter);
+        sql.push_str(
+            " AND EXISTS (
+                SELECT 1
+                FROM event_refs er
+                WHERE er.event_id = e.id
+                  AND er.ref_kind = ?
+                  AND er.ref_value LIKE ? ESCAPE '\\'
+              )",
+        );
+        params.push(SqlValue::Text(ref_match.kind.to_string()));
+        params.push(SqlValue::Text(ref_match.value_pattern));
+    }
     sql.push_str(
         " ORDER BY bm25(events_fts, 8.0, 6.0, 4.0, 1.0, 0.5), e.captured_at DESC, e.raw_line ASC
           LIMIT ?",
@@ -226,12 +288,17 @@ fn lexical_search_ranked_results(
         .query_map(params_from_iter(params), |row| {
             let tool_text: String = row.get(1)?;
             let searchable_text = row.get::<_, String>(7).unwrap_or_default();
+            let canonical_type: String = row.get(3)?;
+            let summary_kind = crate::summary_kind_for_canonical_str(&canonical_type);
+            let raw_file: String = row.get(8)?;
+            let raw_line: i64 = row.get(9)?;
             Ok(RankedSearchResult {
                 event_id: row.get(0)?,
                 result: SearchResult {
                     tool: Tool::from_str(&tool_text).map_err(|_| rusqlite::Error::InvalidQuery)?,
                     session_id: row.get(2)?,
-                    canonical_type: row.get(3)?,
+                    canonical_type,
+                    summary_kind,
                     timestamp: row.get(4)?,
                     score: row.get(5)?,
                     snippet: match_centered_snippet(
@@ -240,14 +307,15 @@ fn lexical_search_ranked_results(
                         query_terms,
                         max_snippet_chars,
                     ),
-                    raw_file: row.get(8)?,
-                    raw_line: row.get(9)?,
+                    native_command: native_jsonl_line_command(&raw_file, raw_line),
+                    raw_file,
+                    raw_line,
                     raw_offset: row.get(10)?,
                     compaction_state: row.get(11)?,
                     payload: Value::Null,
                     also_at: Vec::new(),
                     corroboration: None,
-                    retrieval_key: sha256_hex(searchable_text.as_bytes()),
+                    retrieval_key: retrieval_key_for_text(&searchable_text),
                     corroboration_text: searchable_text,
                     cwd: row.get(12)?,
                     project_root: row.get(13)?,
@@ -279,7 +347,7 @@ fn search_history_hybrid_page(
     options: SearchOptions,
     semantic_available: bool,
 ) -> Result<SearchPage> {
-    let query_terms = searchable_terms(query)?;
+    let query_terms = effective_search_terms(query, options.expand_concepts)?;
     let limit = options.limit.clamp(1, MAX_SEARCH_LIMIT);
     let offset = options.offset;
     let max_snippet_chars = options.max_snippet_chars.clamp(1, MAX_SEARCH_SNIPPET_CHARS);
@@ -342,6 +410,7 @@ fn search_history_hybrid_page(
         include_payload: options.include_payload,
         include_deltas: options.include_deltas,
         dedupe: options.dedupe,
+        expand_concepts: options.expand_concepts,
     })
 }
 
@@ -481,12 +550,43 @@ fn dedupe_ranked_search_results(
     Ok(deduped)
 }
 
+// Retrieval-layer dedupe identity for a hit's text. Hashing the rendered
+// `searchable_text` verbatim made the key sensitive to whitespace that carries
+// no semantic content: two captures of the same answer that differ only by an
+// embedded newline vs. a space (e.g. a native `output_text` block vs. its
+// `agent_message` twin) hashed to different keys and survived dedupe as adjacent
+// duplicates. Normalizing collapses any run of Unicode whitespace to a single
+// space and trims the ends, so whitespace-only divergence yields one key while
+// genuinely distinct text stays distinct. The normalization is applied to the
+// dedupe key only; `searchable_text`, snippets, and `corroboration_text` keep
+// their original bytes.
+pub(crate) fn retrieval_key_for_text(searchable_text: &str) -> String {
+    let normalized = searchable_text
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    sha256_hex(normalized.as_bytes())
+}
+
 fn retrieval_twin_key(result: &SearchResult) -> (String, String, String) {
     (
         result.session_id.clone(),
         result.canonical_type.clone(),
         result.retrieval_key.clone(),
     )
+}
+
+// Resolve the literal query into the term list used for FTS matching and
+// snippet centering. With `expand_concepts` set, the literal terms are
+// OR-extended with curated synonyms (originals kept up front); off, this is
+// exactly `searchable_terms`.
+fn effective_search_terms(query: &str, expand_concepts: bool) -> Result<Vec<String>> {
+    let terms = searchable_terms(query)?;
+    if expand_concepts {
+        Ok(expand_query_terms(&terms))
+    } else {
+        Ok(terms)
+    }
 }
 
 fn searchable_terms(query: &str) -> Result<Vec<String>> {

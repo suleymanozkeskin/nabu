@@ -123,6 +123,14 @@ CREATE TABLE IF NOT EXISTS event_files (
   FOREIGN KEY (file_id) REFERENCES files(id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS event_refs (
+  event_id INTEGER NOT NULL,
+  ref_kind TEXT NOT NULL CHECK (ref_kind IN ('pr', 'commit')),
+  ref_value TEXT NOT NULL,
+  PRIMARY KEY (event_id, ref_kind, ref_value),
+  FOREIGN KEY (event_id) REFERENCES events(id) ON DELETE CASCADE
+);
+
 CREATE TABLE IF NOT EXISTS compactions (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   event_id INTEGER NOT NULL UNIQUE,
@@ -176,6 +184,7 @@ CREATE INDEX IF NOT EXISTS idx_messages_session_sequence ON messages(tool, sessi
 CREATE INDEX IF NOT EXISTS idx_tool_events_session ON tool_events(tool, session_id);
 CREATE INDEX IF NOT EXISTS idx_tool_events_name ON tool_events(tool_name);
 CREATE INDEX IF NOT EXISTS idx_compactions_session ON compactions(tool, session_id);
+CREATE INDEX IF NOT EXISTS idx_event_refs_kind_value ON event_refs(ref_kind, ref_value);
 
 -- Semantic feature only, after sqlite-vec has been registered:
 --

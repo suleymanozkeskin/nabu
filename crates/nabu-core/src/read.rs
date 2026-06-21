@@ -3,14 +3,35 @@
 
 use crate::{
     corroborate_text, normalize_date_or_duration, open_index, raw_envelope_for_pointer,
-    redact_json_value, redact_text, session_raw_file, Error, EventOptions, EventPointer, Result,
-    SessionOptions, SessionPage, SessionSummary, StoredEvent, Tool, MAX_CONTEXT_EVENTS_PER_SIDE,
-    MAX_SESSION_LIMIT,
+    redact_json_value, redact_text, session_raw_file, Error, EventOptions, EventPointer, FileTouch,
+    Result, SessionOptions, SessionPage, SessionSummary, StoredEvent, Tool, ToolUsage,
+    MAX_CONTEXT_EVENTS_PER_SIDE, MAX_SESSION_LIMIT, SESSION_PROMPT_SNIPPET_CHARS,
+    SESSION_TOP_FILES, SESSION_TOP_TOOLS,
 };
 use rusqlite::types::Value as SqlValue;
-use rusqlite::{params_from_iter, OptionalExtension};
+use rusqlite::{params_from_iter, Connection, OptionalExtension};
 use std::path::Path;
 use std::str::FromStr;
+
+/// Truncate `text` to at most `max_chars` characters on a char boundary,
+/// appending a single-character ellipsis when truncation occurred. Trailing
+/// whitespace before the ellipsis is trimmed so the snippet reads cleanly.
+fn truncate_snippet(text: &str, max_chars: usize) -> String {
+    let mut boundary = None;
+    for (count, (byte_idx, _)) in text.char_indices().enumerate() {
+        if count == max_chars {
+            boundary = Some(byte_idx);
+            break;
+        }
+    }
+    match boundary {
+        None => text.to_string(),
+        Some(byte_idx) => {
+            let head = text[..byte_idx].trim_end();
+            format!("{head}\u{2026}")
+        }
+    }
+}
 
 pub fn session_events(home: &Path, tool: Tool, session_id: &str) -> Result<Vec<StoredEvent>> {
     let db_path = home.join("index").join("harness.db");
@@ -39,10 +60,13 @@ pub fn session_events(home: &Path, tool: Tool, session_id: &str) -> Result<Vec<S
     let rows = statement
         .query_map((tool.as_str(), session_id), |row| {
             let tool_text: String = row.get(0)?;
+            let canonical_type: String = row.get(2)?;
+            let summary_kind = crate::summary_kind_for_canonical_str(&canonical_type);
             Ok(StoredEvent {
                 tool: Tool::from_str(&tool_text).map_err(|_| rusqlite::Error::InvalidQuery)?,
                 session_id: row.get(1)?,
-                canonical_type: row.get(2)?,
+                canonical_type,
+                summary_kind,
                 timestamp: row.get(3)?,
                 text: row.get(4)?,
                 raw_file: row.get(5)?,
@@ -87,6 +111,7 @@ pub fn list_sessions(
            updated_at,
            event_count,
            message_count,
+           tool_event_count,
            compaction_count,
            raw_file
          FROM sessions
@@ -125,8 +150,13 @@ pub fn list_sessions(
                 updated_at: row.get(5)?,
                 event_count: row.get(6)?,
                 message_count: row.get(7)?,
-                compaction_count: row.get(8)?,
-                raw_file: row.get(9)?,
+                tool_event_count: row.get(8)?,
+                compaction_count: row.get(9)?,
+                raw_file: row.get(10)?,
+                first_user_prompt: None,
+                last_canonical_type: None,
+                top_tools: Vec::new(),
+                top_files: Vec::new(),
             })
         })
         .map_err(|source| Error::Sqlite {
@@ -141,7 +171,165 @@ pub fn list_sessions(
             source,
         })?);
     }
+    drop(statement);
+
+    // Enrich each base row with triage metadata derived from already-indexed
+    // tables (messages, events, tool_events, event_files). Query-time, so no
+    // migration or backfill: existing indexes upgrade with zero reindex. The
+    // result set is bounded by `limit` (<=100), so the per-session fan-out is
+    // small and uses the existing session-scoped indexes.
+    for session in &mut sessions {
+        let tool_text = session.tool.as_str();
+        session.first_user_prompt =
+            first_user_prompt(&conn, &db_path, tool_text, &session.session_id)?;
+        session.last_canonical_type =
+            last_canonical_type(&conn, &db_path, tool_text, &session.session_id)?;
+        session.top_tools = top_tools(&conn, &db_path, tool_text, &session.session_id)?;
+        session.top_files = top_files(&conn, &db_path, tool_text, &session.session_id)?;
+    }
+
     Ok(sessions)
+}
+
+/// First user-message text for the session, truncated for triage. Ordered by
+/// `sequence` (NULLs last) then event id so the earliest prompt wins
+/// deterministically.
+fn first_user_prompt(
+    conn: &Connection,
+    db_path: &Path,
+    tool: &str,
+    session_id: &str,
+) -> Result<Option<String>> {
+    conn.query_row(
+        "SELECT text
+           FROM messages
+          WHERE tool = ?1 AND session_id = ?2 AND role = 'user' AND is_delta = 0
+          ORDER BY sequence IS NULL, sequence, id
+          LIMIT 1",
+        (tool, session_id),
+        |row| row.get::<_, String>(0),
+    )
+    .optional()
+    .map_err(|source| Error::Sqlite {
+        path: db_path.to_path_buf(),
+        source,
+    })
+    .map(|text| {
+        text.map(|text| truncate_snippet(text.trim(), SESSION_PROMPT_SNIPPET_CHARS))
+            .filter(|snippet| !snippet.is_empty())
+    })
+}
+
+/// Canonical type of the session's last event, ordered by capture time then
+/// raw position so the newest event wins deterministically.
+fn last_canonical_type(
+    conn: &Connection,
+    db_path: &Path,
+    tool: &str,
+    session_id: &str,
+) -> Result<Option<String>> {
+    conn.query_row(
+        "SELECT canonical_type
+           FROM events
+          WHERE tool = ?1 AND session_id = ?2
+          ORDER BY captured_at DESC, raw_line DESC, raw_offset DESC
+          LIMIT 1",
+        (tool, session_id),
+        |row| row.get::<_, String>(0),
+    )
+    .optional()
+    .map_err(|source| Error::Sqlite {
+        path: db_path.to_path_buf(),
+        source,
+    })
+}
+
+/// Top tool names invoked in the session, by descending call count. Ties break
+/// alphabetically for determinism. Rows with a NULL `tool_name` are ignored.
+fn top_tools(
+    conn: &Connection,
+    db_path: &Path,
+    tool: &str,
+    session_id: &str,
+) -> Result<Vec<ToolUsage>> {
+    let mut statement = conn
+        .prepare(
+            "SELECT tool_name, COUNT(*) AS uses
+               FROM tool_events
+              WHERE tool = ?1 AND session_id = ?2 AND tool_name IS NOT NULL
+              GROUP BY tool_name
+              ORDER BY uses DESC, tool_name ASC
+              LIMIT ?3",
+        )
+        .map_err(|source| Error::Sqlite {
+            path: db_path.to_path_buf(),
+            source,
+        })?;
+    let rows = statement
+        .query_map((tool, session_id, SESSION_TOP_TOOLS as i64), |row| {
+            Ok(ToolUsage {
+                tool_name: row.get(0)?,
+                count: row.get(1)?,
+            })
+        })
+        .map_err(|source| Error::Sqlite {
+            path: db_path.to_path_buf(),
+            source,
+        })?;
+    collect_rows(rows, db_path)
+}
+
+/// Top files edited in the session, by descending edit count. Counts only the
+/// `edited` relationship (file.changed events). Ties break alphabetically.
+fn top_files(
+    conn: &Connection,
+    db_path: &Path,
+    tool: &str,
+    session_id: &str,
+) -> Result<Vec<FileTouch>> {
+    let mut statement = conn
+        .prepare(
+            "SELECT files.path, COUNT(*) AS edits
+               FROM event_files
+               JOIN events ON events.id = event_files.event_id
+               JOIN files ON files.id = event_files.file_id
+              WHERE events.tool = ?1
+                AND events.session_id = ?2
+                AND event_files.relationship = 'edited'
+              GROUP BY files.path
+              ORDER BY edits DESC, files.path ASC
+              LIMIT ?3",
+        )
+        .map_err(|source| Error::Sqlite {
+            path: db_path.to_path_buf(),
+            source,
+        })?;
+    let rows = statement
+        .query_map((tool, session_id, SESSION_TOP_FILES as i64), |row| {
+            Ok(FileTouch {
+                path: row.get(0)?,
+                edits: row.get(1)?,
+            })
+        })
+        .map_err(|source| Error::Sqlite {
+            path: db_path.to_path_buf(),
+            source,
+        })?;
+    collect_rows(rows, db_path)
+}
+
+fn collect_rows<T>(
+    rows: rusqlite::MappedRows<'_, impl FnMut(&rusqlite::Row<'_>) -> rusqlite::Result<T>>,
+    db_path: &Path,
+) -> Result<Vec<T>> {
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row.map_err(|source| Error::Sqlite {
+            path: db_path.to_path_buf(),
+            source,
+        })?);
+    }
+    Ok(out)
 }
 
 pub fn get_session_page(
@@ -211,10 +399,13 @@ pub fn get_session_page(
     let rows = statement
         .query_map(params_from_iter(params), |row| {
             let tool_text: String = row.get(0)?;
+            let canonical_type: String = row.get(2)?;
+            let summary_kind = crate::summary_kind_for_canonical_str(&canonical_type);
             Ok(StoredEvent {
                 tool: Tool::from_str(&tool_text).map_err(|_| rusqlite::Error::InvalidQuery)?,
                 session_id: row.get(1)?,
-                canonical_type: row.get(2)?,
+                canonical_type,
+                summary_kind,
                 timestamp: row.get(3)?,
                 text: row.get(4)?,
                 raw_file: row.get(5)?,
@@ -405,6 +596,11 @@ pub fn latest_event(home: &Path, tool: Tool) -> Result<Option<StoredEvent>> {
         path: db_path.clone(),
         source,
     })?;
+    let canonical_type: String = row.get(2).map_err(|source| Error::Sqlite {
+        path: db_path.clone(),
+        source,
+    })?;
+    let summary_kind = crate::summary_kind_for_canonical_str(&canonical_type);
     Ok(Some(StoredEvent {
         tool: Tool::from_str(&tool_text)
             .map_err(|_| Error::Validation("invalid tool".to_string()))?,
@@ -412,10 +608,8 @@ pub fn latest_event(home: &Path, tool: Tool) -> Result<Option<StoredEvent>> {
             path: db_path.clone(),
             source,
         })?,
-        canonical_type: row.get(2).map_err(|source| Error::Sqlite {
-            path: db_path.clone(),
-            source,
-        })?,
+        canonical_type,
+        summary_kind,
         timestamp: row.get(3).map_err(|source| Error::Sqlite {
             path: db_path.clone(),
             source,

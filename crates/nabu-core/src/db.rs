@@ -2,6 +2,7 @@
 //! opening, FTS (re)build, and the single process-global sqlite-vec extension
 //! registration (hard constraint: registered in exactly one place).
 
+use crate::provenance::extract_refs;
 use crate::{
     chmod, payload_for_raw_pointer, search_document_for_event, set_if_exists, CanonicalType, Error,
     Result, SQLITE_SCHEMA,
@@ -109,6 +110,7 @@ pub(crate) fn initialize_database(path: &Path) -> Result<()> {
     ensure_checkpoint_schema(&conn, path)?;
     ensure_events_fts_schema(&mut conn, path)?;
     ensure_supporting_indexes(&conn, path)?;
+    ensure_event_refs_schema(&mut conn, path)?;
     ensure_semantic_vector_schema(&conn, path)?;
     conn.execute_batch(
         "PRAGMA user_version = 1;
@@ -147,6 +149,7 @@ pub(crate) fn open_index(path: &Path) -> Result<Connection> {
     ensure_checkpoint_schema(&conn, path)?;
     ensure_events_fts_schema(&mut conn, path)?;
     ensure_supporting_indexes(&conn, path)?;
+    ensure_event_refs_schema(&mut conn, path)?;
     Ok(conn)
 }
 
@@ -385,6 +388,98 @@ fn ensure_supporting_indexes(conn: &Connection, path: &Path) -> Result<()> {
         source,
     })?;
     Ok(())
+}
+
+const EVENT_REFS_SCHEMA: &str = r#"
+CREATE TABLE IF NOT EXISTS event_refs (
+  event_id INTEGER NOT NULL,
+  ref_kind TEXT NOT NULL CHECK (ref_kind IN ('pr', 'commit')),
+  ref_value TEXT NOT NULL,
+  PRIMARY KEY (event_id, ref_kind, ref_value),
+  FOREIGN KEY (event_id) REFERENCES events(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_event_refs_kind_value ON event_refs(ref_kind, ref_value);
+"#;
+
+/// Create the `event_refs` provenance table on open and backfill it from the
+/// already-indexed events the first time it appears, so existing indexes gain
+/// ref rows without a full reindex.
+///
+/// The table is created with `IF NOT EXISTS`, so this is a no-op on databases
+/// that already carry it. The backfill runs only when the table was absent
+/// before this call (a pre-provenance index), iterating every event's stored
+/// `searchable_text` - the same rendered string the index pipeline extracts
+/// from - and inserting the extracted refs. Newly created databases have no
+/// events yet, so their backfill pass is empty and the live index pipeline
+/// populates `event_refs` going forward.
+fn ensure_event_refs_schema(conn: &mut Connection, path: &Path) -> Result<()> {
+    let already_present = table_exists(conn, path, "event_refs")?;
+    conn.execute_batch(EVENT_REFS_SCHEMA)
+        .map_err(|source| Error::Sqlite {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    if already_present {
+        return Ok(());
+    }
+    backfill_event_refs(conn, path)
+}
+
+fn backfill_event_refs(conn: &mut Connection, path: &Path) -> Result<()> {
+    let tx = conn.transaction().map_err(|source| Error::Sqlite {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    {
+        let mut select = tx
+            .prepare("SELECT id, searchable_text FROM events ORDER BY id")
+            .map_err(|source| Error::Sqlite {
+                path: path.to_path_buf(),
+                source,
+            })?;
+        let mut insert = tx
+            .prepare(
+                "INSERT OR IGNORE INTO event_refs(event_id, ref_kind, ref_value)
+                 VALUES (?1, ?2, ?3)",
+            )
+            .map_err(|source| Error::Sqlite {
+                path: path.to_path_buf(),
+                source,
+            })?;
+        let mut rows = select.query([]).map_err(|source| Error::Sqlite {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        while let Some(row) = rows.next().map_err(|source| Error::Sqlite {
+            path: path.to_path_buf(),
+            source,
+        })? {
+            let event_id = row.get::<_, i64>(0).map_err(|source| Error::Sqlite {
+                path: path.to_path_buf(),
+                source,
+            })?;
+            let searchable_text = row
+                .get::<_, Option<String>>(1)
+                .map_err(|source| Error::Sqlite {
+                    path: path.to_path_buf(),
+                    source,
+                })?
+                .unwrap_or_default();
+            for reference in extract_refs(&searchable_text) {
+                insert
+                    .execute((event_id, reference.kind.as_str(), reference.value))
+                    .map_err(|source| Error::Sqlite {
+                        path: path.to_path_buf(),
+                        source,
+                    })?;
+            }
+        }
+    }
+    tx.commit().map_err(|source| Error::Sqlite {
+        path: path.to_path_buf(),
+        source,
+    })
 }
 
 fn rebuild_events_fts(conn: &Connection, path: &Path) -> Result<()> {

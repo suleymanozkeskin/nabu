@@ -173,6 +173,73 @@ impl FromStr for CanonicalType {
     }
 }
 
+/// Classification of canonical types that hand over an entire phase in a
+/// single one-line event. These summary-bearing events let a reader (or an
+/// agent triaging search/list output) skip a full session read, so they are
+/// surfaced as a first-class, typed flag on search hits and session events.
+///
+/// The taxonomy keys off [`CanonicalType`] only — there is no string matching
+/// on payloads. Ordinary conversational and tool events classify as `None`
+/// (see [`CanonicalType::summary_kind`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SummaryKind {
+    /// `session.started` — the session-open handover (project, cwd, task framing).
+    SessionStart,
+    /// `session.ended` — the session-close summary (outcome, usage rollup).
+    SessionEnd,
+    /// `compaction.after` — the post-compaction recap of prior context.
+    Compaction,
+}
+
+impl SummaryKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SummaryKind::SessionStart => "session_start",
+            SummaryKind::SessionEnd => "session_end",
+            SummaryKind::Compaction => "compaction",
+        }
+    }
+}
+
+impl CanonicalType {
+    /// Returns the [`SummaryKind`] for canonical types that carry a one-line
+    /// phase handover, or `None` for ordinary events.
+    ///
+    /// Note: the GitHub issue (#1, item 6) referred to an `away_summary` event
+    /// type; no such canonical type exists in this codebase. The summary-bearing
+    /// canonical types that do exist are `session.started`, `session.ended`, and
+    /// `compaction.after`.
+    pub fn summary_kind(self) -> Option<SummaryKind> {
+        match self {
+            CanonicalType::SessionStarted => Some(SummaryKind::SessionStart),
+            CanonicalType::SessionEnded => Some(SummaryKind::SessionEnd),
+            CanonicalType::CompactionAfter => Some(SummaryKind::Compaction),
+            CanonicalType::SessionResumed
+            | CanonicalType::UserMessage
+            | CanonicalType::AssistantDelta
+            | CanonicalType::AssistantMessage
+            | CanonicalType::ToolCall
+            | CanonicalType::ToolResult
+            | CanonicalType::PermissionRequested
+            | CanonicalType::PermissionReplied
+            | CanonicalType::FileChanged
+            | CanonicalType::CompactionBefore
+            | CanonicalType::SourceDiscontinuity
+            | CanonicalType::Error => None,
+        }
+    }
+}
+
+/// Resolves the [`SummaryKind`] for a stored canonical-type string. Unknown or
+/// unparsable canonical types are treated as non-summary (`None`), keeping read
+/// paths total rather than failing a whole page on one unexpected row.
+pub fn summary_kind_for_canonical_str(canonical_type: &str) -> Option<SummaryKind> {
+    CanonicalType::from_str(canonical_type)
+        .ok()
+        .and_then(CanonicalType::summary_kind)
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EventEnvelope {
     pub schema_version: u32,

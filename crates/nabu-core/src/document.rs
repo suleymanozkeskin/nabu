@@ -270,14 +270,14 @@ pub(crate) fn search_document_for_event(
                 preferred_text(payload, &["text", "message", "content", "delta", "summary"]);
         }
         CanonicalType::ToolCall => {
-            document.tool_intent = preferred_text(
+            document.tool_intent = tool_intent_text(
                 payload,
                 &["tool_name", "command", "description", "input", "arguments"],
             );
         }
         CanonicalType::ToolResult => {
             document.tool_intent =
-                preferred_text(payload, &["tool_name", "command", "status", "exit_code"]);
+                tool_intent_text(payload, &["tool_name", "command", "status", "exit_code"]);
             document.tool_output =
                 preferred_text(payload, &["output", "stderr", "stdout", "error", "result"]);
         }
@@ -340,6 +340,118 @@ fn preferred_text(payload: &Value, keys: &[&str]) -> String {
     let mut values = Vec::new();
     collect_strings_for_keys(payload, keys, &mut values);
     join_owned(values)
+}
+
+/// Exec-wrapper scaffolding keys emitted by codex shell tool calls. These hold
+/// the execution envelope (working directory, timeouts, escalation metadata),
+/// not the command the user issued, and must not bleed into searchable text.
+const EXEC_WRAPPER_SCAFFOLD_KEYS: &[&str] = &[
+    "workdir",
+    "yield_time_ms",
+    "timeout_ms",
+    "with_escalated_permissions",
+    "env",
+];
+
+/// Renders tool-call intent, unwrapping the codex shell-exec JSON envelope so
+/// the searchable text carries the real command (joined argv / shell string)
+/// and any human justification, never the `{"workdir":..,"yield_time_ms":..}`
+/// scaffolding. Values that are not exec wrappers fall back to plain string
+/// collection, preserving behavior for every other tool shape.
+fn tool_intent_text(payload: &Value, keys: &[&str]) -> String {
+    let mut values = Vec::new();
+    collect_tool_intent_for_keys(payload, keys, &mut values);
+    join_owned(values)
+}
+
+fn collect_tool_intent_for_keys(value: &Value, keys: &[&str], output: &mut Vec<String>) {
+    match value {
+        Value::Object(map) => {
+            for (key, value) in map {
+                if keys.contains(&key.as_str()) {
+                    collect_tool_intent_value(value, output);
+                } else {
+                    collect_tool_intent_for_keys(value, keys, output);
+                }
+            }
+        }
+        Value::Array(values) => {
+            for value in values {
+                collect_tool_intent_for_keys(value, keys, output);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_tool_intent_value(value: &Value, output: &mut Vec<String>) {
+    match value {
+        // A string that is itself a JSON-encoded exec wrapper: parse and clean
+        // it rather than pushing the raw envelope text.
+        Value::String(text) => match serde_json::from_str::<Value>(text.trim()) {
+            Ok(parsed) if exec_wrapper_command(&parsed).is_some() => {
+                collect_exec_wrapper(&parsed, output)
+            }
+            _ => push_clean(output, text),
+        },
+        // An inline wrapper object, or any other object: clean the former and
+        // recurse into the latter.
+        Value::Object(_) if exec_wrapper_command(value).is_some() => {
+            collect_exec_wrapper(value, output)
+        }
+        _ => collect_strings(value, output),
+    }
+}
+
+/// Returns the rendered command for a value that is a codex shell-exec wrapper
+/// (an object carrying a `command` argv plus exec scaffolding), or `None` when
+/// the value is not such a wrapper.
+fn exec_wrapper_command(value: &Value) -> Option<String> {
+    let map = value.as_object()?;
+    let command = map.get("command")?;
+    // Only treat this as an exec wrapper when at least one scaffolding key is
+    // present; a bare `{"command": ...}` is ambiguous and handled by the normal
+    // string path so unrelated tool shapes keep their existing rendering.
+    if !EXEC_WRAPPER_SCAFFOLD_KEYS
+        .iter()
+        .any(|key| map.contains_key(*key))
+    {
+        return None;
+    }
+    let command = match command {
+        Value::Array(argv) => join_argv(argv),
+        Value::String(text) => text.trim().to_string(),
+        _ => return None,
+    };
+    if command.is_empty() {
+        None
+    } else {
+        Some(command)
+    }
+}
+
+fn collect_exec_wrapper(value: &Value, output: &mut Vec<String>) {
+    if let Some(command) = exec_wrapper_command(value) {
+        push_clean(output, &command);
+    }
+    // Preserve human-meaningful narration carried alongside the command while
+    // dropping the execution scaffolding.
+    if let Some(map) = value.as_object() {
+        for key in ["justification", "description"] {
+            if let Some(Value::String(text)) = map.get(key) {
+                push_clean(output, text);
+            }
+        }
+    }
+}
+
+fn join_argv(argv: &[Value]) -> String {
+    argv.iter()
+        .filter_map(Value::as_str)
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn scalar_text_for_keys(payload: &Value, keys: &[&str]) -> String {

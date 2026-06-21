@@ -2844,6 +2844,92 @@ fn search_multi_word_query_keeps_recall_with_or_semantics() {
 }
 
 #[test]
+fn concept_expansion_retrieves_synonym_only_document_opt_in() {
+    let temp = tempdir().unwrap();
+    let home = temp.path().join("home");
+    init_home(&home).unwrap();
+
+    // The target records the concept under a synonym only: it says "error" and
+    // "latency", never the literal query words "bug" or "perf".
+    ingest_hook_event(
+        &home,
+        Tool::Claude,
+        json!({
+            "session_id": "concept-target",
+            "hook_event_name": "UserPromptSubmit",
+            "message_id": "concept-target-1",
+            "prompt": "the index reported an error and high latency during rebuild"
+        }),
+    )
+    .unwrap();
+    // A distractor with neither the literal terms nor any synonym, so expansion
+    // must not start matching unrelated documents.
+    ingest_hook_event(
+        &home,
+        Tool::Claude,
+        json!({
+            "session_id": "concept-distractor",
+            "hook_event_name": "UserPromptSubmit",
+            "message_id": "concept-distractor-1",
+            "prompt": "session export wrote markdown to disk"
+        }),
+    )
+    .unwrap();
+    index_once(&home).unwrap();
+
+    let query = "bug perf";
+
+    // Baseline lexical search has no concept knowledge: the synonym-only target
+    // is invisible because neither "bug" nor "perf" appears in it.
+    let baseline = search_history_page(
+        &home,
+        query,
+        SearchOptions {
+            mode: SearchMode::Lexical,
+            expand_concepts: false,
+            ..SearchOptions::default()
+        },
+    )
+    .unwrap();
+    assert!(
+        !baseline
+            .results
+            .iter()
+            .any(|result| result.session_id == "concept-target"),
+        "without expansion the synonym-only document must be missed"
+    );
+
+    // With the opt-in flag, "bug" expands to include "error" and "perf" to
+    // include "latency", so the target is retrieved.
+    let expanded = search_history_page(
+        &home,
+        query,
+        SearchOptions {
+            mode: SearchMode::Lexical,
+            expand_concepts: true,
+            ..SearchOptions::default()
+        },
+    )
+    .unwrap();
+    assert!(expanded.expand_concepts, "page echoes the applied flag");
+    assert!(
+        expanded
+            .results
+            .iter()
+            .any(|result| result.session_id == "concept-target"),
+        "expansion must retrieve the synonym-only document"
+    );
+    // Expansion widens recall without dragging in the unrelated distractor.
+    assert!(
+        !expanded
+            .results
+            .iter()
+            .any(|result| result.session_id == "concept-distractor"),
+        "expansion must not start matching unrelated documents"
+    );
+}
+
+#[test]
 fn search_filters_apply_session_type_file_and_command() {
     let temp = tempdir().unwrap();
     let home = temp.path().join("home");
@@ -2920,6 +3006,210 @@ fn search_filters_apply_session_type_file_and_command() {
     .unwrap();
     assert_eq!(file_results.len(), 1);
     assert_eq!(file_results[0].session_id, "file-session");
+}
+
+// Provenance ref indexing (issue #1, item 8). Seeds two sessions that mention a
+// PR ref and a commit SHA, indexes them, and asserts: the refs are queryable in
+// event_refs, a `ref=` search returns the right events with full coordinates
+// (invariant #13), and the commit prefix filter resolves abbreviated SHAs.
+#[test]
+fn provenance_refs_are_indexed_and_searchable() {
+    let temp = tempdir().unwrap();
+    let home = temp.path().join("home");
+    init_home(&home).unwrap();
+
+    // Discovery session: a PR reference and a full commit SHA in one message.
+    let sha = "100a8704bf3c2d1e5a6f7b8c9d0e1f2a3b4c5d6e";
+    ingest_hook_event(
+        &home,
+        Tool::Claude,
+        json!({
+            "session_id": "discovery-session",
+            "hook_event_name": "UserPromptSubmit",
+            "message_id": "prov-discovery-1",
+            "prompt": format!("provenance marker: bug found, fixed in #54 at commit {sha}")
+        }),
+    )
+    .unwrap();
+    // An unrelated session that must not match the ref filters.
+    ingest_hook_event(
+        &home,
+        Tool::Claude,
+        json!({
+            "session_id": "unrelated-session",
+            "hook_event_name": "UserPromptSubmit",
+            "message_id": "prov-unrelated-1",
+            "prompt": "provenance marker: nothing to see here, just prose"
+        }),
+    )
+    .unwrap();
+    index_once(&home).unwrap();
+
+    // The discovery session's event carries exactly the two refs in event_refs.
+    let db_path = home.join("index").join("harness.db");
+    let conn = Connection::open(&db_path).unwrap();
+    let mut stored: Vec<(String, String)> = conn
+        .prepare(
+            "SELECT er.ref_kind, er.ref_value
+             FROM event_refs er
+             JOIN events e ON e.id = er.event_id
+             WHERE e.session_id = 'discovery-session'
+             ORDER BY er.ref_kind, er.ref_value",
+        )
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .map(|row| row.unwrap())
+        .collect();
+    stored.sort();
+    assert_eq!(
+        stored,
+        vec![
+            ("commit".to_string(), sha.to_string()),
+            ("pr".to_string(), "#54".to_string()),
+        ]
+    );
+    // The unrelated session has no refs.
+    let unrelated_refs: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM event_refs er
+             JOIN events e ON e.id = er.event_id
+             WHERE e.session_id = 'unrelated-session'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(unrelated_refs, 0);
+    drop(conn);
+
+    // A `ref=#54` filter returns the discovery event with full coordinates.
+    let pr_hits = search_history_filtered(
+        &home,
+        "provenance marker",
+        SearchOptions {
+            ref_filter: Some("#54".to_string()),
+            limit: 10,
+            ..SearchOptions::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(pr_hits.len(), 1);
+    let hit = &pr_hits[0];
+    assert_eq!(hit.session_id, "discovery-session");
+    // Invariant #13: the hit carries raw_file/raw_line/raw_offset/session_id.
+    assert!(!hit.raw_file.is_empty());
+    assert!(hit.raw_line > 0);
+    assert!(hit.raw_offset.is_some());
+    assert!(!hit.session_id.is_empty());
+
+    // A bare PR number (`ref=54`) resolves to the same `#54` row.
+    let pr_bare = search_history_filtered(
+        &home,
+        "provenance marker",
+        SearchOptions {
+            ref_filter: Some("54".to_string()),
+            limit: 10,
+            ..SearchOptions::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(pr_bare.len(), 1);
+    assert_eq!(pr_bare[0].session_id, "discovery-session");
+
+    // An abbreviated commit SHA prefix matches the stored full SHA.
+    let commit_hits = search_history_filtered(
+        &home,
+        "provenance marker",
+        SearchOptions {
+            ref_filter: Some("100a8704".to_string()),
+            limit: 10,
+            ..SearchOptions::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(commit_hits.len(), 1);
+    assert_eq!(commit_hits[0].session_id, "discovery-session");
+
+    // A PR number that is not present yields nothing.
+    let absent = search_history_filtered(
+        &home,
+        "provenance marker",
+        SearchOptions {
+            ref_filter: Some("#999".to_string()),
+            limit: 10,
+            ..SearchOptions::default()
+        },
+    )
+    .unwrap();
+    assert!(absent.is_empty());
+}
+
+// The event_refs migration must backfill a pre-provenance index: an index built
+// without the table (simulated by dropping it) regains its refs on the next
+// open, without a full reindex.
+#[test]
+fn provenance_refs_backfill_on_open_of_legacy_index() {
+    let temp = tempdir().unwrap();
+    let home = temp.path().join("home");
+    init_home(&home).unwrap();
+
+    ingest_hook_event(
+        &home,
+        Tool::Claude,
+        json!({
+            "session_id": "legacy-session",
+            "hook_event_name": "UserPromptSubmit",
+            "message_id": "legacy-prov-1",
+            "prompt": "legacy backfill marker: shipped in #73"
+        }),
+    )
+    .unwrap();
+    index_once(&home).unwrap();
+
+    // Simulate a pre-provenance index: drop the event_refs table outright. A
+    // raw Connection::open does not run the ensure_* migrations, so the table
+    // stays absent until we reopen through open_index.
+    let db_path = home.join("index").join("harness.db");
+    {
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch("DROP TABLE IF EXISTS event_refs;")
+            .unwrap();
+        let still_present: i64 = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name = 'event_refs')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(still_present, 0, "event_refs should be dropped");
+    }
+
+    // open_index runs ensure_event_refs_schema, which recreates the table and
+    // backfills from the already-indexed events' searchable_text.
+    let conn = open_index(&db_path).unwrap();
+    let backfilled: Vec<(String, String)> = conn
+        .prepare("SELECT ref_kind, ref_value FROM event_refs ORDER BY ref_kind, ref_value")
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .map(|row| row.unwrap())
+        .collect();
+    assert_eq!(backfilled, vec![("pr".to_string(), "#73".to_string())]);
+    drop(conn);
+
+    // The backfilled ref is searchable end-to-end.
+    let hits = search_history_filtered(
+        &home,
+        "legacy backfill marker",
+        SearchOptions {
+            ref_filter: Some("#73".to_string()),
+            limit: 10,
+            ..SearchOptions::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].session_id, "legacy-session");
 }
 
 // P0 bug #2: a session-scoped search must fail open. Controlled by varying
@@ -3002,6 +3292,43 @@ fn search_session_filter_fails_open_on_prefix_and_filename() {
     assert!(hit.raw_line > 0);
     assert!(hit.raw_offset.is_some());
     assert!(!hit.session_id.is_empty());
+
+    // Item 14: the native handoff command is populated for a real hit, names the
+    // hit's raw_file, and addresses the hit's raw_line. The path is shell-quoted.
+    let command = hit
+        .native_command
+        .as_deref()
+        .expect("indexed hit carries a native handoff command");
+    assert_eq!(
+        command,
+        format!("sed -n '{}p' '{}' | jq .", hit.raw_line, hit.raw_file)
+    );
+    assert!(command.contains(&format!("'{}p'", hit.raw_line)));
+    assert!(command.ends_with("| jq ."));
+}
+
+// Item 14: the native handoff command must be a single, safe, correct shell
+// command — the path shell-quoted (paths can contain spaces), the actual
+// raw_line used, and the raw_file targeted. Invalid line numbers yield None.
+#[test]
+fn native_handoff_command_is_line_addressed_and_shell_quoted() {
+    // Path with a space stays one argument via single quotes.
+    let cmd = native_jsonl_line_command("/var/log/my sessions/raven.jsonl", 42)
+        .expect("positive line yields a command");
+    assert_eq!(
+        cmd,
+        "sed -n '42p' '/var/log/my sessions/raven.jsonl' | jq ."
+    );
+    assert!(cmd.contains("'42p'"));
+    assert!(cmd.contains("'/var/log/my sessions/raven.jsonl'"));
+
+    // Embedded single quote is escaped via the '\'' idiom, keeping one argument.
+    let tricky = native_jsonl_line_command("/tmp/o'brien.jsonl", 3).unwrap();
+    assert_eq!(tricky, "sed -n '3p' '/tmp/o'\\''brien.jsonl' | jq .");
+
+    // Non-positive line numbers have no valid 1-based address.
+    assert_eq!(native_jsonl_line_command("/tmp/a.jsonl", 0), None);
+    assert_eq!(native_jsonl_line_command("/tmp/a.jsonl", -1), None);
 }
 
 #[test]
@@ -3061,6 +3388,47 @@ fn search_defaults_are_citation_first_and_full_payload_is_opt_in() {
     .unwrap();
     assert_eq!(full_page.max_snippet_chars_applied, 1_000);
     assert!(full_page.results[0].payload.get("prompt").is_some());
+}
+
+#[test]
+fn search_default_snippet_length_is_triage_sized() {
+    assert_eq!(DEFAULT_SEARCH_SNIPPET_CHARS, 500);
+    assert_eq!(SearchOptions::default().max_snippet_chars, 500);
+
+    let temp = tempdir().unwrap();
+    let home = temp.path().join("home");
+    init_home(&home).unwrap();
+    ingest_hook_event(
+        &home,
+        Tool::Claude,
+        json!({
+            "session_id": "snippet-default-session",
+            "hook_event_name": "UserPromptSubmit",
+            "message_id": "snippet-default-1",
+            "cwd": "/tmp/nabu-fixture",
+            "project_root": "/tmp/nabu-fixture",
+            "prompt": format!("{} triage needle marker {}", "lead ".repeat(120), "tail ".repeat(120))
+        }),
+    )
+    .unwrap();
+    index_once(&home).unwrap();
+
+    // Omitting max_snippet_chars applies the default and yields a longer,
+    // match-centered snippet than the previous 240-char default would have.
+    let page =
+        search_history_page(&home, "triage needle marker", SearchOptions::default()).unwrap();
+    assert_eq!(page.max_snippet_chars_applied, 500);
+    let snippet = &page.results[0].snippet;
+    assert!(snippet.contains("triage needle marker"));
+    let len = snippet.chars().count();
+    assert!(
+        len > 240,
+        "default snippet should exceed the old 240 cap, got {len}"
+    );
+    assert!(
+        len <= 500,
+        "default snippet should honor the 500 cap, got {len}"
+    );
 }
 
 #[test]
@@ -3382,6 +3750,99 @@ fn session_context_window_clamps_and_wins_over_after_raw_line() {
 }
 
 #[test]
+fn session_page_cursor_resumes_without_gap_or_overlap() {
+    let temp = tempdir().unwrap();
+    let home = temp.path().join("home");
+    init_home(&home).unwrap();
+
+    let total = 7usize;
+    for line in 1..=total {
+        ingest_hook_event(
+            &home,
+            Tool::Claude,
+            json!({
+                "session_id": "paged-session",
+                "hook_event_name": "UserPromptSubmit",
+                "message_id": format!("paged-{line}"),
+                "cwd": "/tmp/nabu-fixture",
+                "project_root": "/tmp/nabu-fixture",
+                "prompt": format!("paged marker line {line}")
+            }),
+        )
+        .unwrap();
+    }
+    index_once(&home).unwrap();
+
+    // First page is smaller than the session, so it must truncate and hand back
+    // a forward cursor.
+    let first = get_session_page(
+        &home,
+        Tool::Claude,
+        "paged-session",
+        SessionOptions {
+            limit_events: 3,
+            ..SessionOptions::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(first.mode, "page");
+    assert!(first.truncated);
+    assert_eq!(first.events.len(), 3);
+    let cursor = first
+        .next_after_raw_line
+        .expect("truncated page must return a cursor");
+    assert_eq!(cursor, first.events.last().unwrap().raw_line);
+
+    // Walk the rest of the session through the cursor, collecting every raw_line.
+    let mut seen: Vec<i64> = first.events.iter().map(|event| event.raw_line).collect();
+    let mut after = cursor;
+    loop {
+        let page = get_session_page(
+            &home,
+            Tool::Claude,
+            "paged-session",
+            SessionOptions {
+                limit_events: 3,
+                after_raw_line: Some(after),
+                ..SessionOptions::default()
+            },
+        )
+        .unwrap();
+        // No overlap: every line is strictly past the previous cursor.
+        assert!(page.events.iter().all(|event| event.raw_line > after));
+        seen.extend(page.events.iter().map(|event| event.raw_line));
+        match page.next_after_raw_line {
+            Some(next) => {
+                assert!(page.truncated);
+                after = next;
+            }
+            None => {
+                assert!(!page.truncated);
+                break;
+            }
+        }
+    }
+
+    // The concatenated pages reconstruct the session exactly: no gap, no overlap.
+    let full: Vec<i64> = get_session_page(
+        &home,
+        Tool::Claude,
+        "paged-session",
+        SessionOptions {
+            limit_events: 500,
+            ..SessionOptions::default()
+        },
+    )
+    .unwrap()
+    .events
+    .iter()
+    .map(|event| event.raw_line)
+    .collect();
+    assert_eq!(seen, full);
+    assert_eq!(seen.len(), total);
+}
+
+#[test]
 fn search_dedupes_twins_only_at_retrieval_layer() {
     let temp = tempdir().unwrap();
     let home = temp.path().join("home");
@@ -3432,6 +3893,106 @@ fn search_dedupes_twins_only_at_retrieval_layer() {
             .count(),
         2
     );
+}
+
+#[test]
+fn search_dedupes_adjacent_whitespace_divergent_twins() {
+    // Two adjacent native captures of the same assistant answer that differ
+    // only by internal whitespace (one has the body split across a newline,
+    // the other collapses it to a single space). Before normalization the
+    // retrieval_key was sha256 over the raw rendered text, so the embedded
+    // whitespace produced two distinct hashes and the twin survived dedupe.
+    let temp = tempdir().unwrap();
+    let home = temp.path().join("home");
+    let source = temp.path().join("codex-sessions");
+    init_home(&home).unwrap();
+    fs::create_dir_all(&source).unwrap();
+
+    let session_id = "019b0000-0000-7000-8000-000000000077";
+    fs::write(
+        source.join(format!("rollout-2026-06-18T00-00-00-{session_id}.jsonl")),
+        format!(
+            "{{\"timestamp\":\"2026-06-18T00:00:00Z\",\"type\":\"session_meta\",\"payload\":{{\"id\":\"{session_id}\",\"cwd\":\"/tmp/native-codex\"}}}}\n\
+             {{\"timestamp\":\"2026-06-18T00:00:01Z\",\"type\":\"response_item\",\"payload\":{{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{{\"type\":\"output_text\",\"text\":\"whitespace twin answer\\nmarker line\"}}]}}}}\n\
+             {{\"timestamp\":\"2026-06-18T00:00:01Z\",\"type\":\"event_msg\",\"payload\":{{\"type\":\"agent_message\",\"message\":\"whitespace twin answer   marker line\"}}}}\n"
+        ),
+    )
+    .unwrap();
+    backfill_since(&home, Some(Tool::Codex), &source, None).unwrap();
+    index_once(&home).unwrap();
+
+    let deduped = search_history_page(
+        &home,
+        "whitespace twin answer marker",
+        SearchOptions::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        deduped.results.len(),
+        1,
+        "whitespace-divergent twin must collapse to one hit"
+    );
+    assert_eq!(
+        deduped.results[0].also_at.len(),
+        1,
+        "the collapsed twin's raw_line must be recorded in also_at"
+    );
+    let primary_line = deduped.results[0].raw_line;
+    let collapsed_line = deduped.results[0].also_at[0];
+    assert_ne!(
+        primary_line, collapsed_line,
+        "also_at records the other event's raw_line, not the primary's"
+    );
+
+    let not_deduped = search_history_page(
+        &home,
+        "whitespace twin answer marker",
+        SearchOptions {
+            dedupe: false,
+            ..SearchOptions::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        not_deduped.results.len(),
+        2,
+        "without dedupe both adjacent twins remain visible"
+    );
+}
+
+#[test]
+fn search_dedupe_keeps_distinct_events_separate() {
+    // Guard against over-collapsing: two genuinely different assistant answers
+    // in the same session must NOT be merged by the normalized retrieval_key.
+    let temp = tempdir().unwrap();
+    let home = temp.path().join("home");
+    let source = temp.path().join("codex-sessions");
+    init_home(&home).unwrap();
+    fs::create_dir_all(&source).unwrap();
+
+    let session_id = "019b0000-0000-7000-8000-000000000088";
+    fs::write(
+        source.join(format!("rollout-2026-06-18T00-00-00-{session_id}.jsonl")),
+        format!(
+            "{{\"timestamp\":\"2026-06-18T00:00:00Z\",\"type\":\"session_meta\",\"payload\":{{\"id\":\"{session_id}\",\"cwd\":\"/tmp/native-codex\"}}}}\n\
+             {{\"timestamp\":\"2026-06-18T00:00:01Z\",\"type\":\"response_item\",\"payload\":{{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{{\"type\":\"output_text\",\"text\":\"distinct marker alpha answer\"}}]}}}}\n\
+             {{\"timestamp\":\"2026-06-18T00:00:02Z\",\"type\":\"response_item\",\"payload\":{{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{{\"type\":\"output_text\",\"text\":\"distinct marker beta answer\"}}]}}}}\n"
+        ),
+    )
+    .unwrap();
+    backfill_since(&home, Some(Tool::Codex), &source, None).unwrap();
+    index_once(&home).unwrap();
+
+    let deduped =
+        search_history_page(&home, "distinct marker answer", SearchOptions::default()).unwrap();
+    assert_eq!(
+        deduped.results.len(),
+        2,
+        "distinct answers must not collapse under normalized dedupe"
+    );
+    for result in &deduped.results {
+        assert!(result.also_at.is_empty());
+    }
 }
 
 #[test]
@@ -4151,6 +4712,360 @@ fn assert_reconciles_opencode(home: &Path, temp_root: &Path) {
         .any(|event| event.source_event_id.as_deref() == Some("opencode-reconcile-gap")));
 }
 
+#[test]
+fn summary_kind_classifies_phase_handover_types_only() {
+    // The summary-bearing canonical types that actually exist.
+    assert_eq!(
+        CanonicalType::SessionStarted.summary_kind(),
+        Some(SummaryKind::SessionStart)
+    );
+    assert_eq!(
+        CanonicalType::SessionEnded.summary_kind(),
+        Some(SummaryKind::SessionEnd)
+    );
+    assert_eq!(
+        CanonicalType::CompactionAfter.summary_kind(),
+        Some(SummaryKind::Compaction)
+    );
+
+    // Ordinary events and non-summary lifecycle events are not flagged.
+    for canonical_type in [
+        CanonicalType::SessionResumed,
+        CanonicalType::UserMessage,
+        CanonicalType::AssistantDelta,
+        CanonicalType::AssistantMessage,
+        CanonicalType::ToolCall,
+        CanonicalType::ToolResult,
+        CanonicalType::PermissionRequested,
+        CanonicalType::PermissionReplied,
+        CanonicalType::FileChanged,
+        CanonicalType::CompactionBefore,
+        CanonicalType::SourceDiscontinuity,
+        CanonicalType::Error,
+    ] {
+        assert_eq!(
+            canonical_type.summary_kind(),
+            None,
+            "{canonical_type:?} must not be a summary"
+        );
+    }
+
+    // String resolution matches the typed classifier; unknown types are None.
+    assert_eq!(
+        summary_kind_for_canonical_str("session.started"),
+        Some(SummaryKind::SessionStart)
+    );
+    assert_eq!(summary_kind_for_canonical_str("user.message"), None);
+    assert_eq!(summary_kind_for_canonical_str("not.a.real.type"), None);
+}
+
+#[test]
+fn search_flags_summary_events_and_not_ordinary_events() {
+    let temp = tempdir().unwrap();
+    let home = temp.path().join("home");
+    init_home(&home).unwrap();
+
+    // A session-start handover (summary-bearing canonical type).
+    ingest_hook_event(
+        &home,
+        Tool::Claude,
+        json!({
+            "session_id": "summary-surface-session",
+            "hook_event_name": "SessionStart",
+            "cwd": "/tmp/nabu-fixture",
+            "project_root": "/tmp/nabu-fixture",
+            "matter": "phase handover surfacing marker"
+        }),
+    )
+    .unwrap();
+    // An ordinary user message sharing the search term.
+    ingest_hook_event(
+        &home,
+        Tool::Claude,
+        json!({
+            "session_id": "summary-surface-session",
+            "hook_event_name": "UserPromptSubmit",
+            "message_id": "summary-surface-user-1",
+            "cwd": "/tmp/nabu-fixture",
+            "project_root": "/tmp/nabu-fixture",
+            "prompt": "phase handover surfacing marker followup"
+        }),
+    )
+    .unwrap();
+    index_once(&home).unwrap();
+
+    let results = search_history(&home, "phase handover surfacing marker", 10).unwrap();
+    assert!(results.len() >= 2, "expected both events, got {results:?}");
+
+    let summary_hit = results
+        .iter()
+        .find(|result| result.canonical_type == "session.started")
+        .expect("session.started hit present");
+    assert_eq!(summary_hit.summary_kind, Some(SummaryKind::SessionStart));
+    // Invariant #13: coordinates always present on every hit.
+    assert!(!summary_hit.raw_file.is_empty());
+    assert!(summary_hit.raw_offset.is_some());
+    assert_eq!(summary_hit.session_id, "summary-surface-session");
+
+    let ordinary_hit = results
+        .iter()
+        .find(|result| result.canonical_type == "user.message")
+        .expect("user.message hit present");
+    assert_eq!(ordinary_hit.summary_kind, None);
+}
+
+#[test]
+fn session_page_flags_summary_events() {
+    let temp = tempdir().unwrap();
+    let home = temp.path().join("home");
+    init_home(&home).unwrap();
+
+    ingest_hook_event(
+        &home,
+        Tool::Claude,
+        json!({
+            "session_id": "summary-page-session",
+            "hook_event_name": "SessionStart",
+            "cwd": "/tmp/nabu-fixture",
+            "matter": "session page summary marker"
+        }),
+    )
+    .unwrap();
+    ingest_hook_event(
+        &home,
+        Tool::Claude,
+        json!({
+            "session_id": "summary-page-session",
+            "hook_event_name": "UserPromptSubmit",
+            "message_id": "summary-page-user-1",
+            "cwd": "/tmp/nabu-fixture",
+            "prompt": "session page ordinary marker"
+        }),
+    )
+    .unwrap();
+    index_once(&home).unwrap();
+
+    let page = get_session_page(
+        &home,
+        Tool::Claude,
+        "summary-page-session",
+        SessionOptions::default(),
+    )
+    .unwrap();
+
+    let started = page
+        .events
+        .iter()
+        .find(|event| event.canonical_type == "session.started")
+        .expect("session.started event present");
+    assert_eq!(started.summary_kind, Some(SummaryKind::SessionStart));
+
+    let user = page
+        .events
+        .iter()
+        .find(|event| event.canonical_type == "user.message")
+        .expect("user.message event present");
+    assert_eq!(user.summary_kind, None);
+}
+
+// Issue #1 item 7: list_sessions must carry triage metadata derived from
+// already-indexed tables so a caller can pick a session without loading it.
+// Controlled by seeding a multi-event session with a known first prompt, a
+// known tool-name mix, and a final compaction, then asserting the derived
+// fields reflect exactly that.
+#[test]
+fn list_sessions_surfaces_triage_metadata_for_multi_event_session() {
+    let temp = tempdir().unwrap();
+    let home = temp.path().join("home");
+    init_home(&home).unwrap();
+
+    // A rich Claude session: first user prompt, three tool calls (bash x2,
+    // edit x1), then a compaction. The first prompt is the triage signal.
+    ingest_hook_event(
+        &home,
+        Tool::Claude,
+        json!({
+            "session_id": "triage-rich",
+            "hook_event_name": "UserPromptSubmit",
+            "message_id": "triage-rich-prompt",
+            "cwd": "/tmp/nabu-triage",
+            "project_root": "/tmp/nabu-triage",
+            "prompt": "Refactor the auth module and add tests"
+        }),
+    )
+    .unwrap();
+    // A later prompt must NOT win: first_user_prompt is the earliest one.
+    ingest_hook_event(
+        &home,
+        Tool::Claude,
+        json!({
+            "session_id": "triage-rich",
+            "hook_event_name": "UserPromptSubmit",
+            "message_id": "triage-rich-prompt-2",
+            "prompt": "Now also update the README"
+        }),
+    )
+    .unwrap();
+    for (idx, tool_name, command) in [
+        (0, "bash", "cargo test"),
+        (1, "bash", "cargo clippy"),
+        (2, "edit", ""),
+    ] {
+        ingest_hook_event(
+            &home,
+            Tool::Claude,
+            json!({
+                "session_id": "triage-rich",
+                "hook_event_name": "PreToolUse",
+                "message_id": format!("triage-rich-tool-{idx}"),
+                "tool_name": tool_name,
+                "command": command
+            }),
+        )
+        .unwrap();
+    }
+    ingest_hook_event(
+        &home,
+        Tool::Claude,
+        json!({
+            "session_id": "triage-rich",
+            "hook_event_name": "PreCompact",
+            "message_id": "triage-rich-compact",
+            "trigger": "auto"
+        }),
+    )
+    .unwrap();
+
+    // A second session that edits two files (one file twice) so top_files is
+    // exercised. Opencode's file.edited maps to file.changed which records the
+    // 'edited' relationship that top_files counts.
+    ingest_hook_event(
+        &home,
+        Tool::Opencode,
+        json!({
+            "hook_event_name": "session.created",
+            "id": "triage-files",
+            "directory": "/tmp/nabu-triage"
+        }),
+    )
+    .unwrap();
+    for (idx, path) in [
+        "/tmp/nabu-triage/src/auth.rs",
+        "/tmp/nabu-triage/src/auth.rs",
+        "/tmp/nabu-triage/src/lib.rs",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        // Distinct `diff` per edit so the two auth.rs edits are distinct events
+        // (byte-identical events dedupe by design).
+        ingest_hook_event(
+            &home,
+            Tool::Opencode,
+            json!({
+                "hook_event_name": "file.edited",
+                "sessionID": "triage-files",
+                "path": path,
+                "diff": format!("edit marker {idx}")
+            }),
+        )
+        .unwrap();
+    }
+    index_once(&home).unwrap();
+
+    let sessions = list_sessions(&home, None, None, None, 20).unwrap();
+
+    let rich = sessions
+        .iter()
+        .find(|session| session.session_id == "triage-rich")
+        .expect("rich session listed");
+    // Triage from the list row alone: what it was about, what it did, how it
+    // ended.
+    assert_eq!(
+        rich.first_user_prompt.as_deref(),
+        Some("Refactor the auth module and add tests")
+    );
+    assert_eq!(
+        rich.last_canonical_type.as_deref(),
+        Some("compaction.before")
+    );
+    assert_eq!(rich.compaction_count, 1);
+    assert_eq!(rich.tool_event_count, 3);
+    // bash (2) outranks edit (1); ties would break alphabetically.
+    assert_eq!(
+        rich.top_tools,
+        vec![
+            ToolUsage {
+                tool_name: "bash".to_string(),
+                count: 2,
+            },
+            ToolUsage {
+                tool_name: "edit".to_string(),
+                count: 1,
+            },
+        ]
+    );
+
+    let files = sessions
+        .iter()
+        .find(|session| session.session_id == "triage-files")
+        .expect("file session listed");
+    // auth.rs edited twice outranks lib.rs edited once.
+    assert_eq!(
+        files.top_files,
+        vec![
+            FileTouch {
+                path: "/tmp/nabu-triage/src/auth.rs".to_string(),
+                edits: 2,
+            },
+            FileTouch {
+                path: "/tmp/nabu-triage/src/lib.rs".to_string(),
+                edits: 1,
+            },
+        ]
+    );
+
+    // Triage fields serialize for MCP and omit when empty (the file session has
+    // no tool calls, so top_tools is skipped, not emitted as []).
+    let json = serde_json::to_value(files).unwrap();
+    assert!(json.get("top_tools").is_none());
+    assert!(json.get("top_files").is_some());
+    assert!(json.get("first_user_prompt").is_none());
+}
+
+// Issue #1 item 7: the first-user-prompt snippet must truncate long prompts on
+// a char boundary so the list row stays compact and never panics on multibyte
+// input. Controlled by varying only prompt length around the cap.
+#[test]
+fn list_sessions_truncates_long_first_user_prompt() {
+    let temp = tempdir().unwrap();
+    let home = temp.path().join("home");
+    init_home(&home).unwrap();
+
+    let long_prompt = "x".repeat(SESSION_PROMPT_SNIPPET_CHARS + 50);
+    ingest_hook_event(
+        &home,
+        Tool::Claude,
+        json!({
+            "session_id": "triage-long",
+            "hook_event_name": "UserPromptSubmit",
+            "message_id": "triage-long-1",
+            "prompt": long_prompt
+        }),
+    )
+    .unwrap();
+    index_once(&home).unwrap();
+
+    let sessions = list_sessions(&home, Some(Tool::Claude), None, None, 10).unwrap();
+    let snippet = sessions[0]
+        .first_user_prompt
+        .as_deref()
+        .expect("prompt present");
+    // SESSION_PROMPT_SNIPPET_CHARS chars plus the single ellipsis char.
+    assert_eq!(snippet.chars().count(), SESSION_PROMPT_SNIPPET_CHARS + 1);
+    assert!(snippet.ends_with('\u{2026}'));
+}
+
 fn valid_envelope_json() -> Value {
     json!({
         "schema_version": 1,
@@ -4173,4 +5088,131 @@ fn valid_envelope_json() -> Value {
         "raw_offset": null,
         "payload": {}
     })
+}
+
+#[test]
+fn codex_exec_wrapper_intent_strips_scaffolding_and_keeps_command() {
+    // codex emits the shell command as a JSON-encoded exec wrapper under
+    // `arguments`; the searchable text must carry the command, not the envelope.
+    let string_encoded = json!({
+        "type": "function_call",
+        "name": "shell",
+        "arguments": "{\"command\":[\"bash\",\"-lc\",\"cargo test --workspace\"],\"workdir\":\"/repo\",\"yield_time_ms\":250,\"with_escalated_permissions\":true,\"justification\":\"run the suite codex justification marker\"}",
+        "call_id": "call-1"
+    });
+    let rendered = search_document_for_event(CanonicalType::ToolCall, &string_encoded).render();
+    for key in ["workdir", "yield_time_ms", "with_escalated_permissions"] {
+        assert!(
+            !rendered.contains(key),
+            "scaffolding key {key} leaked: {rendered}"
+        );
+    }
+    assert!(
+        rendered.contains("cargo test --workspace"),
+        "missing command: {rendered}"
+    );
+    assert!(
+        rendered.contains("run the suite codex justification marker"),
+        "missing justification: {rendered}"
+    );
+
+    // Same wrapper as an inline object (not a JSON-encoded string).
+    let inline = json!({
+        "type": "function_call",
+        "name": "shell",
+        "arguments": {
+            "command": ["bash", "-lc", "cargo test --workspace"],
+            "workdir": "/repo",
+            "timeout_ms": 1000
+        }
+    });
+    let rendered = search_document_for_event(CanonicalType::ToolCall, &inline).render();
+    assert!(
+        !rendered.contains("workdir"),
+        "scaffolding leaked: {rendered}"
+    );
+    assert!(
+        !rendered.contains("timeout_ms"),
+        "scaffolding leaked: {rendered}"
+    );
+    assert!(
+        rendered.contains("cargo test --workspace"),
+        "missing command: {rendered}"
+    );
+
+    // Non-wrapper tool input keeps its existing plain-string rendering.
+    let plain = json!({"tool_name": "shell", "input": "printf plain codex marker"});
+    let rendered = search_document_for_event(CanonicalType::ToolCall, &plain).render();
+    assert!(
+        rendered.contains("printf plain codex marker"),
+        "plain input lost: {rendered}"
+    );
+}
+
+#[test]
+fn codex_exec_wrapper_tool_call_is_searchable_by_command_without_scaffolding() {
+    let temp = tempdir().unwrap();
+    let home = temp.path().join("home");
+    let source = temp.path().join("codex-sessions");
+    init_home(&home).unwrap();
+    fs::create_dir_all(&source).unwrap();
+
+    let session_id = "019b0000-0000-7000-8000-000000000077";
+    let arguments = serde_json::to_string(&json!({
+        "command": ["bash", "-lc", "cargo build --release codexcmdmarker"],
+        "workdir": "/tmp/native-codex",
+        "yield_time_ms": 500
+    }))
+    .unwrap();
+    let line = serde_json::to_string(&json!({
+        "timestamp": "2026-06-18T00:00:01Z",
+        "type": "response_item",
+        "payload": {
+            "type": "function_call",
+            "name": "shell",
+            "call_id": "codex-exec-call-1",
+            "arguments": arguments
+        }
+    }))
+    .unwrap();
+    fs::write(
+        source.join(format!("rollout-2026-06-18T00-00-00-{session_id}.jsonl")),
+        format!(
+            "{{\"timestamp\":\"2026-06-18T00:00:00Z\",\"type\":\"session_meta\",\"payload\":{{\"id\":\"{session_id}\",\"cwd\":\"/tmp/native-codex\"}}}}\n{line}\n"
+        ),
+    )
+    .unwrap();
+
+    backfill_since(&home, Some(Tool::Codex), &source, None).unwrap();
+    index_once(&home).unwrap();
+
+    // A search for the real command returns the event.
+    let hits = search_history(&home, "codexcmdmarker", 10).unwrap();
+    assert_eq!(hits.len(), 1, "command not searchable: {hits:?}");
+    let hit = &hits[0];
+    assert_eq!(hit.session_id, session_id);
+    // Invariant #13: raw provenance is intact.
+    assert!(hit.raw_line > 0);
+    assert!(!hit.raw_file.is_empty());
+    // The snippet carries the command and excludes exec scaffolding.
+    assert!(
+        hit.snippet.contains("cargo build --release codexcmdmarker"),
+        "snippet missing command: {:?}",
+        hit.snippet
+    );
+    for key in ["workdir", "yield_time_ms"] {
+        assert!(
+            !hit.snippet.contains(key),
+            "scaffolding key {key} leaked into snippet: {:?}",
+            hit.snippet
+        );
+    }
+
+    // A search for a scaffolding key does not surface this event.
+    assert!(
+        search_history(&home, "yield_time_ms", 10)
+            .unwrap()
+            .is_empty(),
+        "scaffolding key became searchable"
+    );
 }

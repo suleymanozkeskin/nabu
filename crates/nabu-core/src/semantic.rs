@@ -748,6 +748,20 @@ fn vector_search_results_for_k(
         );
         params.push(SqlValue::Text(format!("%{command}%")));
     }
+    if let Some(ref_filter) = options.ref_filter.as_deref() {
+        let ref_match = crate::normalize_ref_filter(ref_filter);
+        sql.push_str(
+            " AND EXISTS (
+                SELECT 1
+                FROM event_refs er
+                WHERE er.event_id = e.id
+                  AND er.ref_kind = ?
+                  AND er.ref_value LIKE ? ESCAPE '\\'
+              )",
+        );
+        params.push(SqlValue::Text(ref_match.kind.to_string()));
+        params.push(SqlValue::Text(ref_match.value_pattern));
+    }
     sql.push_str(" ORDER BY ve.distance LIMIT ?");
     params.push(SqlValue::Integer(row_limit as i64));
 
@@ -760,12 +774,17 @@ fn vector_search_results_for_k(
             let tool_text: String = row.get(1)?;
             let searchable_text = row.get::<_, String>(6).unwrap_or_default();
             let distance = row.get::<_, f64>(5)?;
+            let canonical_type: String = row.get(3)?;
+            let summary_kind = crate::summary_kind_for_canonical_str(&canonical_type);
+            let raw_file: String = row.get(7)?;
+            let raw_line: i64 = row.get(8)?;
             Ok(RankedSearchResult {
                 event_id: row.get(0)?,
                 result: SearchResult {
                     tool: Tool::from_str(&tool_text).map_err(|_| rusqlite::Error::InvalidQuery)?,
                     session_id: row.get(2)?,
-                    canonical_type: row.get(3)?,
+                    canonical_type,
+                    summary_kind,
                     timestamp: row.get(4)?,
                     score: 1.0 / (1.0 + distance),
                     snippet: match_centered_snippet(
@@ -774,14 +793,15 @@ fn vector_search_results_for_k(
                         query_terms,
                         max_snippet_chars,
                     ),
-                    raw_file: row.get(7)?,
-                    raw_line: row.get(8)?,
+                    native_command: native_jsonl_line_command(&raw_file, raw_line),
+                    raw_file,
+                    raw_line,
                     raw_offset: row.get(9)?,
                     compaction_state: row.get(10)?,
                     payload: Value::Null,
                     also_at: Vec::new(),
                     corroboration: None,
-                    retrieval_key: sha256_hex(searchable_text.as_bytes()),
+                    retrieval_key: retrieval_key_for_text(&searchable_text),
                     corroboration_text: searchable_text,
                     cwd: row.get(11)?,
                     project_root: row.get(12)?,
@@ -855,6 +875,7 @@ fn vector_search_filter_count(options: &SearchOptions) -> usize {
         options.canonical_type.is_some(),
         options.file.is_some(),
         options.command.is_some(),
+        options.ref_filter.is_some(),
     ]
     .into_iter()
     .filter(|present| *present)

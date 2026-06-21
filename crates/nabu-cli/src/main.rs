@@ -124,10 +124,19 @@ enum Command {
         file: Option<String>,
         #[arg(long)]
         command: Option<String>,
+        /// Filter to events whose extracted provenance refs match, e.g.
+        /// `--ref '#54'` (a PR reference) or `--ref <commit-sha-prefix>`.
+        #[arg(long = "ref")]
+        ref_filter: Option<String>,
         #[arg(long, value_enum, default_value_t = SearchModeArg::Auto)]
         mode: SearchModeArg,
         #[arg(long)]
         corroborate: bool,
+        /// Expand query terms with curated concept synonyms (e.g. "bug" also
+        /// matches "error"/"failure") to widen lexical recall. Opt-in; does not
+        /// affect ranking of literal-term hits.
+        #[arg(long)]
+        expand_concepts: bool,
         #[arg(long, default_value_t = 10)]
         limit: usize,
         #[arg(long, default_value_t = 0)]
@@ -617,8 +626,10 @@ fn run(cli: Cli) -> nabu_core::Result<()> {
             canonical_type,
             file,
             command,
+            ref_filter,
             mode,
             corroborate,
+            expand_concepts,
             limit,
             offset,
             full,
@@ -638,6 +649,7 @@ fn run(cli: Cli) -> nabu_core::Result<()> {
                     canonical_type,
                     file,
                     command,
+                    ref_filter,
                     limit,
                     offset,
                     include_payload: full,
@@ -646,6 +658,7 @@ fn run(cli: Cli) -> nabu_core::Result<()> {
                     max_snippet_chars,
                     mode: mode.into(),
                     corroborate,
+                    expand_concepts,
                 },
             )?;
             print_search_page(page, format)?;
