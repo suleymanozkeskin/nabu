@@ -99,7 +99,7 @@ pub fn purge_before(home: &Path, before: &str) -> Result<PurgeReport> {
 
 /// Remove every nabu-created artifact under `home` (the store side of a
 /// full uninstall; hook removal is orchestrated separately by the CLI). Only
-/// the closed allowlist in [`PURGE_KNOWN_ENTRIES`] is ever touched — the home
+/// the closed allowlist in `PURGE_KNOWN_ENTRIES` is ever touched — the home
 /// directory itself and any foreign files are left in place.
 ///
 /// Safety:

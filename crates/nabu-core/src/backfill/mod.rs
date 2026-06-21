@@ -18,14 +18,7 @@ use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
-pub fn backfill(
-    home: &Path,
-    selection: Option<Tool>,
-    source_root: &Path,
-) -> Result<BackfillReport> {
-    backfill_since(home, selection, source_root, None)
-}
-
+#[cfg(test)]
 pub fn backfill_since(
     home: &Path,
     selection: Option<Tool>,
@@ -124,6 +117,7 @@ where
     Ok(report)
 }
 
+#[cfg(test)]
 pub fn backfill_dry_run(
     home: &Path,
     selection: Option<Tool>,

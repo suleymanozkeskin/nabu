@@ -1,3 +1,12 @@
+//! Core history-keeping engine for the `nabu` CLI: ingest, indexing, search,
+//! export, and maintenance over local coding-agent transcripts.
+//!
+//! This crate is published only so the `nabu` binary (the `nabu-cli` crate)
+//! resolves its dependencies. It is not a stable public API — items may change
+//! or be removed in any release with no semver guarantee. Depend on the `nabu`
+//! CLI, not on this crate directly.
+#![doc(hidden)]
+
 use fs2::FileExt;
 use rayon::prelude::*;
 use rusqlite::OptionalExtension;
@@ -19,8 +28,8 @@ use time::format_description::well_known::Rfc3339;
 use time::{Date, Month, OffsetDateTime};
 
 pub const SCHEMA_VERSION: u32 = 1;
-pub const SQLITE_SCHEMA: &str = include_str!("../schema.sql");
-pub const MAX_INLINE_ENVELOPE_BYTES: usize = 16 * 1024 * 1024;
+pub(crate) const SQLITE_SCHEMA: &str = include_str!("../schema.sql");
+pub(crate) const MAX_INLINE_ENVELOPE_BYTES: usize = 16 * 1024 * 1024;
 mod db;
 pub(crate) use db::{
     ensure_semantic_vector_schema, initialize_database, open_index, table_count, table_exists,
@@ -44,8 +53,8 @@ pub(crate) use semantic::{
     SEMANTIC_MODEL_REMOTE_FILES, SEMANTIC_MODEL_REPO,
 };
 pub use semantic::{
-    download_embedding_model, download_embedding_model_with_progress, embedding_model_disclosure,
-    embedding_model_status, prune_embedding_cache,
+    download_embedding_model_with_progress, embedding_model_disclosure, embedding_model_status,
+    prune_embedding_cache,
 };
 pub(crate) use semantic::{
     embed_index_if_available_with_progress, insert_vector_unit_rows, semantic_search_available,
@@ -63,7 +72,7 @@ pub use identity::{dedupe_key, sanitize_session_id};
 pub(crate) use identity::{hash_line, sha256_hex};
 
 mod paths;
-pub use paths::{canonical_raw_path, default_home, resolve_home};
+pub use paths::{canonical_raw_path, resolve_home};
 pub(crate) use paths::{
     chmod, create_dir_0700, harness_home_for_raw_file, lock_path_for_raw_file, set_if_exists,
 };
@@ -107,10 +116,9 @@ pub(crate) use backfill::{
     opencode_hook_session_id, opencode_server_events_from_payload, parse_ingest_file_source,
     raw_index_checkpoint_is_current, source_file_metadata, write_raw_index_checkpoint,
 };
-pub use backfill::{
-    backfill, backfill_dry_run, backfill_dry_run_with_progress, backfill_since,
-    backfill_since_with_progress,
-};
+#[cfg(test)]
+pub(crate) use backfill::{backfill_dry_run, backfill_since};
+pub use backfill::{backfill_dry_run_with_progress, backfill_since_with_progress};
 mod ingest;
 pub(crate) use ingest::{
     append_envelope_locked, append_envelopes_locked, load_full_dedupe_sidecar_events,
@@ -120,33 +128,27 @@ pub(crate) use ingest::{
 pub use ingest::{ingest_file, ingest_hook_event, ingest_opencode_server_messages, init_home};
 
 mod index;
-pub use index::{
-    index_once, index_once_with_options, index_once_with_options_and_progress,
-    index_once_with_progress,
-};
+pub use index::{index_once, index_once_with_options, index_once_with_options_and_progress};
 pub(crate) use index::{recalculate_all_session_counts, RawIndexFileReport};
 
 mod search;
 #[cfg(test)]
 pub(crate) use search::corroborate::{extract_corroboration_candidates, git_invocations};
 pub(crate) use search::corroborate_text;
+#[cfg(test)]
+pub(crate) use search::search_history_filtered;
 #[cfg(feature = "semantic")]
 pub(crate) use search::{
     match_centered_snippet, resolve_session_filter_ids, unique_ranked_results_by_event,
 };
-pub use search::{search_history, search_history_filtered, search_history_page};
+pub use search::{search_history, search_history_page};
 
 mod read;
-pub use read::{
-    get_event_by_pointer, get_event_by_pointer_with_options, get_session_page, latest_event,
-    list_sessions, session_events,
-};
+pub(crate) use read::session_events;
+pub use read::{get_event_by_pointer_with_options, get_session_page, latest_event, list_sessions};
 
 mod export;
-pub use export::{
-    export_session_jsonl, export_session_jsonl_with_options, export_session_markdown,
-    export_session_markdown_with_options,
-};
+pub use export::{export_session_jsonl_with_options, export_session_markdown_with_options};
 
 mod redact;
 pub use redact::{redact_export_json, redact_export_text};

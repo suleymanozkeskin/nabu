@@ -245,10 +245,6 @@ fn gemma_terms_summary() -> &'static str {
     "Gemma Terms of Use: open-weight license permitting responsible commercial use, fine-tuning, and redistribution; no per-token fees."
 }
 
-pub fn download_embedding_model(home: &Path, model: &str) -> Result<EmbeddingDownloadReport> {
-    download_embedding_model_with_progress(home, model, |_| {})
-}
-
 #[cfg(feature = "semantic")]
 pub fn download_embedding_model_with_progress<F>(
     home: &Path,
