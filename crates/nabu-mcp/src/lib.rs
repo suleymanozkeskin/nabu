@@ -342,7 +342,7 @@ fn tool_descriptions() -> Value {
         },
         {
             "name": "get_session",
-            "description": "Read a faithful non-deduped page or context window from one session. Use around_raw_line with before/after to inspect context around a search hit; include_deltas=true restores assistant deltas. Set corroborate=true for local read-only git annotations; PR refs require network and remain unresolved.",
+            "description": "Read a faithful non-deduped page or context window from one session. Page forward from after_raw_line (default 0 reads from the start); when more events remain the response sets truncated=true and returns next_after_raw_line (mirrored in continuation.next_after_raw_line) — call again with after_raw_line=next_after_raw_line to resume with no gap or overlap, until truncated=false. The cursor always reflects the events actually returned, including when a large page is trimmed to the MCP size cap, so resuming never skips events. Use around_raw_line with before/after to inspect context around a search hit; a window clipped by the size cap sets window_truncated=true and still returns a forward next_after_raw_line. include_deltas=true restores assistant deltas. Set corroborate=true for local read-only git annotations; PR refs require network and remain unresolved.",
             "inputSchema": tool_schema("get_session")
         },
         {
@@ -1056,8 +1056,8 @@ fn tool_schema(name: &str) -> Value {
                 "tool": { "type": "string", "enum": ["codex", "claude", "opencode"] },
                 "session_id": { "type": "string", "minLength": 1 },
                 "limit_events": { "type": "integer", "minimum": 1, "maximum": 500, "default": 100 },
-                "after_raw_line": { "type": "integer", "minimum": 0 },
-                "around_raw_line": { "type": "integer", "minimum": 1 },
+                "after_raw_line": { "type": "integer", "minimum": 0, "description": "Page forward: return events with raw_line greater than this. Pass the response's next_after_raw_line to fetch the next page with no gap or overlap; 0 (default) reads from the start." },
+                "around_raw_line": { "type": "integer", "minimum": 1, "description": "Context window: return before/after events around this raw_line (wins over after_raw_line). If the window is clipped by the MCP size cap the response sets window_truncated=true and returns a forward next_after_raw_line to keep reading." },
                 "before": { "type": "integer", "minimum": 0, "maximum": 500, "default": 5 },
                 "after": { "type": "integer", "minimum": 0, "maximum": 500, "default": 5 },
                 "canonical_type": { "type": "string" },
@@ -1239,6 +1239,14 @@ fn fit_session_response(mut value: Value) -> Value {
         return value;
     }
 
+    // True when core paged around a specific line (`around_raw_line`) rather than
+    // forward from `after_raw_line`. Window responses carry no forward cursor from
+    // core; if the budget clips one, the caller must still be able to continue.
+    let window_mode = value
+        .get("around_raw_line")
+        .map(|line| !line.is_null())
+        .unwrap_or(false);
+
     let Some(events) = value.get("events").and_then(Value::as_array).cloned() else {
         return enforce_size_bound(value, false);
     };
@@ -1254,7 +1262,6 @@ fn fit_session_response(mut value: Value) -> Value {
         return enforce_size_bound(value, false);
     };
     let mut kept = Vec::new();
-    let mut last_raw_line = None;
     for event in events {
         let separator = usize::from(!kept.is_empty());
         let event = if value_fits_budget(&budget, &event, separator) {
@@ -1270,19 +1277,53 @@ fn fit_session_response(mut value: Value) -> Value {
         if !budget.try_reserve_value(&event, separator) {
             break;
         }
-        last_raw_line = event.get("raw_line").and_then(Value::as_i64);
         kept.push(event);
     }
 
-    let returned = kept.len();
-    if let Some(last_raw_line) = last_raw_line {
-        value["next_after_raw_line"] = json!(last_raw_line);
-        value["continuation"] = json!({ "next_after_raw_line": last_raw_line });
-    }
     value["events"] = Value::Array(kept);
-    value["returned"] = json!(returned);
+    value["returned"] = json!(value
+        .get("events")
+        .and_then(Value::as_array)
+        .map_or(0, Vec::len));
     trim_array_response_to_limit(&mut value, "events");
+    // Recompute the forward cursor from what actually survived trimming. Core's
+    // inherited `next_after_raw_line` describes the events it queried, not the
+    // smaller set that fit the MCP budget; resuming from it would silently skip
+    // events. Deriving it here keeps continuation gap-free and never stale.
+    apply_session_cursor(&mut value, window_mode);
     value
+}
+
+/// Set or clear the forward continuation cursor so it always points just past
+/// the last event in `value["events"]`. With no events left, the cursor is
+/// removed entirely rather than left pointing past data the caller never saw.
+/// In window mode an additional `window_truncated` flag records that the
+/// requested context window was clipped to fit the budget.
+fn apply_session_cursor(value: &mut Value, window_mode: bool) {
+    let last_raw_line = value
+        .get("events")
+        .and_then(Value::as_array)
+        .and_then(|events| events.last())
+        .and_then(|event| event.get("raw_line"))
+        .and_then(Value::as_i64);
+    match last_raw_line {
+        Some(last_raw_line) => {
+            value["next_after_raw_line"] = json!(last_raw_line);
+            value["continuation"] = json!({ "next_after_raw_line": last_raw_line });
+            if window_mode {
+                value["window_truncated"] = json!(true);
+            }
+        }
+        None => {
+            // Nothing fit. Drop any inherited cursor; a stale one would resume
+            // past unreturned events. The caller must shrink the request
+            // (smaller limit_events / narrower window) or use export_session.
+            if let Some(object) = value.as_object_mut() {
+                object.remove("next_after_raw_line");
+                object.remove("continuation");
+            }
+        }
+    }
 }
 
 fn fit_event_response(mut value: Value) -> Value {
@@ -1496,25 +1537,16 @@ fn trim_array_response_to_limit(value: &mut Value, array_field: &str) {
         .map(|serialized| serialized.len() > MAX_MCP_BYTES)
         .unwrap_or(false)
     {
-        let (returned, last_raw_line) = {
+        let returned = {
             let Some(items) = value.get_mut(array_field).and_then(Value::as_array_mut) else {
                 break;
             };
             if items.pop().is_none() {
                 break;
             }
-            let returned = items.len();
-            let last_raw_line = items
-                .last()
-                .and_then(|event| event.get("raw_line"))
-                .and_then(Value::as_i64);
-            (returned, last_raw_line)
+            items.len()
         };
         value["returned"] = json!(returned);
-        if let Some(last_raw_line) = last_raw_line {
-            value["next_after_raw_line"] = json!(last_raw_line);
-            value["continuation"] = json!({ "next_after_raw_line": last_raw_line });
-        }
     }
 }
 
