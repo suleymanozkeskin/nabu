@@ -82,10 +82,11 @@ pub use options::{
     BackfillProgress, BackfillReport, CorroboratedRef, Corroboration, CoverageSummary, DoctorCheck,
     DoctorReport, DoctorStats, EmbeddingDownloadProgress, EmbeddingDownloadReport,
     EmbeddingIndexProgress, EmbeddingModelDisclosure, EmbeddingModelStatus, EventOptions,
-    EventPointer, FileIngestReport, IndexOptions, IndexReport, InitReport, PurgeAction,
+    EventPointer, FileIngestReport, FileTouch, IndexOptions, IndexReport, InitReport, PurgeAction,
     PurgeAllArtifact, PurgeAllOptions, PurgeAllReport, PurgeReport, PurgeTier, SearchContinuation,
     SearchMode, SearchOptions, SearchPage, SearchResult, SessionOptions, SessionPage,
-    SessionSummary, StorageFootprint, StoredEvent,
+    SessionSummary, StorageFootprint, StoredEvent, ToolUsage, SESSION_PROMPT_SNIPPET_CHARS,
+    SESSION_TOP_FILES, SESSION_TOP_TOOLS,
 };
 
 mod purge;
