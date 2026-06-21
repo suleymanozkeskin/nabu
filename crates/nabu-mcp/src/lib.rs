@@ -11,7 +11,8 @@ use nabu_core::{
     doctor_with_options, export_session_jsonl_with_options, export_session_markdown_with_options,
     get_event_by_pointer_with_options, get_session_page, list_sessions, redact_export_json,
     redact_export_text, search_history_page, Error, EventOptions, SearchMode, SearchOptions,
-    SearchResult, SessionOptions, StoredEvent, Tool,
+    SearchResult, SessionOptions, StoredEvent, Tool, DEFAULT_SEARCH_SNIPPET_CHARS,
+    MAX_SEARCH_SNIPPET_CHARS,
 };
 use serde_json::{json, Value};
 use std::io::{BufRead, Write};
@@ -458,7 +459,13 @@ fn tool_search_history(home: &Path, arguments: &Value) -> Result<Value, ToolErro
     }
     let limit = clamped_usize(arguments, "limit", 10, 1, 50)?;
     let offset = optional_usize_min(arguments, "offset", 0)?.unwrap_or(0);
-    let max_snippet_chars = clamped_usize(arguments, "max_snippet_chars", 240, 1, 1000)?;
+    let max_snippet_chars = clamped_usize(
+        arguments,
+        "max_snippet_chars",
+        DEFAULT_SEARCH_SNIPPET_CHARS,
+        1,
+        MAX_SEARCH_SNIPPET_CHARS,
+    )?;
     let options = SearchOptions {
         tool: optional_tool(arguments, "tool")?,
         session_id: optional_string(arguments, "session_id"),
@@ -1042,7 +1049,7 @@ fn tool_schema(name: &str) -> Value {
                 "include_payload": { "type": "boolean", "default": false },
                 "include_deltas": { "type": "boolean", "default": false },
                 "dedupe": { "type": "boolean", "default": true },
-                "max_snippet_chars": { "type": "integer", "minimum": 1, "maximum": 1000, "default": 240 },
+                "max_snippet_chars": { "type": "integer", "minimum": 1, "maximum": 1000, "default": 500, "description": "Per-result match-centered snippet length in characters. Defaults to 500 — enough context to triage a candidate (real bug vs. discussion of one) without a get_session round-trip. Raise toward 1000 for denser context or lower to save tokens; oversized pages are still trimmed to fit the response budget with a continuation cursor." },
                 "corroborate": { "type": "boolean", "default": false, "description": "When true, annotate results with local read-only git checks for mentioned commits, branches, and files. PR refs are unresolved with reason=needs_network; no fetch or forge call is made." },
                 "redact": { "type": "boolean", "default": false }
             },
@@ -1924,6 +1931,149 @@ mod tests {
             .unwrap()
             .iter()
             .any(|result| result["session_id"] == "fixture-session"));
+    }
+
+    #[test]
+    fn search_history_applies_default_snippet_length_when_omitted() {
+        let temp = tempdir().unwrap();
+        let home = temp.path().join("home");
+        init_home(&home).unwrap();
+        ingest_hook_event(
+            &home,
+            Tool::Claude,
+            json!({
+                "session_id": "snippet-default",
+                "hook_event_name": "UserPromptSubmit",
+                "message_id": "snippet-default-1",
+                "cwd": "/tmp/nabu-fixture",
+                "project_root": "/tmp/nabu-fixture",
+                "prompt": "nabu triage marker for snippet default"
+            }),
+        )
+        .unwrap();
+        index_once(&home).unwrap();
+
+        let value = tool_search_history(
+            &home,
+            &json!({
+                "query": "nabu triage marker",
+                "limit": 5
+            }),
+        )
+        .unwrap();
+
+        assert_eq!(
+            value["max_snippet_chars_applied"],
+            json!(DEFAULT_SEARCH_SNIPPET_CHARS)
+        );
+        assert_eq!(DEFAULT_SEARCH_SNIPPET_CHARS, 500);
+    }
+
+    #[test]
+    fn search_history_honors_override_and_clamps_above_maximum() {
+        let temp = tempdir().unwrap();
+        let home = temp.path().join("home");
+        init_home(&home).unwrap();
+        ingest_hook_event(
+            &home,
+            Tool::Claude,
+            json!({
+                "session_id": "snippet-clamp",
+                "hook_event_name": "UserPromptSubmit",
+                "message_id": "snippet-clamp-1",
+                "cwd": "/tmp/nabu-fixture",
+                "project_root": "/tmp/nabu-fixture",
+                "prompt": "nabu clamp marker for snippet override"
+            }),
+        )
+        .unwrap();
+        index_once(&home).unwrap();
+
+        let overridden = tool_search_history(
+            &home,
+            &json!({
+                "query": "nabu clamp marker",
+                "max_snippet_chars": 120
+            }),
+        )
+        .unwrap();
+        assert_eq!(overridden["max_snippet_chars_applied"], json!(120));
+
+        // Above the schema maximum the request is rejected before reaching core.
+        let rejected = tool_search_history(
+            &home,
+            &json!({
+                "query": "nabu clamp marker",
+                "max_snippet_chars": MAX_SEARCH_SNIPPET_CHARS + 1
+            }),
+        );
+        assert!(rejected.is_err());
+        assert_eq!(rejected.unwrap_err().code, "VALIDATION_ERROR");
+    }
+
+    #[test]
+    fn large_page_at_default_snippet_length_fits_response_budget() {
+        let temp = tempdir().unwrap();
+        let home = temp.path().join("home");
+        init_home(&home).unwrap();
+
+        // A long, repetitive body so each match-centered snippet saturates the
+        // default length, plus enough distinct events to fill the maximum page.
+        let body = "nabu budget marker ".repeat(400);
+        for index in 0..60 {
+            ingest_hook_event(
+                &home,
+                Tool::Claude,
+                json!({
+                    "session_id": format!("budget-{index}"),
+                    "hook_event_name": "UserPromptSubmit",
+                    "message_id": format!("budget-msg-{index}"),
+                    "cwd": "/tmp/nabu-fixture",
+                    "project_root": "/tmp/nabu-fixture",
+                    "prompt": format!("event {index} {body}")
+                }),
+            )
+            .unwrap();
+        }
+        index_once(&home).unwrap();
+
+        let value = tool_search_history(
+            &home,
+            &json!({
+                "query": "nabu budget marker",
+                "limit": 50
+            }),
+        )
+        .unwrap();
+
+        let serialized = serde_json::to_vec(&value).unwrap();
+        // A maxed-out 50-result page of saturated default-length snippets stays
+        // well inside the response budget: 50 x 500 chars plus per-result
+        // metadata is ~43 KiB against the ~256 KiB ceiling. `fit_search_response`
+        // therefore never has to drop results for size at the default.
+        assert!(
+            serialized.len() <= MAX_MCP_BYTES,
+            "fitted response is {} bytes, over the {MAX_MCP_BYTES}-byte budget",
+            serialized.len()
+        );
+        assert_eq!(value["max_snippet_chars_applied"], json!(500));
+
+        let results = value["results"].as_array().unwrap();
+        assert_eq!(results.len(), 50, "expected a full page");
+        // Every snippet honors the default cap (match-centered slices may end a
+        // few chars short on word/char boundaries, never over).
+        for result in results {
+            let snippet = result["snippet"].as_str().unwrap();
+            assert!(
+                snippet.chars().count() <= DEFAULT_SEARCH_SNIPPET_CHARS,
+                "snippet exceeds default cap: {} chars",
+                snippet.chars().count()
+            );
+        }
+        // 60 events were indexed but the page holds 50, so logical pagination
+        // (not budget trimming) marks it truncated with a forward cursor.
+        assert_eq!(value["truncated"], json!(true));
+        assert_eq!(value["continuation"]["next_offset"], json!(50));
     }
 
     #[test]
