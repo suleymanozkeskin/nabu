@@ -93,8 +93,10 @@ pub(crate) trait Prompter {
     /// Yes/no that supports Esc=back. `Ok(None)` = Esc.
     fn confirm_opt(&mut self, prompt: &str, default: bool) -> Result<Option<bool>>;
     /// Checklist over `options`; `checked` gives the initial per-option state.
-    /// Space toggles, Enter confirms, Esc=back. `Ok(None)` = Esc; otherwise the
-    /// chosen zero-based indices (possibly empty).
+    /// Driven entirely by Enter: ↑/↓ move, Enter toggles the row under the
+    /// cursor, and a leading "Continue" row commits the current selection.
+    /// Esc=back. `Ok(None)` = Esc; otherwise the chosen zero-based indices
+    /// (possibly empty).
     fn multi_select(
         &mut self,
         prompt: &str,
@@ -276,13 +278,62 @@ impl Prompter for TtyPrompter {
         options: &[&str],
         checked: &[bool],
     ) -> Result<Option<Vec<usize>>> {
-        dialoguer::MultiSelect::with_theme(&self.theme)
-            .with_prompt(prompt)
-            .items(options)
-            .defaults(checked)
-            .report(false)
-            .interact_opt()
-            .map_err(prompt_error)
+        // dialoguer's MultiSelect toggles with Space and commits with Enter — but
+        // everyone reaches for Enter to "pick" a row, which on a fully pre-checked
+        // list silently commits every item. This is a Select-driven checklist
+        // instead: ↑/↓ move, Enter toggles the row under the cursor, and a leading
+        // "Continue" row commits. Enter is the only action key; Space is never
+        // needed. The return contract is unchanged: the checked zero-based indices,
+        // or `None` on Esc.
+        let mut state: Vec<bool> = if checked.len() == options.len() {
+            checked.to_vec()
+        } else {
+            vec![false; options.len()]
+        };
+        // Cursor starts on "Continue" (row 0) so the all-default path is one Enter.
+        let mut cursor = 0usize;
+        loop {
+            let selected: Vec<&str> = options
+                .iter()
+                .zip(&state)
+                .filter_map(|(opt, &on)| on.then_some(*opt))
+                .collect();
+            let summary = if selected.is_empty() {
+                "Continue ▸ none selected".to_string()
+            } else {
+                format!("Continue ▸ {}", selected.join(", "))
+            };
+            let mut items: Vec<String> = Vec::with_capacity(options.len() + 1);
+            items.push(summary);
+            for (opt, &on) in options.iter().zip(&state) {
+                let mark = if on { "✔" } else { "⬚" };
+                items.push(format!("{mark} {opt}"));
+            }
+            let item_refs: Vec<&str> = items.iter().map(String::as_str).collect();
+            let choice = dialoguer::Select::with_theme(&self.theme)
+                .with_prompt(prompt)
+                .items(&item_refs)
+                .default(cursor)
+                .clear(true)
+                .report(false)
+                .interact_opt()
+                .map_err(prompt_error)?;
+            match choice {
+                None => return Ok(None), // Esc → back
+                Some(0) => {
+                    let indices = state
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(index, &on)| on.then_some(index))
+                        .collect();
+                    return Ok(Some(indices));
+                }
+                Some(row) => {
+                    state[row - 1] = !state[row - 1];
+                    cursor = row; // keep the cursor on the row just toggled
+                }
+            }
+        }
     }
 
     fn input(&mut self, prompt: &str, default: &str) -> Result<String> {
