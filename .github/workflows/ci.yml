@@ -48,7 +48,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install Rust 1.88
-        uses: dtolnay/rust-toolchain@1.88.0
+        uses: dtolnay/rust-toolchain@1.100.0
 
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
@@ -94,7 +94,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Install cargo-public-api
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@v2.81.10
         with:
           tool: cargo-public-api@0.52.0
 
