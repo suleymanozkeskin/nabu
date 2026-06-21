@@ -20,6 +20,7 @@
         "dedupe": { "type": "boolean", "default": true },
         "max_snippet_chars": { "type": "integer", "minimum": 1, "maximum": 1000, "default": 240 },
         "corroborate": { "type": "boolean", "default": false, "description": "When true, annotate results with local read-only git checks for mentioned commits, branches, and files. PR refs are unresolved with reason=needs_network; no fetch or forge call is made." },
+        "expand_concepts": { "type": "boolean", "default": false, "description": "When true, OR-expand query terms with curated concept synonyms (e.g. bug~error/failure, perf~latency) to widen lexical recall. Literal-term hits keep their ranking; only the candidate set grows." },
         "redact": { "type": "boolean", "default": false }
       },
       "required": ["query"],
@@ -101,6 +102,7 @@
         "before": { "type": "integer", "minimum": 0, "maximum": 20, "default": 5 },
         "after": { "type": "integer", "minimum": 0, "maximum": 20, "default": 5 },
         "corroborate": { "type": "boolean", "default": false, "description": "When true, annotate hits and context with local read-only git checks. PR refs are unresolved with reason=needs_network." },
+        "expand_concepts": { "type": "boolean", "default": false, "description": "When true, OR-expand query terms with curated concept synonyms (e.g. bug~error/failure) to widen lexical recall. Literal-term hits keep their ranking." },
         "redact": { "type": "boolean", "default": false }
       },
       "required": ["query"],
