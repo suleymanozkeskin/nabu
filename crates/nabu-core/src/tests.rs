@@ -3713,6 +3713,99 @@ fn session_context_window_clamps_and_wins_over_after_raw_line() {
 }
 
 #[test]
+fn session_page_cursor_resumes_without_gap_or_overlap() {
+    let temp = tempdir().unwrap();
+    let home = temp.path().join("home");
+    init_home(&home).unwrap();
+
+    let total = 7usize;
+    for line in 1..=total {
+        ingest_hook_event(
+            &home,
+            Tool::Claude,
+            json!({
+                "session_id": "paged-session",
+                "hook_event_name": "UserPromptSubmit",
+                "message_id": format!("paged-{line}"),
+                "cwd": "/tmp/nabu-fixture",
+                "project_root": "/tmp/nabu-fixture",
+                "prompt": format!("paged marker line {line}")
+            }),
+        )
+        .unwrap();
+    }
+    index_once(&home).unwrap();
+
+    // First page is smaller than the session, so it must truncate and hand back
+    // a forward cursor.
+    let first = get_session_page(
+        &home,
+        Tool::Claude,
+        "paged-session",
+        SessionOptions {
+            limit_events: 3,
+            ..SessionOptions::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(first.mode, "page");
+    assert!(first.truncated);
+    assert_eq!(first.events.len(), 3);
+    let cursor = first
+        .next_after_raw_line
+        .expect("truncated page must return a cursor");
+    assert_eq!(cursor, first.events.last().unwrap().raw_line);
+
+    // Walk the rest of the session through the cursor, collecting every raw_line.
+    let mut seen: Vec<i64> = first.events.iter().map(|event| event.raw_line).collect();
+    let mut after = cursor;
+    loop {
+        let page = get_session_page(
+            &home,
+            Tool::Claude,
+            "paged-session",
+            SessionOptions {
+                limit_events: 3,
+                after_raw_line: Some(after),
+                ..SessionOptions::default()
+            },
+        )
+        .unwrap();
+        // No overlap: every line is strictly past the previous cursor.
+        assert!(page.events.iter().all(|event| event.raw_line > after));
+        seen.extend(page.events.iter().map(|event| event.raw_line));
+        match page.next_after_raw_line {
+            Some(next) => {
+                assert!(page.truncated);
+                after = next;
+            }
+            None => {
+                assert!(!page.truncated);
+                break;
+            }
+        }
+    }
+
+    // The concatenated pages reconstruct the session exactly: no gap, no overlap.
+    let full: Vec<i64> = get_session_page(
+        &home,
+        Tool::Claude,
+        "paged-session",
+        SessionOptions {
+            limit_events: 500,
+            ..SessionOptions::default()
+        },
+    )
+    .unwrap()
+    .events
+    .iter()
+    .map(|event| event.raw_line)
+    .collect();
+    assert_eq!(seen, full);
+    assert_eq!(seen.len(), total);
+}
+
+#[test]
 fn search_dedupes_twins_only_at_retrieval_layer() {
     let temp = tempdir().unwrap();
     let home = temp.path().join("home");

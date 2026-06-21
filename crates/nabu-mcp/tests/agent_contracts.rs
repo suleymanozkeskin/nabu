@@ -482,6 +482,182 @@ fn get_session_oversize_response_keeps_cited_prefix() {
 }
 
 #[test]
+fn get_session_size_trim_cursor_matches_returned_events_and_resumes() {
+    // Many moderately large events: a single page is well over the 256 KiB MCP
+    // cap, so the response is trimmed for size. The forward cursor must point at
+    // the last event that actually fit — not at what core queried — so resuming
+    // loses nothing.
+    let temp = tempdir().unwrap();
+    let home = temp.path().join("home");
+    init_home(&home).unwrap();
+
+    let total = 20usize;
+    // ~30 KiB of text per event keeps a few events under the 256 KiB cap, forcing
+    // a multi-event trim (distinct from the single-oversize-event prefix case).
+    let filler = "size budget marker ".repeat(1_600);
+    for line in 1..=total {
+        ingest_hook_event(
+            &home,
+            Tool::Claude,
+            json!({
+                "session_id": "size-trim-session",
+                "hook_event_name": "UserPromptSubmit",
+                "message_id": format!("size-trim-{line}"),
+                "cwd": "/tmp/nabu-fixture",
+                "project_root": "/tmp/nabu-fixture",
+                "prompt": format!("event {line} {filler}")
+            }),
+        )
+        .unwrap();
+    }
+    index_once(&home).unwrap();
+
+    let get_page = |after_raw_line: i64| -> Value {
+        run_mcp(
+            &home,
+            vec![json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {
+                    "name": "get_session",
+                    "arguments": {
+                        "tool": "claude",
+                        "session_id": "size-trim-session",
+                        "limit_events": 500,
+                        "after_raw_line": after_raw_line
+                    }
+                }
+            })],
+        )[0]["result"]["structuredContent"]
+            .clone()
+    };
+
+    let first = get_page(0);
+    assert_eq!(first["truncated"], true);
+    assert_eq!(first["mcp_truncated"], true);
+    assert!(serde_json::to_vec(&first).unwrap().len() <= 256 * 1024);
+
+    let first_lines: Vec<i64> = first["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|event| event["raw_line"].as_i64().unwrap())
+        .collect();
+    // Size trim kept a strict, non-empty prefix: not zero, not the whole session.
+    assert!(!first_lines.is_empty());
+    assert!(first_lines.len() < total);
+
+    // The cursor reflects the events actually returned, not the queried set.
+    let cursor = first["next_after_raw_line"].as_i64().unwrap();
+    assert_eq!(cursor, *first_lines.last().unwrap());
+    assert_eq!(
+        first["continuation"]["next_after_raw_line"]
+            .as_i64()
+            .unwrap(),
+        cursor
+    );
+
+    // Resume from the cursor and keep paging until exhaustion, collecting lines.
+    let mut seen = first_lines.clone();
+    let mut after = cursor;
+    loop {
+        let page = get_page(after);
+        let lines: Vec<i64> = page["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|event| event["raw_line"].as_i64().unwrap())
+            .collect();
+        // No overlap with what the cursor already covered.
+        assert!(
+            lines.iter().all(|line| *line > after),
+            "overlap past cursor"
+        );
+        seen.extend(&lines);
+        match page["next_after_raw_line"].as_i64() {
+            Some(next) => after = next,
+            None => break,
+        }
+    }
+
+    // Every event is delivered exactly once across the pages: no gap, no overlap.
+    let expected: Vec<i64> = (1..=total as i64).collect();
+    assert_eq!(seen, expected);
+}
+
+#[test]
+fn get_session_window_size_trim_flags_clip_and_returns_cursor() {
+    // A context window (around_raw_line) that overflows the MCP cap must still
+    // hand back a forward cursor plus an explicit window_truncated flag so the
+    // caller is never left without a way to continue.
+    let temp = tempdir().unwrap();
+    let home = temp.path().join("home");
+    init_home(&home).unwrap();
+
+    let total = 20usize;
+    let filler = "window budget marker ".repeat(1_600);
+    for line in 1..=total {
+        ingest_hook_event(
+            &home,
+            Tool::Claude,
+            json!({
+                "session_id": "window-trim-session",
+                "hook_event_name": "UserPromptSubmit",
+                "message_id": format!("window-trim-{line}"),
+                "cwd": "/tmp/nabu-fixture",
+                "project_root": "/tmp/nabu-fixture",
+                "prompt": format!("event {line} {filler}")
+            }),
+        )
+        .unwrap();
+    }
+    index_once(&home).unwrap();
+
+    let structured = run_mcp(
+        &home,
+        vec![json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "get_session",
+                "arguments": {
+                    "tool": "claude",
+                    "session_id": "window-trim-session",
+                    "around_raw_line": 10,
+                    "before": 9,
+                    "after": 10
+                }
+            }
+        })],
+    )[0]["result"]["structuredContent"]
+        .clone();
+
+    assert_eq!(structured["mode"], "window");
+    assert_eq!(structured["mcp_truncated"], true);
+    assert_eq!(structured["window_truncated"], true);
+    assert!(serde_json::to_vec(&structured).unwrap().len() <= 256 * 1024);
+
+    let lines: Vec<i64> = structured["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|event| event["raw_line"].as_i64().unwrap())
+        .collect();
+    assert!(!lines.is_empty());
+    // Forward cursor matches the last returned event so reading can continue.
+    let cursor = structured["next_after_raw_line"].as_i64().unwrap();
+    assert_eq!(cursor, *lines.last().unwrap());
+    assert_eq!(
+        structured["continuation"]["next_after_raw_line"]
+            .as_i64()
+            .unwrap(),
+        cursor
+    );
+}
+
+#[test]
 fn get_event_oversize_response_preserves_raw_citation() {
     let temp = tempdir().unwrap();
     let home = temp.path().join("home");
