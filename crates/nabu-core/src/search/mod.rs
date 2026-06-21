@@ -7,11 +7,10 @@ pub(crate) mod corroborate;
 
 use crate::{
     expand_query_terms, native_jsonl_line_command, normalize_date_or_duration, open_index,
-    open_raw_offset_reader,
-    raw_envelope_for_line_scan, read_raw_envelope_at_offset, resolved_payload_for_envelope,
-    semantic_search_available, sha256_hex, vector_search_results, Error, RankedSearchResult,
-    Result, SearchContinuation, SearchMode, SearchOptions, SearchPage, SearchResult, Tool,
-    MAX_SEARCH_LIMIT, MAX_SEARCH_SNIPPET_CHARS,
+    open_raw_offset_reader, raw_envelope_for_line_scan, read_raw_envelope_at_offset,
+    resolved_payload_for_envelope, semantic_search_available, sha256_hex, vector_search_results,
+    Error, RankedSearchResult, Result, SearchContinuation, SearchMode, SearchOptions, SearchPage,
+    SearchResult, Tool, MAX_SEARCH_LIMIT, MAX_SEARCH_SNIPPET_CHARS,
 };
 pub(crate) use corroborate::corroborate_text;
 use rusqlite::params_from_iter;

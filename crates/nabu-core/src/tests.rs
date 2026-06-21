@@ -4761,6 +4761,113 @@ fn summary_kind_classifies_phase_handover_types_only() {
 
 #[test]
 fn search_flags_summary_events_and_not_ordinary_events() {
+    let temp = tempdir().unwrap();
+    let home = temp.path().join("home");
+    init_home(&home).unwrap();
+
+    // A session-start handover (summary-bearing canonical type).
+    ingest_hook_event(
+        &home,
+        Tool::Claude,
+        json!({
+            "session_id": "summary-surface-session",
+            "hook_event_name": "SessionStart",
+            "cwd": "/tmp/nabu-fixture",
+            "project_root": "/tmp/nabu-fixture",
+            "matter": "phase handover surfacing marker"
+        }),
+    )
+    .unwrap();
+    // An ordinary user message sharing the search term.
+    ingest_hook_event(
+        &home,
+        Tool::Claude,
+        json!({
+            "session_id": "summary-surface-session",
+            "hook_event_name": "UserPromptSubmit",
+            "message_id": "summary-surface-user-1",
+            "cwd": "/tmp/nabu-fixture",
+            "project_root": "/tmp/nabu-fixture",
+            "prompt": "phase handover surfacing marker followup"
+        }),
+    )
+    .unwrap();
+    index_once(&home).unwrap();
+
+    let results = search_history(&home, "phase handover surfacing marker", 10).unwrap();
+    assert!(results.len() >= 2, "expected both events, got {results:?}");
+
+    let summary_hit = results
+        .iter()
+        .find(|result| result.canonical_type == "session.started")
+        .expect("session.started hit present");
+    assert_eq!(summary_hit.summary_kind, Some(SummaryKind::SessionStart));
+    // Invariant #13: coordinates always present on every hit.
+    assert!(!summary_hit.raw_file.is_empty());
+    assert!(summary_hit.raw_offset.is_some());
+    assert_eq!(summary_hit.session_id, "summary-surface-session");
+
+    let ordinary_hit = results
+        .iter()
+        .find(|result| result.canonical_type == "user.message")
+        .expect("user.message hit present");
+    assert_eq!(ordinary_hit.summary_kind, None);
+}
+
+#[test]
+fn session_page_flags_summary_events() {
+    let temp = tempdir().unwrap();
+    let home = temp.path().join("home");
+    init_home(&home).unwrap();
+
+    ingest_hook_event(
+        &home,
+        Tool::Claude,
+        json!({
+            "session_id": "summary-page-session",
+            "hook_event_name": "SessionStart",
+            "cwd": "/tmp/nabu-fixture",
+            "matter": "session page summary marker"
+        }),
+    )
+    .unwrap();
+    ingest_hook_event(
+        &home,
+        Tool::Claude,
+        json!({
+            "session_id": "summary-page-session",
+            "hook_event_name": "UserPromptSubmit",
+            "message_id": "summary-page-user-1",
+            "cwd": "/tmp/nabu-fixture",
+            "prompt": "session page ordinary marker"
+        }),
+    )
+    .unwrap();
+    index_once(&home).unwrap();
+
+    let page = get_session_page(
+        &home,
+        Tool::Claude,
+        "summary-page-session",
+        SessionOptions::default(),
+    )
+    .unwrap();
+
+    let started = page
+        .events
+        .iter()
+        .find(|event| event.canonical_type == "session.started")
+        .expect("session.started event present");
+    assert_eq!(started.summary_kind, Some(SummaryKind::SessionStart));
+
+    let user = page
+        .events
+        .iter()
+        .find(|event| event.canonical_type == "user.message")
+        .expect("user.message event present");
+    assert_eq!(user.summary_kind, None);
+}
+
 // Issue #1 item 7: list_sessions must carry triage metadata derived from
 // already-indexed tables so a caller can pick a session without loading it.
 // Controlled by seeding a multi-event session with a known first prompt, a
@@ -4935,31 +5042,11 @@ fn list_sessions_truncates_long_first_user_prompt() {
     let home = temp.path().join("home");
     init_home(&home).unwrap();
 
-    // A session-start handover (summary-bearing canonical type).
     let long_prompt = "x".repeat(SESSION_PROMPT_SNIPPET_CHARS + 50);
     ingest_hook_event(
         &home,
         Tool::Claude,
         json!({
-            "session_id": "summary-surface-session",
-            "hook_event_name": "SessionStart",
-            "cwd": "/tmp/nabu-fixture",
-            "project_root": "/tmp/nabu-fixture",
-            "matter": "phase handover surfacing marker"
-        }),
-    )
-    .unwrap();
-    // An ordinary user message sharing the search term.
-    ingest_hook_event(
-        &home,
-        Tool::Claude,
-        json!({
-            "session_id": "summary-surface-session",
-            "hook_event_name": "UserPromptSubmit",
-            "message_id": "summary-surface-user-1",
-            "cwd": "/tmp/nabu-fixture",
-            "project_root": "/tmp/nabu-fixture",
-            "prompt": "phase handover surfacing marker followup"
             "session_id": "triage-long",
             "hook_event_name": "UserPromptSubmit",
             "message_id": "triage-long-1",
@@ -4969,78 +5056,6 @@ fn list_sessions_truncates_long_first_user_prompt() {
     .unwrap();
     index_once(&home).unwrap();
 
-    let results = search_history(&home, "phase handover surfacing marker", 10).unwrap();
-    assert!(results.len() >= 2, "expected both events, got {results:?}");
-
-    let summary_hit = results
-        .iter()
-        .find(|result| result.canonical_type == "session.started")
-        .expect("session.started hit present");
-    assert_eq!(summary_hit.summary_kind, Some(SummaryKind::SessionStart));
-    // Invariant #13: coordinates always present on every hit.
-    assert!(!summary_hit.raw_file.is_empty());
-    assert!(summary_hit.raw_offset.is_some());
-    assert_eq!(summary_hit.session_id, "summary-surface-session");
-
-    let ordinary_hit = results
-        .iter()
-        .find(|result| result.canonical_type == "user.message")
-        .expect("user.message hit present");
-    assert_eq!(ordinary_hit.summary_kind, None);
-}
-
-#[test]
-fn session_page_flags_summary_events() {
-    let temp = tempdir().unwrap();
-    let home = temp.path().join("home");
-    init_home(&home).unwrap();
-
-    ingest_hook_event(
-        &home,
-        Tool::Claude,
-        json!({
-            "session_id": "summary-page-session",
-            "hook_event_name": "SessionStart",
-            "cwd": "/tmp/nabu-fixture",
-            "matter": "session page summary marker"
-        }),
-    )
-    .unwrap();
-    ingest_hook_event(
-        &home,
-        Tool::Claude,
-        json!({
-            "session_id": "summary-page-session",
-            "hook_event_name": "UserPromptSubmit",
-            "message_id": "summary-page-user-1",
-            "cwd": "/tmp/nabu-fixture",
-            "prompt": "session page ordinary marker"
-        }),
-    )
-    .unwrap();
-    index_once(&home).unwrap();
-
-    let page = get_session_page(
-        &home,
-        Tool::Claude,
-        "summary-page-session",
-        SessionOptions::default(),
-    )
-    .unwrap();
-
-    let started = page
-        .events
-        .iter()
-        .find(|event| event.canonical_type == "session.started")
-        .expect("session.started event present");
-    assert_eq!(started.summary_kind, Some(SummaryKind::SessionStart));
-
-    let user = page
-        .events
-        .iter()
-        .find(|event| event.canonical_type == "user.message")
-        .expect("user.message event present");
-    assert_eq!(user.summary_kind, None);
     let sessions = list_sessions(&home, Some(Tool::Claude), None, None, 10).unwrap();
     let snippet = sessions[0]
         .first_user_prompt
