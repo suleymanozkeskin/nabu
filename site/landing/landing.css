@@ -106,7 +106,7 @@ body {
   font-family: var(--font-sans);
   font-size: var(--text-lg);
   line-height: var(--lh-normal);
-  color: var(--text-muted);
+  color: var(--text-body);
   max-width: 580px;
   margin: 0 auto var(--space-8);
 }
