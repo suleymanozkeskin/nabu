@@ -1,0 +1,12 @@
+{
+  "session_id": "fixture-session",
+  "transcript_path": "/tmp/harness-raven-fixture/claude/fixture-session.jsonl",
+  "cwd": "/tmp/harness-raven-fixture",
+  "project_root": "/tmp/harness-raven-fixture",
+  "hook_event_name": "PostToolBatch",
+  "turn_id": "fixture-turn-1",
+  "message_id": "fixture-tool-batch-1",
+  "tool_name": "Batch",
+  "output": "fixture batch output",
+  "status": "completed"
+}

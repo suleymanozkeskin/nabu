@@ -1,0 +1,112 @@
+{
+  "transport": "stdio",
+  "tools": {
+    "search_history": {
+      "type": "object",
+      "properties": {
+        "query": { "type": "string", "minLength": 1 },
+        "tool": { "type": "string", "enum": ["codex", "claude", "opencode", "all"], "description": "Restrict to one tool, or \"all\" for a single cross-tool search over codex, claude, and opencode. Omitting tool is equivalent to \"all\". Each hit still carries its own tool plus raw_file/raw_line/raw_offset/session_id coordinates." },
+        "session_id": { "type": "string" },
+        "cwd": { "type": "string" },
+        "since": { "type": "string" },
+        "canonical_type": { "type": "string" },
+        "file": { "type": "string" },
+        "command": { "type": "string" },
+        "mode": { "type": "string", "enum": ["auto", "lexical", "hybrid"], "default": "auto" },
+        "limit": { "type": "integer", "minimum": 1, "maximum": 50, "default": 10 },
+        "offset": { "type": "integer", "minimum": 0, "default": 0 },
+        "include_payload": { "type": "boolean", "default": false },
+        "include_deltas": { "type": "boolean", "default": false },
+        "dedupe": { "type": "boolean", "default": true },
+        "max_snippet_chars": { "type": "integer", "minimum": 1, "maximum": 1000, "default": 240 },
+        "corroborate": { "type": "boolean", "default": false, "description": "When true, annotate results with local read-only git checks for mentioned commits, branches, and files. PR refs are unresolved with reason=needs_network; no fetch or forge call is made." },
+        "expand_concepts": { "type": "boolean", "default": false, "description": "When true, OR-expand query terms with curated concept synonyms (e.g. bug~error/failure, perf~latency) to widen lexical recall. Literal-term hits keep their ranking; only the candidate set grows." },
+        "redact": { "type": "boolean", "default": false }
+      },
+      "required": ["query"],
+      "additionalProperties": false
+    },
+    "list_sessions": {
+      "type": "object",
+      "properties": {
+        "tool": { "type": "string", "enum": ["codex", "claude", "opencode", "all"], "description": "Restrict to one tool, or \"all\" to list sessions across codex, claude, and opencode in one call. Omitting tool is equivalent to \"all\"; each session still carries its own tool." },
+        "cwd": { "type": "string" },
+        "since": { "type": "string" },
+        "limit": { "type": "integer", "minimum": 1, "maximum": 100, "default": 20 }
+      },
+      "additionalProperties": false
+    },
+    "get_session": {
+      "type": "object",
+      "properties": {
+        "tool": { "type": "string", "enum": ["codex", "claude", "opencode"] },
+        "session_id": { "type": "string", "minLength": 1 },
+        "limit_events": { "type": "integer", "minimum": 1, "maximum": 500, "default": 100 },
+        "after_raw_line": { "type": "integer", "minimum": 0 },
+        "around_raw_line": { "type": "integer", "minimum": 1 },
+        "before": { "type": "integer", "minimum": 0, "maximum": 500, "default": 5 },
+        "after": { "type": "integer", "minimum": 0, "maximum": 500, "default": 5 },
+        "canonical_type": { "type": "string" },
+        "include_deltas": { "type": "boolean", "default": false },
+        "corroborate": { "type": "boolean", "default": false, "description": "When true, annotate events with local read-only git checks. PR refs are unresolved with reason=needs_network." },
+        "redact": { "type": "boolean", "default": false }
+      },
+      "required": ["tool", "session_id"],
+      "additionalProperties": false
+    },
+    "export_session": {
+      "type": "object",
+      "properties": {
+        "tool": { "type": "string", "enum": ["codex", "claude", "opencode"] },
+        "session_id": { "type": "string", "minLength": 1 },
+        "format": { "type": "string", "enum": ["markdown", "jsonl"], "default": "markdown" },
+        "redact": { "type": "boolean", "default": false }
+      },
+      "required": ["tool", "session_id"],
+      "additionalProperties": false
+    },
+    "get_event": {
+      "type": "object",
+      "properties": {
+        "tool": { "type": "string", "enum": ["codex", "claude", "opencode"] },
+        "session_id": { "type": "string", "minLength": 1 },
+        "raw_line": { "type": "integer", "minimum": 1 },
+        "raw_offset": { "type": "integer", "minimum": 0 },
+        "corroborate": { "type": "boolean", "default": false, "description": "When true, annotate the event with local read-only git checks. PR refs are unresolved with reason=needs_network." },
+        "redact": { "type": "boolean", "default": false }
+      },
+      "required": ["tool", "session_id"],
+      "additionalProperties": false
+    },
+    "history_doctor": {
+      "type": "object",
+      "properties": {
+        "tool": { "type": "string", "enum": ["codex", "claude", "opencode", "all"], "default": "all" },
+        "deep": { "type": "boolean", "default": false }
+      },
+      "additionalProperties": false
+    },
+    "recall_answer": {
+      "type": "object",
+      "properties": {
+        "query": { "type": "string", "minLength": 1 },
+        "tool": { "type": "string", "enum": ["codex", "claude", "opencode", "all"], "description": "Restrict to one tool, or \"all\" to gather cited context across codex, claude, and opencode in one call. Omitting tool is equivalent to \"all\"; each hit still carries its own tool and coordinates." },
+        "session_id": { "type": "string" },
+        "cwd": { "type": "string" },
+        "since": { "type": "string" },
+        "canonical_type": { "type": "string" },
+        "file": { "type": "string" },
+        "command": { "type": "string" },
+        "mode": { "type": "string", "enum": ["auto", "lexical", "hybrid"], "default": "auto" },
+        "limit": { "type": "integer", "minimum": 1, "maximum": 10, "default": 5 },
+        "before": { "type": "integer", "minimum": 0, "maximum": 20, "default": 5 },
+        "after": { "type": "integer", "minimum": 0, "maximum": 20, "default": 5 },
+        "corroborate": { "type": "boolean", "default": false, "description": "When true, annotate hits and context with local read-only git checks. PR refs are unresolved with reason=needs_network." },
+        "expand_concepts": { "type": "boolean", "default": false, "description": "When true, OR-expand query terms with curated concept synonyms (e.g. bug~error/failure) to widen lexical recall. Literal-term hits keep their ranking." },
+        "redact": { "type": "boolean", "default": false }
+      },
+      "required": ["query"],
+      "additionalProperties": false
+    }
+  }
+}

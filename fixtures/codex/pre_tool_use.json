@@ -1,0 +1,10 @@
+{
+  "session_id": "fixture-session",
+  "transcript_path": "/tmp/harness-raven-fixture/codex/fixture-session.jsonl",
+  "cwd": "/tmp/harness-raven-fixture",
+  "project_root": "/tmp/harness-raven-fixture",
+  "hook_event_name": "PreToolUse",
+  "message_id": "codex-tool-call-1",
+  "tool_name": "shell",
+  "input": "printf codex fixture marker"
+}

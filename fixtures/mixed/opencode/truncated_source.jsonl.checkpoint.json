@@ -1,0 +1,10 @@
+{
+  "source_tool": "opencode",
+  "source_kind": "raw_jsonl",
+  "source_path": "fixtures/mixed/opencode/truncated_source.jsonl",
+  "source_identity": null,
+  "session_id": "fixture-session",
+  "byte_offset": 9999,
+  "last_line_hash": null,
+  "last_successful_import_timestamp": "2026-06-17T12:00:00Z"
+}

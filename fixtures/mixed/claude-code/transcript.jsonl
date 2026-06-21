@@ -1,0 +1,1 @@
+{"session_id":"fixture-session","cwd":"/tmp/harness-raven-fixture","project_root":"/tmp/harness-raven-fixture","type":"claude.transcript.assistant","canonical_type":"assistant.message","event_id":"claude-backfill-1","message":"Claude transcript includes the backfill fixture marker."}

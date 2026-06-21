@@ -1,0 +1,10 @@
+{
+  "source_tool": "codex",
+  "source_kind": "transcript",
+  "source_path": "fixtures/codex/app-server-notifications.jsonl",
+  "source_identity": null,
+  "session_id": "fixture-session",
+  "byte_offset": 1535,
+  "last_line_hash": "5f7ba4722dd43dbc8b88cf131635273a14848b2a9c8509a9f250dcca26f5bcca",
+  "last_successful_import_timestamp": "2026-06-17T14:57:54.165146Z"
+}

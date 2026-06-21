@@ -1,0 +1,37 @@
+[package]
+name = "nabu-core"
+description = "Core storage, indexing, and search for nabu: append-only JSONL capture and a rebuildable SQLite FTS5 index for coding-agent history."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
+
+[features]
+default = []
+semantic = ["dep:fastembed", "dep:hf-hub", "dep:libc", "dep:sqlite-vec"]
+
+[dependencies]
+fastembed = { workspace = true, optional = true }
+fs2.workspace = true
+hf-hub = { workspace = true, optional = true }
+hex.workspace = true
+libc = { workspace = true, optional = true }
+rayon.workspace = true
+regex.workspace = true
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+sqlite-vec = { workspace = true, optional = true }
+thiserror.workspace = true
+time.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+tempfile.workspace = true

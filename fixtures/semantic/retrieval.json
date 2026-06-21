@@ -1,0 +1,67 @@
+{
+  "schema_version": 1,
+  "tool": "claude",
+  "session_id": "semantic-retrieval-fixture",
+  "cwd": "/tmp/tupsharrum-semantic-fixture",
+  "project_root": "/tmp/tupsharrum-semantic-fixture",
+  "events": [
+    {
+      "event_id": "sem-auth-renewal",
+      "role": "assistant",
+      "text": "Session renewal now refreshes expired credentials before protected requests resume."
+    },
+    {
+      "event_id": "sem-websocket-heartbeat",
+      "role": "assistant",
+      "text": "Added heartbeat recovery for websocket channels when laptops wake from suspend."
+    },
+    {
+      "event_id": "sem-invoice-rounding",
+      "role": "assistant",
+      "text": "Invoice totals now use decimal arithmetic so generated PDFs avoid one-cent drift."
+    },
+    {
+      "event_id": "sem-permission-cache",
+      "role": "assistant",
+      "text": "Permission cache invalidation now runs after role assignment changes."
+    },
+    {
+      "event_id": "sem-worker-retry",
+      "role": "assistant",
+      "text": "Background worker retries now persist the next attempt timestamp before releasing the job lock."
+    },
+    {
+      "event_id": "sem-theme-contrast",
+      "role": "assistant",
+      "text": "Adjusted the dark theme palette so disabled controls remain readable against modal surfaces."
+    },
+    {
+      "event_id": "sem-export-redaction",
+      "role": "assistant",
+      "text": "Markdown export now redacts bearer tokens while preserving surrounding handoff context."
+    },
+    {
+      "event_id": "sem-opencode-url",
+      "role": "assistant",
+      "text": "OpenCode reconciliation reads the configured local server URL and skips network checks when it is unset."
+    }
+  ],
+  "queries": [
+    {
+      "query": "login timeout keeps sending people back to sign in",
+      "relevant_event_ids": ["sem-auth-renewal"]
+    },
+    {
+      "query": "realtime connection drops after sleep",
+      "relevant_event_ids": ["sem-websocket-heartbeat"]
+    },
+    {
+      "query": "billing receipt cents are wrong",
+      "relevant_event_ids": ["sem-invoice-rounding"]
+    },
+    {
+      "query": "permission cache invalidation",
+      "relevant_event_ids": ["sem-permission-cache"]
+    }
+  ]
+}

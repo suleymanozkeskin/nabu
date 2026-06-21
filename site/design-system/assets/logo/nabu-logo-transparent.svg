@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="654" height="420" viewBox="0 0 654 420">
+  <defs>
+    <linearGradient id="gold" x1="46" y1="0" x2="608" y2="0" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#8a5a23"></stop>
+      <stop offset="0.5" stop-color="#d9a23f"></stop>
+      <stop offset="1" stop-color="#f1d18a"></stop>
+    </linearGradient>
+  </defs>
+
+  <polygon points="31.0,126.0 40.0,258.0 52.0,258.0 61.0,126.0" fill="url(#gold)"></polygon>
+  <polygon points="46.0,141.0 140.0,132.0 140.0,120.0 46.0,111.0" fill="url(#gold)"></polygon>
+  <polygon points="125.0,126.0 134.0,258.0 146.0,258.0 155.0,126.0" fill="url(#gold)"></polygon>
+  <polygon points="202.0,141.0 296.0,132.0 296.0,120.0 202.0,111.0" fill="url(#gold)"></polygon>
+  <polygon points="281.0,126.0 290.0,258.0 302.0,258.0 311.0,126.0" fill="url(#gold)"></polygon>
+  <polygon points="202.0,209.6 296.0,200.6 296.0,188.6 202.0,179.6" fill="url(#gold)"></polygon>
+  <polygon points="187.0,194.6 196.0,258.0 208.0,258.0 217.0,194.6" fill="url(#gold)"></polygon>
+  <polygon points="202.0,273.0 296.0,264.0 296.0,252.0 202.0,243.0" fill="url(#gold)"></polygon>
+  <polygon points="343.0,46.0 352.0,258.0 364.0,258.0 373.0,46.0" fill="url(#gold)"></polygon>
+  <polygon points="358.0,209.6 452.0,200.6 452.0,188.6 358.0,179.6" fill="url(#gold)"></polygon>
+  <polygon points="437.0,194.6 446.0,258.0 458.0,258.0 467.0,194.6" fill="url(#gold)"></polygon>
+  <polygon points="358.0,273.0 452.0,264.0 452.0,252.0 358.0,243.0" fill="url(#gold)"></polygon>
+  <polygon points="499.0,126.0 508.0,258.0 520.0,258.0 529.0,126.0" fill="url(#gold)"></polygon>
+  <polygon points="593.0,126.0 602.0,258.0 614.0,258.0 623.0,126.0" fill="url(#gold)"></polygon>
+  <polygon points="514.0,273.0 608.0,264.0 608.0,252.0 514.0,243.0" fill="url(#gold)"></polygon>
+  <text x="327" y="360" text-anchor="middle" font-family="'Noto Sans Cuneiform','Segoe UI Historic',serif" font-size="70" fill="#d9a23f" letter-spacing="14">𒀭𒀝</text>
+</svg>

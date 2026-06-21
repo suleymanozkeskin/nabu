@@ -1,0 +1,9 @@
+{
+  "session_id": "fixture-session",
+  "transcript_path": "/tmp/harness-raven-fixture/codex/fixture-session.jsonl",
+  "cwd": "/tmp/harness-raven-fixture",
+  "project_root": "/tmp/harness-raven-fixture",
+  "hook_event_name": "PreCompact",
+  "message_id": "codex-pre-compact",
+  "trigger": "manual"
+}

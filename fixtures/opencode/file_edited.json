@@ -1,0 +1,9 @@
+{
+  "session_id": "fixture-session",
+  "cwd": "/tmp/harness-raven-fixture",
+  "project_root": "/tmp/harness-raven-fixture",
+  "hook_event_name": "file.edited",
+  "id": "opencode-file-edited-1",
+  "path": "src/example.rs",
+  "text": "opencode fixture marker"
+}

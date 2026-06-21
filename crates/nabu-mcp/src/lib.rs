@@ -1,0 +1,2515 @@
+//! Model Context Protocol (MCP) server for the `nabu` CLI: exposes the local
+//! history index to coding agents over stdio.
+//!
+//! This crate is published only so the `nabu` binary (the `nabu-cli` crate)
+//! resolves its dependencies. It is not a stable public API — items may change
+//! or be removed in any release with no semver guarantee. Depend on the `nabu`
+//! CLI, not on this crate directly.
+#![doc(hidden)]
+
+use nabu_core::{
+    doctor_with_options, export_session_jsonl_with_options, export_session_markdown_with_options,
+    get_event_by_pointer_with_options, get_session_page, list_sessions, redact_export_json,
+    redact_export_text, search_history_page, Error, EventOptions, SearchMode, SearchOptions,
+    SearchResult, SessionOptions, StoredEvent, Tool, DEFAULT_SEARCH_SNIPPET_CHARS,
+    MAX_SEARCH_SNIPPET_CHARS,
+};
+use serde_json::{json, Value};
+use std::io::{BufRead, Write};
+use std::panic::{self, AssertUnwindSafe};
+use std::path::{Path, PathBuf};
+use std::str::FromStr;
+use std::sync::mpsc::{channel, sync_channel};
+use std::sync::{Arc, Mutex};
+use std::thread;
+
+pub use nabu_core as core;
+
+const PROTOCOL_VERSION: &str = "2025-03-26";
+const MAX_MCP_BYTES: usize = 256 * 1024;
+const JSON_FIT_SAFETY_BYTES: usize = 2048;
+const DEFAULT_MCP_DEEP_DOCTOR_MAX_BYTES: u64 = 500 * 1024 * 1024;
+
+/// Fallback ceiling on MCP requests handled in parallel when the host CPU count
+/// is unavailable. Coding agents routinely issue several tool calls at once.
+const DEFAULT_MAX_CONCURRENCY: usize = 8;
+
+/// How many MCP requests may be handled concurrently. `NABU_MCP_MAX_CONCURRENCY`
+/// overrides; otherwise scale to the host CPU count, clamped to a sane band.
+fn max_concurrency() -> usize {
+    if let Some(value) = std::env::var("NABU_MCP_MAX_CONCURRENCY")
+        .ok()
+        .and_then(|raw| raw.parse::<usize>().ok())
+        .filter(|&n| n > 0)
+    {
+        return value;
+    }
+    thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(DEFAULT_MAX_CONCURRENCY)
+        .clamp(2, 16)
+}
+
+fn mcp_deep_doctor_max_bytes() -> Option<u64> {
+    match std::env::var("NABU_MCP_DEEP_DOCTOR_MAX_BYTES")
+        .ok()
+        .and_then(|raw| raw.parse::<u64>().ok())
+    {
+        Some(0) => None,
+        Some(value) => Some(value),
+        None => Some(DEFAULT_MCP_DEEP_DOCTOR_MAX_BYTES),
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ResponseBudget {
+    used_bytes: usize,
+    limit_bytes: usize,
+}
+
+impl ResponseBudget {
+    fn from_base(base: &Value) -> Option<Self> {
+        let used_bytes = serde_json::to_vec(base).ok()?.len();
+        Some(Self {
+            used_bytes,
+            limit_bytes: MAX_MCP_BYTES.saturating_sub(JSON_FIT_SAFETY_BYTES),
+        })
+    }
+
+    fn try_reserve_value(&mut self, value: &Value, separator_bytes: usize) -> bool {
+        let Ok(serialized) = serde_json::to_vec(value) else {
+            return false;
+        };
+        let next = self
+            .used_bytes
+            .saturating_add(separator_bytes)
+            .saturating_add(serialized.len());
+        if next > self.limit_bytes {
+            return false;
+        }
+        self.used_bytes = next;
+        true
+    }
+}
+
+#[derive(Debug, Clone)]
+struct RecallWindow {
+    start: i64,
+    end: i64,
+    events: Option<Vec<StoredEvent>>,
+}
+
+pub fn serve_stdio(home: PathBuf) -> nabu_core::Result<()> {
+    // Pass the unlocked `Stdout` (it is `Send`, unlike `StdoutLock`) so the
+    // writer can run on its own thread; the reader keeps the `StdinLock` on this
+    // thread, where `Send` is not required.
+    serve_with_io(home, std::io::stdin().lock(), std::io::stdout())
+}
+
+pub fn serve_with_io<R, W>(home: PathBuf, reader: R, writer: W) -> nabu_core::Result<()>
+where
+    R: BufRead,
+    W: Write + Send,
+{
+    // Concurrent request handling. A serial loop made every later request wait
+    // behind the current one, so one slow tool call (e.g. a multi-minute
+    // `history_doctor` deep integrity scan on a multi-GB index, or a large
+    // export) stalled all search/list calls and clients timed out. JSON-RPC
+    // permits out-of-order responses keyed by `id`, handlers are stateless, and
+    // each opens its own SQLite connection against a WAL index, so requests are
+    // safe to run in parallel.
+    //
+    // Layout: this thread reads stdin and feeds a bounded work queue; a pool of
+    // worker threads handle requests; a single writer thread serializes every
+    // response onto the output stream (one consumer means responses never
+    // interleave). `thread::scope` lets the writer borrow non-`'static` writers.
+    let workers = max_concurrency();
+    // Bound the queue so a flood of input cannot buffer without limit: once the
+    // pool is saturated the reader blocks here, applying backpressure upstream.
+    let (work_tx, work_rx) = sync_channel::<String>(workers);
+    let work_rx = Arc::new(Mutex::new(work_rx));
+    let (resp_tx, resp_rx) = channel::<Value>();
+    let home = &home;
+
+    thread::scope(|scope| -> nabu_core::Result<()> {
+        let writer_handle = scope.spawn(move || -> nabu_core::Result<()> {
+            let mut writer = writer;
+            for response in resp_rx {
+                serde_json::to_writer(&mut writer, &response)?;
+                writer.write_all(b"\n").map_err(|source| Error::Io {
+                    path: PathBuf::from("<stdout>"),
+                    source,
+                })?;
+                writer.flush().map_err(|source| Error::Io {
+                    path: PathBuf::from("<stdout>"),
+                    source,
+                })?;
+            }
+            Ok(())
+        });
+
+        for _ in 0..workers {
+            let work_rx = Arc::clone(&work_rx);
+            let resp_tx = resp_tx.clone();
+            scope.spawn(move || loop {
+                // Hold the queue lock only to dequeue; a closed channel (reader
+                // done) returns `Err`, which ends the worker.
+                let line = {
+                    let rx = work_rx.lock().expect("work queue mutex poisoned");
+                    rx.recv()
+                };
+                let Ok(line) = line else { break };
+                if let Some(response) = handle_message_safely(home, &line) {
+                    // A send error means the writer thread is gone (shutdown).
+                    if resp_tx.send(response).is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+        // Drop this thread's response sender so the writer can finish once every
+        // worker has dropped its clone.
+        drop(resp_tx);
+
+        let mut read_result = Ok(());
+        for line in reader.lines() {
+            let line = match line {
+                Ok(line) => line,
+                Err(source) => {
+                    read_result = Err(Error::Io {
+                        path: PathBuf::from("<stdin>"),
+                        source,
+                    });
+                    break;
+                }
+            };
+            if line.trim().is_empty() {
+                continue;
+            }
+            // A send error means every worker has exited; stop reading.
+            if work_tx.send(line).is_err() {
+                break;
+            }
+        }
+        // Closing the work queue drains the pool; workers then drop their
+        // response senders, which lets the writer thread reach EOF and return.
+        drop(work_tx);
+
+        let write_result = writer_handle.join().expect("writer thread panicked");
+        read_result.and(write_result)
+    })
+}
+
+fn handle_message_safely(home: &Path, line: &str) -> Option<Value> {
+    match panic::catch_unwind(AssertUnwindSafe(|| handle_message(home, line))) {
+        Ok(Ok(response)) => response,
+        Ok(Err(error)) => Some(protocol_error_response(line, error)),
+        Err(_) => Some(error_response(
+            request_id_or_null(line),
+            -32603,
+            "internal error",
+            json!({
+                "code": "internal_error",
+                "message": "MCP request handler panicked",
+                "recoverable": true
+            }),
+        )),
+    }
+}
+
+fn handle_message(home: &Path, line: &str) -> nabu_core::Result<Option<Value>> {
+    let request: Value = serde_json::from_str(line)?;
+    let id = request.get("id").cloned();
+    let method = request
+        .get("method")
+        .and_then(Value::as_str)
+        .ok_or_else(|| Error::Validation("json-rpc method is required".to_string()))?;
+
+    if id.is_none() {
+        return Ok(None);
+    }
+
+    let id = id.expect("checked");
+    let params = request.get("params").cloned().unwrap_or_else(|| json!({}));
+    let response = match method {
+        "initialize" => ok_response(
+            id,
+            json!({
+                "protocolVersion": PROTOCOL_VERSION,
+                "capabilities": {
+                    "tools": {},
+                    "resources": {},
+                    "prompts": {}
+                },
+                "serverInfo": {
+                    "name": "nabu",
+                    "version": env!("CARGO_PKG_VERSION")
+                }
+            }),
+        ),
+        "ping" => ok_response(id, json!({})),
+        "tools/list" => ok_response(id, json!({ "tools": tool_descriptions() })),
+        "tools/call" => ok_response(id, handle_tool_call(home, &params)),
+        "resources/list" => ok_response(id, json!({ "resources": resource_descriptions() })),
+        "resources/read" => ok_response(id, handle_resource_read(home, &params)),
+        "prompts/list" => ok_response(id, json!({ "prompts": prompt_descriptions() })),
+        "prompts/get" => ok_response(id, handle_prompt_get(&params)),
+        _ => error_response(
+            id,
+            -32601,
+            "method not found",
+            json!({
+                "code": "method_not_found",
+                "message": format!("unsupported MCP method: {method}"),
+                "recoverable": true
+            }),
+        ),
+    };
+    Ok(Some(response))
+}
+
+fn request_id_or_null(line: &str) -> Value {
+    serde_json::from_str::<Value>(line)
+        .ok()
+        .and_then(|request| request.get("id").cloned())
+        .unwrap_or(Value::Null)
+}
+
+fn protocol_error_response(line: &str, error: Error) -> Value {
+    let id = request_id_or_null(line);
+    match error {
+        Error::Json(source) => {
+            let (code, message, data_code) = if source.is_syntax() || source.is_eof() {
+                (-32700, "parse error", "parse_error")
+            } else {
+                (-32600, "invalid request", "invalid_request")
+            };
+            error_response(
+                id,
+                code,
+                message,
+                json!({
+                    "code": data_code,
+                    "message": source.to_string(),
+                    "recoverable": true
+                }),
+            )
+        }
+        Error::Validation(message) => error_response(
+            id,
+            -32600,
+            "invalid request",
+            json!({
+                "code": "invalid_request",
+                "message": message,
+                "recoverable": true
+            }),
+        ),
+        error => error_response(
+            id,
+            -32603,
+            "internal error",
+            json!({
+                "code": "internal_error",
+                "message": error.to_string(),
+                "recoverable": true
+            }),
+        ),
+    }
+}
+
+fn ok_response(id: Value, result: Value) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "result": result
+    })
+}
+
+fn error_response(id: Value, code: i64, message: &str, data: Value) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "error": {
+            "code": code,
+            "message": message,
+            "data": data
+        }
+    })
+}
+
+fn tool_descriptions() -> Value {
+    json!([
+        {
+            "name": "search_history",
+            "description": "Search indexed local agent history citation-first: returns score, snippet, tool, session_id, raw_line, and payload=null by default. Searches every tool (codex, claude, opencode) in one call by default; pass tool=\"all\" for the explicit cross-tool form or a specific tool name to narrow — do not fan out one query per tool. Each hit carries its own tool plus raw_file/raw_line/raw_offset/session_id. Drill into hits with get_session around_raw_line/before/after, get_event, or include_payload=true for full payloads. Page with offset; include_deltas restores deltas; dedupe=false restores adjacent twin rows. Set corroborate=true to add local read-only git existence checks for mentioned commits, branches, and files; PR refs are reported unresolved/needs_network and never fetched. Use this for controllable, interactive drill-down; if you instead want ranked hits plus their surrounding context assembled in one cited call, use recall_answer.",
+            "inputSchema": tool_schema("search_history")
+        },
+        {
+            "name": "list_sessions",
+            "description": "List recent captured sessions with triage metadata: first_user_prompt (what the session was about), last_canonical_type (what state it ended in), top_tools and top_files (what it did), plus event/message/tool/compaction counts, timestamps, and raw-file pointers. Lists across every tool by default; pass tool=\"all\" for the explicit cross-tool form or a specific tool name to narrow. Triage which session to open from this output alone, then drill in with get_session or export_session.",
+            "inputSchema": tool_schema("list_sessions")
+        },
+        {
+            "name": "get_session",
+            "description": "Read a faithful non-deduped page or context window from one session. Page forward from after_raw_line (default 0 reads from the start); when more events remain the response sets truncated=true and returns next_after_raw_line (mirrored in continuation.next_after_raw_line) — call again with after_raw_line=next_after_raw_line to resume with no gap or overlap, until truncated=false. The cursor always reflects the events actually returned, including when a large page is trimmed to the MCP size cap, so resuming never skips events. Use around_raw_line with before/after to inspect context around a search hit; a window clipped by the size cap sets window_truncated=true and still returns a forward next_after_raw_line. include_deltas=true restores assistant deltas. Set corroborate=true for local read-only git annotations; PR refs require network and remain unresolved.",
+            "inputSchema": tool_schema("get_session")
+        },
+        {
+            "name": "export_session",
+            "description": "Export one session as Markdown or JSONL for agent handoff.",
+            "inputSchema": tool_schema("export_session")
+        },
+        {
+            "name": "get_event",
+            "description": "Read one raw envelope and normalized text by raw pointer. Set corroborate=true for local read-only git annotations; PR refs require network and remain unresolved.",
+            "inputSchema": tool_schema("get_event")
+        },
+        {
+            "name": "history_doctor",
+            "description": "Report fast local health by default using an O(1) structural index check and latest-event citations; pass deep=true for full SQLite integrity (scans the whole index) and counts. Over MCP, deep=true is refused when the index exceeds NABU_MCP_DEEP_DOCTOR_MAX_BYTES (default 500 MiB).",
+            "inputSchema": tool_schema("history_doctor")
+        },
+        {
+            "name": "recall_answer",
+            "description": "One-shot: assemble cited context windows for a question in a single read-only call. Runs the search_history ranking, then for each hit attaches the surrounding before/after events from that session. Every hit and every context event carries tool, session_id, raw_file, raw_line, and raw_offset so the caller can cite without a follow-up. It does not write an answer, call an LLM, mutate history, or make network requests. Set corroborate=true to annotate hits/context with local read-only git existence checks; PR refs remain unresolved/needs_network. Reach for this when you want ranked hits plus their context in one shot for a cited handoff. Prefer search_history then get_session when you need controllable, interactive drill-down: paging, picking exact raw lines, restoring deltas, or widening one window without re-ranking.",
+            "inputSchema": tool_schema("recall_answer")
+        }
+    ])
+}
+
+fn handle_tool_call(home: &Path, params: &Value) -> Value {
+    let name = params.get("name").and_then(Value::as_str).unwrap_or("");
+    let arguments = params
+        .get("arguments")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+
+    match call_tool(home, name, &arguments) {
+        Ok(structured) => tool_success(name, structured),
+        Err(error) => tool_failure(error),
+    }
+}
+
+fn call_tool(home: &Path, name: &str, arguments: &Value) -> Result<Value, ToolError> {
+    match name {
+        "search_history" => tool_search_history(home, arguments),
+        "list_sessions" => tool_list_sessions(home, arguments),
+        "get_session" => tool_get_session(home, arguments),
+        "export_session" => tool_export_session(home, arguments),
+        "get_event" => tool_get_event(home, arguments),
+        "history_doctor" => tool_history_doctor(home, arguments),
+        "recall_answer" => tool_recall_answer(home, arguments),
+        _ => Err(ToolError::new(
+            "VALIDATION_ERROR",
+            format!("unknown MCP tool: {name}"),
+            true,
+        )),
+    }
+}
+
+fn tool_success(name: &str, structured: Value) -> Value {
+    let summary = concise_summary(name, &structured);
+    let allow_oversized = name == "export_session"
+        && structured.get("format").and_then(Value::as_str) == Some("jsonl");
+    let structured = enforce_size_bound(structured, allow_oversized);
+    json!({
+        "content": [
+            {
+                "type": "text",
+                "text": summary
+            }
+        ],
+        "structuredContent": structured,
+        "isError": false
+    })
+}
+
+fn tool_failure(error: ToolError) -> Value {
+    let error = json!({
+        "code": error.code,
+        "message": error.message,
+        "recoverable": error.recoverable,
+        "hint": error.hint,
+        "details": error.details
+    });
+    json!({
+        "content": [
+            {
+                "type": "text",
+                "text": error["message"]
+            }
+        ],
+        "structuredContent": {
+            "ok": false,
+            "error": error
+        },
+        "isError": true
+    })
+}
+
+fn tool_search_history(home: &Path, arguments: &Value) -> Result<Value, ToolError> {
+    let query = required_string(arguments, "query")?;
+    if query.trim().is_empty() {
+        return Err(ToolError::new(
+            "VALIDATION_ERROR",
+            "query must not be empty",
+            true,
+        ));
+    }
+    let limit = clamped_usize(arguments, "limit", 10, 1, 50)?;
+    let offset = optional_usize_min(arguments, "offset", 0)?.unwrap_or(0);
+    let max_snippet_chars = clamped_usize(
+        arguments,
+        "max_snippet_chars",
+        DEFAULT_SEARCH_SNIPPET_CHARS,
+        1,
+        MAX_SEARCH_SNIPPET_CHARS,
+    )?;
+    let options = SearchOptions {
+        tool: optional_tool(arguments, "tool")?,
+        session_id: optional_string(arguments, "session_id"),
+        cwd: optional_string(arguments, "cwd"),
+        since: optional_string(arguments, "since"),
+        canonical_type: optional_string(arguments, "canonical_type"),
+        file: optional_string(arguments, "file"),
+        command: optional_string(arguments, "command"),
+        ref_filter: optional_string(arguments, "ref"),
+        limit,
+        offset,
+        include_payload: optional_bool(arguments, "include_payload", false),
+        include_deltas: optional_bool(arguments, "include_deltas", false),
+        dedupe: optional_bool(arguments, "dedupe", true),
+        max_snippet_chars,
+        mode: optional_search_mode(arguments)?,
+        corroborate: optional_bool(arguments, "corroborate", false),
+        expand_concepts: optional_bool(arguments, "expand_concepts", false),
+    };
+    let redact = optional_bool(arguments, "redact", false);
+    let mut value = serde_json::to_value(search_history_page(home, query, options)?)?;
+    if redact {
+        redact_result_snippets(&mut value);
+    }
+    Ok(fit_search_response(value))
+}
+
+fn tool_list_sessions(home: &Path, arguments: &Value) -> Result<Value, ToolError> {
+    let limit = bounded_usize(arguments, "limit", 20, 1, 100)?;
+    let sessions = list_sessions(
+        home,
+        optional_tool(arguments, "tool")?,
+        optional_string(arguments, "cwd").as_deref(),
+        optional_string(arguments, "since").as_deref(),
+        limit,
+    )?;
+    Ok(json!({ "sessions": sessions }))
+}
+
+fn tool_get_session(home: &Path, arguments: &Value) -> Result<Value, ToolError> {
+    let tool = required_tool(arguments, "tool")?;
+    let session_id = required_string(arguments, "session_id")?;
+    let limit_events = clamped_usize(arguments, "limit_events", 100, 1, 500)?;
+    let after_raw_line = optional_i64_min(arguments, "after_raw_line", 0)?;
+    let around_raw_line = optional_i64_min(arguments, "around_raw_line", 1)?;
+    let before = clamped_usize(arguments, "before", 5, 0, 500)?;
+    let after = clamped_usize(arguments, "after", 5, 0, 500)?;
+    let redact = optional_bool(arguments, "redact", false);
+    let value = serde_json::to_value(get_session_page(
+        home,
+        tool,
+        session_id,
+        SessionOptions {
+            limit_events,
+            after_raw_line,
+            around_raw_line,
+            before,
+            after,
+            include_deltas: optional_bool(arguments, "include_deltas", false),
+            canonical_type: optional_string(arguments, "canonical_type"),
+            redact,
+            corroborate: optional_bool(arguments, "corroborate", false),
+        },
+    )?)?;
+    Ok(fit_session_response(value))
+}
+
+fn tool_export_session(home: &Path, arguments: &Value) -> Result<Value, ToolError> {
+    let tool = required_tool(arguments, "tool")?;
+    let session_id = required_string(arguments, "session_id")?;
+    let format = optional_string(arguments, "format").unwrap_or_else(|| "markdown".to_string());
+    let redact = optional_bool(arguments, "redact", false);
+    let content = match format.as_str() {
+        "markdown" => export_session_markdown_with_options(home, tool, session_id, redact)?,
+        "jsonl" => export_session_jsonl_with_options(home, tool, session_id, redact)?,
+        _ => {
+            return Err(ToolError::new(
+                "VALIDATION_ERROR",
+                "format must be markdown or jsonl",
+                true,
+            ))
+        }
+    };
+    let structured = json!({
+        "tool": tool,
+        "session_id": session_id,
+        "format": format,
+        "content": content,
+        "raw_file": nabu_core::canonical_raw_path(home, tool, session_id),
+        "redacted": redact
+    });
+    Ok(fit_export_response(structured, format == "jsonl"))
+}
+
+fn tool_get_event(home: &Path, arguments: &Value) -> Result<Value, ToolError> {
+    let tool = required_tool(arguments, "tool")?;
+    let session_id = required_string(arguments, "session_id")?;
+    let raw_line = optional_i64_min(arguments, "raw_line", 1)?;
+    let raw_offset = optional_i64_min(arguments, "raw_offset", 0)?;
+    let redact = optional_bool(arguments, "redact", false);
+    let value = serde_json::to_value(get_event_by_pointer_with_options(
+        home,
+        tool,
+        session_id,
+        raw_line,
+        raw_offset,
+        EventOptions {
+            redact,
+            corroborate: optional_bool(arguments, "corroborate", false),
+        },
+    )?)?;
+    Ok(fit_event_response(value))
+}
+
+fn tool_history_doctor(home: &Path, arguments: &Value) -> Result<Value, ToolError> {
+    let tool = optional_string(arguments, "tool").unwrap_or_else(|| "all".to_string());
+    let deep = optional_bool(arguments, "deep", false);
+    match tool.as_str() {
+        "codex" | "claude" | "opencode" | "all" => {}
+        _ => {
+            return Err(ToolError::new(
+                "VALIDATION_ERROR",
+                "tool must be codex, claude, opencode, or all",
+                true,
+            ))
+        }
+    }
+    if deep {
+        ensure_mcp_deep_doctor_allowed(home)?;
+    }
+    Ok(json!({
+        "ok": true,
+        "data": {
+            "tool": tool,
+            "protocol_version": PROTOCOL_VERSION,
+            "server_version": env!("CARGO_PKG_VERSION"),
+            "health": doctor_with_options(home, deep)
+        }
+    }))
+}
+
+fn ensure_mcp_deep_doctor_allowed(home: &Path) -> Result<(), ToolError> {
+    let Some(max_bytes) = mcp_deep_doctor_max_bytes() else {
+        return Ok(());
+    };
+    let db_path = home.join("index").join("harness.db");
+    let db_size_bytes = match std::fs::metadata(&db_path) {
+        Ok(metadata) => metadata.len(),
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(source) => {
+            return Err(Error::Io {
+                path: db_path,
+                source,
+            }
+            .into())
+        }
+    };
+    if db_size_bytes <= max_bytes {
+        return Ok(());
+    }
+
+    Err(ToolError::with_details(
+        "VALIDATION_ERROR",
+        format!(
+            "history_doctor deep=true would run SQLite integrity_check over a {db_size_bytes}-byte index, above the MCP limit of {max_bytes} bytes"
+        ),
+        true,
+        json!({
+            "reason": "deep_doctor_index_too_large",
+            "db_path": db_path.display().to_string(),
+            "db_size_bytes": db_size_bytes,
+            "max_bytes": max_bytes,
+            "suggested_command": "nabu doctor --deep",
+            "override_env": "NABU_MCP_DEEP_DOCTOR_MAX_BYTES"
+        }),
+    ))
+}
+
+fn tool_recall_answer(home: &Path, arguments: &Value) -> Result<Value, ToolError> {
+    let query = required_string(arguments, "query")?;
+    if query.trim().is_empty() {
+        return Err(ToolError::new(
+            "VALIDATION_ERROR",
+            "query must not be empty",
+            true,
+        ));
+    }
+    let limit = clamped_usize(arguments, "limit", 5, 1, 10)?;
+    let before = clamped_usize(arguments, "before", 5, 0, 20)?;
+    let after = clamped_usize(arguments, "after", 5, 0, 20)?;
+    let redact = optional_bool(arguments, "redact", false);
+    let corroborate = optional_bool(arguments, "corroborate", false);
+    let search_page = search_history_page(
+        home,
+        query,
+        SearchOptions {
+            tool: optional_tool(arguments, "tool")?,
+            session_id: optional_string(arguments, "session_id"),
+            cwd: optional_string(arguments, "cwd"),
+            since: optional_string(arguments, "since"),
+            canonical_type: optional_string(arguments, "canonical_type"),
+            file: optional_string(arguments, "file"),
+            command: optional_string(arguments, "command"),
+            ref_filter: optional_string(arguments, "ref"),
+            limit,
+            offset: 0,
+            include_payload: false,
+            include_deltas: false,
+            dedupe: true,
+            max_snippet_chars: 240,
+            mode: optional_search_mode(arguments)?,
+            corroborate,
+            expand_concepts: optional_bool(arguments, "expand_concepts", false),
+        },
+    )?;
+
+    let mut context_windows = recall_context_windows(&search_page.results, before, after);
+    let mut hits = Vec::new();
+    let mut response = json!({
+        "query": query,
+        "mode_requested": search_page.mode_requested,
+        "mode_applied": search_page.mode_applied,
+        "semantic_available": search_page.semantic_available,
+        "hits": [],
+        "returned": 0,
+        "truncated": search_page.truncated,
+        "redacted": redact
+    });
+    let Some(mut budget) = ResponseBudget::from_base(&response) else {
+        return Ok(enforce_size_bound(response, false));
+    };
+    let mut seen_context = std::collections::BTreeSet::new();
+    let mut budget_truncated = false;
+    for (index, hit) in search_page.results.iter().enumerate() {
+        let context = recall_context_for_hit(
+            home,
+            hit,
+            &mut context_windows,
+            RecallParams {
+                before,
+                after,
+                redact,
+                corroborate,
+            },
+            &mut seen_context,
+        )?;
+        let mut snippet = hit.snippet.clone();
+        if redact {
+            snippet = redact_export_text(&snippet);
+        }
+        let mut hit_value = json!({
+            "rank": index + 1,
+            "score": hit.score,
+            "tool": hit.tool,
+            "session_id": hit.session_id,
+            "canonical_type": hit.canonical_type,
+            "timestamp": hit.timestamp,
+            "snippet": snippet,
+            "raw_file": hit.raw_file,
+            "raw_line": hit.raw_line,
+            "raw_offset": hit.raw_offset,
+            "also_at": hit.also_at,
+            "context": context
+        });
+        if let Some(summary_kind) = &hit.summary_kind {
+            hit_value["summary_kind"] = serde_json::to_value(summary_kind)?;
+        }
+        if let Some(corroboration) = &hit.corroboration {
+            hit_value["corroboration"] = serde_json::to_value(corroboration)?;
+        }
+        let separator = usize::from(!hits.is_empty());
+        if !budget.try_reserve_value(&hit_value, separator) {
+            budget_truncated = true;
+            break;
+        }
+        hits.push(hit_value);
+    }
+
+    let returned = hits.len();
+    response["hits"] = Value::Array(hits);
+    response["returned"] = json!(returned);
+    response["truncated"] = json!(search_page.truncated || budget_truncated);
+    trim_recall_response_to_limit(&mut response);
+    Ok(enforce_size_bound(response, false))
+}
+
+fn recall_context_windows(
+    hits: &[SearchResult],
+    before: usize,
+    after: usize,
+) -> std::collections::BTreeMap<(String, String), Vec<RecallWindow>> {
+    let mut planned = std::collections::BTreeMap::<(String, String), Vec<(Tool, i64, i64)>>::new();
+    for hit in hits {
+        let start = hit.raw_line.saturating_sub(before as i64).max(1);
+        let end = hit.raw_line.saturating_add(after as i64);
+        planned
+            .entry((hit.tool.as_str().to_string(), hit.session_id.clone()))
+            .or_default()
+            .push((hit.tool, start, end));
+    }
+
+    let mut fetched = std::collections::BTreeMap::new();
+    for ((tool_name, session_id), mut windows) in planned {
+        windows.sort_by_key(|(_, start, end)| (*start, *end));
+        let mut merged = Vec::<(i64, i64)>::new();
+        for (_, start, end) in windows {
+            if let Some((_, current_end)) = merged.last_mut() {
+                if start <= current_end.saturating_add(1) {
+                    *current_end = (*current_end).max(end);
+                    continue;
+                }
+            }
+            merged.push((start, end));
+        }
+
+        fetched.insert(
+            (tool_name, session_id),
+            merged
+                .into_iter()
+                .map(|(start, end)| RecallWindow {
+                    start,
+                    end,
+                    events: None,
+                })
+                .collect(),
+        );
+    }
+    fetched
+}
+
+fn trim_recall_response_to_limit(value: &mut Value) {
+    while serde_json::to_vec(value)
+        .map(|serialized| serialized.len() > MAX_MCP_BYTES)
+        .unwrap_or(false)
+    {
+        let Some(hits) = value.get_mut("hits").and_then(Value::as_array_mut) else {
+            break;
+        };
+        if hits.pop().is_none() {
+            break;
+        }
+        let returned = hits.len();
+        value["returned"] = json!(returned);
+        value["truncated"] = json!(true);
+    }
+}
+
+/// Recall rendering parameters that travel together when materializing a hit's
+/// surrounding context.
+#[derive(Clone, Copy)]
+struct RecallParams {
+    before: usize,
+    after: usize,
+    redact: bool,
+    corroborate: bool,
+}
+
+fn recall_context_for_hit(
+    home: &Path,
+    hit: &SearchResult,
+    windows: &mut std::collections::BTreeMap<(String, String), Vec<RecallWindow>>,
+    params: RecallParams,
+    seen_context: &mut std::collections::BTreeSet<(String, String, i64)>,
+) -> Result<Vec<Value>, ToolError> {
+    let RecallParams {
+        before,
+        after,
+        redact,
+        corroborate,
+    } = params;
+    let start = hit.raw_line.saturating_sub(before as i64).max(1);
+    let end = hit.raw_line.saturating_add(after as i64);
+    let key = (hit.tool.as_str().to_string(), hit.session_id.clone());
+    let Some(windows) = windows.get_mut(&key) else {
+        return Ok(Vec::new());
+    };
+    let mut context = Vec::new();
+    for window in windows {
+        if end < window.start || start > window.end {
+            continue;
+        }
+        let events = window_events(home, hit, window, redact, corroborate)?;
+        for event in events {
+            if event.raw_line < start || event.raw_line > end {
+                continue;
+            }
+            let key = (
+                event.tool.as_str().to_string(),
+                event.session_id.clone(),
+                event.raw_line,
+            );
+            if seen_context.insert(key) {
+                context.push(serde_json::to_value(event)?);
+            }
+        }
+    }
+    Ok(context)
+}
+
+fn window_events<'a>(
+    home: &Path,
+    hit: &SearchResult,
+    window: &'a mut RecallWindow,
+    redact: bool,
+    corroborate: bool,
+) -> Result<&'a [StoredEvent], ToolError> {
+    if window.events.is_none() {
+        let center = window
+            .start
+            .saturating_add(window.end)
+            .saturating_div(2)
+            .max(1);
+        let before = usize::try_from(center.saturating_sub(window.start)).unwrap_or(usize::MAX);
+        let after = usize::try_from(window.end.saturating_sub(center)).unwrap_or(usize::MAX);
+        let session = get_session_page(
+            home,
+            hit.tool,
+            &hit.session_id,
+            SessionOptions {
+                limit_events: before.saturating_add(after).saturating_add(1),
+                after_raw_line: None,
+                around_raw_line: Some(center),
+                before,
+                after,
+                include_deltas: false,
+                canonical_type: None,
+                redact,
+                corroborate,
+            },
+        )?;
+        window.events = Some(session.events);
+    }
+    Ok(window.events.as_deref().unwrap_or(&[]))
+}
+
+fn handle_resource_read(home: &Path, params: &Value) -> Value {
+    let uri = params.get("uri").and_then(Value::as_str).unwrap_or("");
+    let content = match resource_content(home, uri) {
+        Ok(content) => content,
+        Err(error) => json!({
+            "error": {
+                "code": "resource_read_failed",
+                "message": error.to_string(),
+                "recoverable": true
+            }
+        })
+        .to_string(),
+    };
+    json!({
+        "contents": [
+            {
+                "uri": uri,
+                "mimeType": "application/json",
+                "text": truncate_resource(content)
+            }
+        ]
+    })
+}
+
+fn resource_content(home: &Path, uri: &str) -> nabu_core::Result<String> {
+    match uri {
+        "nabu://sessions" => {
+            let sessions = list_sessions(home, None, None, None, 20)?;
+            Ok(serde_json::to_string(&json!({ "sessions": sessions }))?)
+        }
+        "nabu://schema/tools" => Ok(serde_json::to_string(&json!({
+            "tools": tool_descriptions()
+        }))?),
+        _ if uri.starts_with("nabu://sessions/") => {
+            let rest = uri.trim_start_matches("nabu://sessions/");
+            let mut parts = rest.splitn(2, '/');
+            let tool = parts
+                .next()
+                .and_then(|value| Tool::from_str(value).ok())
+                .ok_or_else(|| Error::Validation("resource tool is invalid".to_string()))?;
+            let session_id = parts
+                .next()
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| Error::Validation("resource session_id is required".to_string()))?;
+            Ok(serde_json::to_string(&get_session_page(
+                home,
+                tool,
+                session_id,
+                SessionOptions {
+                    include_deltas: true,
+                    ..SessionOptions::default()
+                },
+            )?)?)
+        }
+        _ => Err(Error::Validation(format!("unknown resource uri: {uri}"))),
+    }
+}
+
+fn handle_prompt_get(params: &Value) -> Value {
+    let name = params.get("name").and_then(Value::as_str).unwrap_or("");
+    let text = match name {
+        "recall_project_history" => {
+            "Before continuing, call search_history with a concise project query. It is citation-first and payload-light by default; page with offset and drill into relevant hits using get_session around_raw_line/before/after or get_event. Cite tool, session_id, and raw_line."
+        }
+        "prepare_handoff_summary" => {
+            "For a question-driven handoff, call recall_answer once: it returns ranked hits with their surrounding context windows already cited (tool, session_id, raw_line, raw_offset), no follow-up needed. When you instead need to walk specific sessions, call list_sessions, then get_session with around_raw_line windows or export_session for full-fidelity content. Produce a compact handoff summary with citations including tool, session_id, raw_line or raw_offset."
+        }
+        _ => "Unknown prompt. Call prompts/list to discover available nabu prompts.",
+    };
+    json!({
+        "description": name,
+        "messages": [
+            {
+                "role": "user",
+                "content": {
+                    "type": "text",
+                    "text": text
+                }
+            }
+        ]
+    })
+}
+
+fn resource_descriptions() -> Value {
+    json!([
+        {
+            "uri": "nabu://sessions",
+            "name": "Recent nabu sessions",
+            "description": "Recent session metadata with raw citations.",
+            "mimeType": "application/json"
+        },
+        {
+            "uriTemplate": "nabu://sessions/{tool}/{session_id}",
+            "name": "nabu session summary",
+            "description": "Bounded normalized events for one session.",
+            "mimeType": "application/json"
+        },
+        {
+            "uri": "nabu://schema/tools",
+            "name": "nabu MCP tool schemas",
+            "description": "Input schemas for all read-only history tools.",
+            "mimeType": "application/json"
+        }
+    ])
+}
+
+fn prompt_descriptions() -> Value {
+    json!([
+        {
+            "name": "recall_project_history",
+            "description": "Search local history before continuing project work.",
+            "arguments": []
+        },
+        {
+            "name": "prepare_handoff_summary",
+            "description": "Assemble a cited handoff: recall_answer for one-shot question-driven context, or list_sessions/get_session to walk specific sessions.",
+            "arguments": []
+        }
+    ])
+}
+
+pub fn tool_schemas_document() -> Value {
+    json!({
+        "transport": "stdio",
+        "tools": {
+            "search_history": tool_schema("search_history"),
+            "list_sessions": tool_schema("list_sessions"),
+            "get_session": tool_schema("get_session"),
+            "export_session": tool_schema("export_session"),
+            "get_event": tool_schema("get_event"),
+            "history_doctor": tool_schema("history_doctor"),
+            "recall_answer": tool_schema("recall_answer")
+        }
+    })
+}
+
+fn tool_schema(name: &str) -> Value {
+    match name {
+        "search_history" => json!({
+            "type": "object",
+            "properties": {
+                "query": { "type": "string", "minLength": 1 },
+                "tool": { "type": "string", "enum": ["codex", "claude", "opencode", "all"], "description": "Restrict to one tool, or \"all\" for a single cross-tool search over codex, claude, and opencode. Omitting tool is equivalent to \"all\". Each hit still carries its own tool plus raw_file/raw_line/raw_offset/session_id coordinates." },
+                "session_id": { "type": "string" },
+                "cwd": { "type": "string" },
+                "since": { "type": "string" },
+                "canonical_type": { "type": "string" },
+                "file": { "type": "string" },
+                "command": { "type": "string" },
+                "ref": { "type": "string", "description": "Filter to events whose extracted provenance refs match, e.g. '#54' (a PR reference) or a commit SHA prefix." },
+                "mode": { "type": "string", "enum": ["auto", "lexical", "hybrid"], "default": "auto" },
+                "limit": { "type": "integer", "minimum": 1, "maximum": 50, "default": 10 },
+                "offset": { "type": "integer", "minimum": 0, "default": 0 },
+                "include_payload": { "type": "boolean", "default": false },
+                "include_deltas": { "type": "boolean", "default": false },
+                "dedupe": { "type": "boolean", "default": true },
+                "max_snippet_chars": { "type": "integer", "minimum": 1, "maximum": 1000, "default": 500, "description": "Per-result match-centered snippet length in characters. Defaults to 500 — enough context to triage a candidate (real bug vs. discussion of one) without a get_session round-trip. Raise toward 1000 for denser context or lower to save tokens; oversized pages are still trimmed to fit the response budget with a continuation cursor." },
+                "corroborate": { "type": "boolean", "default": false, "description": "When true, annotate results with local read-only git checks for mentioned commits, branches, and files. PR refs are unresolved with reason=needs_network; no fetch or forge call is made." },
+                "expand_concepts": { "type": "boolean", "default": false, "description": "When true, OR-expand query terms with curated concept synonyms (e.g. bug~error/failure, perf~latency) to widen lexical recall. Literal-term hits keep their ranking; only the candidate set grows." },
+                "redact": { "type": "boolean", "default": false }
+            },
+            "required": ["query"],
+            "additionalProperties": false
+        }),
+        "list_sessions" => json!({
+            "type": "object",
+            "properties": {
+                "tool": { "type": "string", "enum": ["codex", "claude", "opencode", "all"], "description": "Restrict to one tool, or \"all\" to list sessions across codex, claude, and opencode in one call. Omitting tool is equivalent to \"all\"; each session still carries its own tool." },
+                "cwd": { "type": "string" },
+                "since": { "type": "string" },
+                "limit": { "type": "integer", "minimum": 1, "maximum": 100, "default": 20 }
+            },
+            "additionalProperties": false
+        }),
+        "get_session" => json!({
+            "type": "object",
+            "properties": {
+                "tool": { "type": "string", "enum": ["codex", "claude", "opencode"] },
+                "session_id": { "type": "string", "minLength": 1 },
+                "limit_events": { "type": "integer", "minimum": 1, "maximum": 500, "default": 100 },
+                "after_raw_line": { "type": "integer", "minimum": 0, "description": "Page forward: return events with raw_line greater than this. Pass the response's next_after_raw_line to fetch the next page with no gap or overlap; 0 (default) reads from the start." },
+                "around_raw_line": { "type": "integer", "minimum": 1, "description": "Context window: return before/after events around this raw_line (wins over after_raw_line). If the window is clipped by the MCP size cap the response sets window_truncated=true and returns a forward next_after_raw_line to keep reading." },
+                "before": { "type": "integer", "minimum": 0, "maximum": 500, "default": 5 },
+                "after": { "type": "integer", "minimum": 0, "maximum": 500, "default": 5 },
+                "canonical_type": { "type": "string" },
+                "include_deltas": { "type": "boolean", "default": false },
+                "corroborate": { "type": "boolean", "default": false, "description": "When true, annotate events with local read-only git checks. PR refs are unresolved with reason=needs_network." },
+                "redact": { "type": "boolean", "default": false }
+            },
+            "required": ["tool", "session_id"],
+            "additionalProperties": false
+        }),
+        "export_session" => json!({
+            "type": "object",
+            "properties": {
+                "tool": { "type": "string", "enum": ["codex", "claude", "opencode"] },
+                "session_id": { "type": "string", "minLength": 1 },
+                "format": { "type": "string", "enum": ["markdown", "jsonl"], "default": "markdown" },
+                "redact": { "type": "boolean", "default": false }
+            },
+            "required": ["tool", "session_id"],
+            "additionalProperties": false
+        }),
+        "get_event" => json!({
+            "type": "object",
+            "properties": {
+                "tool": { "type": "string", "enum": ["codex", "claude", "opencode"] },
+                "session_id": { "type": "string", "minLength": 1 },
+                "raw_line": { "type": "integer", "minimum": 1 },
+                "raw_offset": { "type": "integer", "minimum": 0 },
+                "corroborate": { "type": "boolean", "default": false, "description": "When true, annotate the event with local read-only git checks. PR refs are unresolved with reason=needs_network." },
+                "redact": { "type": "boolean", "default": false }
+            },
+            "required": ["tool", "session_id"],
+            "additionalProperties": false
+        }),
+        "history_doctor" => json!({
+            "type": "object",
+            "properties": {
+                "tool": { "type": "string", "enum": ["codex", "claude", "opencode", "all"], "default": "all" },
+                "deep": { "type": "boolean", "default": false, "description": "Runs full SQLite integrity_check. Over MCP this is refused when the index database exceeds NABU_MCP_DEEP_DOCTOR_MAX_BYTES (default 500 MiB; 0 disables the guard)." }
+            },
+            "additionalProperties": false
+        }),
+        "recall_answer" => json!({
+            "type": "object",
+            "properties": {
+                "query": { "type": "string", "minLength": 1 },
+                "tool": { "type": "string", "enum": ["codex", "claude", "opencode", "all"], "description": "Restrict to one tool, or \"all\" to gather cited context across codex, claude, and opencode in one call. Omitting tool is equivalent to \"all\"; each hit still carries its own tool and coordinates." },
+                "session_id": { "type": "string" },
+                "cwd": { "type": "string" },
+                "since": { "type": "string" },
+                "canonical_type": { "type": "string" },
+                "file": { "type": "string" },
+                "command": { "type": "string" },
+                "ref": { "type": "string", "description": "Filter to events whose extracted provenance refs match, e.g. '#54' (a PR reference) or a commit SHA prefix." },
+                "mode": { "type": "string", "enum": ["auto", "lexical", "hybrid"], "default": "auto" },
+                "limit": { "type": "integer", "minimum": 1, "maximum": 10, "default": 5 },
+                "before": { "type": "integer", "minimum": 0, "maximum": 20, "default": 5 },
+                "after": { "type": "integer", "minimum": 0, "maximum": 20, "default": 5 },
+                "corroborate": { "type": "boolean", "default": false, "description": "When true, annotate hits and context with local read-only git checks. PR refs are unresolved with reason=needs_network." },
+                "expand_concepts": { "type": "boolean", "default": false, "description": "When true, OR-expand query terms with curated concept synonyms (e.g. bug~error/failure) to widen lexical recall. Literal-term hits keep their ranking." },
+                "redact": { "type": "boolean", "default": false }
+            },
+            "required": ["query"],
+            "additionalProperties": false
+        }),
+        _ => json!({ "type": "object", "additionalProperties": false }),
+    }
+}
+
+fn concise_summary(name: &str, structured: &Value) -> String {
+    match name {
+        "search_history" => format!(
+            "Found {} history result(s){}.",
+            structured
+                .get("results")
+                .and_then(Value::as_array)
+                .map(Vec::len)
+                .unwrap_or(0),
+            if structured
+                .get("truncated")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                " (truncated; use continuation.next_offset)"
+            } else {
+                ""
+            }
+        ),
+        "list_sessions" => format!(
+            "Found {} session(s).",
+            structured
+                .get("sessions")
+                .and_then(Value::as_array)
+                .map(Vec::len)
+                .unwrap_or(0)
+        ),
+        "get_session" => format!(
+            "Returned {} event(s) for {}:{}.",
+            structured
+                .get("events")
+                .and_then(Value::as_array)
+                .map(Vec::len)
+                .unwrap_or(0),
+            structured
+                .get("tool")
+                .and_then(Value::as_str)
+                .unwrap_or("tool"),
+            structured
+                .get("session_id")
+                .and_then(Value::as_str)
+                .unwrap_or("session")
+        ),
+        "export_session" => format!(
+            "Exported {}:{} as {}.",
+            structured
+                .get("tool")
+                .and_then(Value::as_str)
+                .unwrap_or("tool"),
+            structured
+                .get("session_id")
+                .and_then(Value::as_str)
+                .unwrap_or("session"),
+            structured
+                .get("format")
+                .and_then(Value::as_str)
+                .unwrap_or("markdown")
+        ),
+        "get_event" => "Returned one event with raw citation.".to_string(),
+        "history_doctor" => "Returned nabu health checks.".to_string(),
+        "recall_answer" => format!(
+            "Assembled {} cited context hit(s); no answer text was generated.",
+            structured
+                .get("hits")
+                .and_then(Value::as_array)
+                .map(Vec::len)
+                .unwrap_or(0)
+        ),
+        _ => "Completed MCP tool call.".to_string(),
+    }
+}
+
+fn enforce_size_bound(value: Value, allow_jsonl: bool) -> Value {
+    if allow_jsonl {
+        return value;
+    }
+    let Ok(serialized) = serde_json::to_vec(&value) else {
+        return value;
+    };
+    if serialized.len() <= MAX_MCP_BYTES {
+        return value;
+    }
+    json!({
+        "truncated": true,
+        "message": "MCP response exceeded 256 KiB. Call get_session with pagination or export_session with format=jsonl.",
+        "original_size_bytes": serialized.len()
+    })
+}
+
+fn serialized_len(value: &Value) -> Option<usize> {
+    serde_json::to_vec(value)
+        .ok()
+        .map(|serialized| serialized.len())
+}
+
+fn fits_mcp_limit(value: &Value) -> bool {
+    serialized_len(value)
+        .map(|len| len <= MAX_MCP_BYTES)
+        .unwrap_or(true)
+}
+
+fn value_fits_budget(budget: &ResponseBudget, value: &Value, separator_bytes: usize) -> bool {
+    let mut trial = budget.clone();
+    trial.try_reserve_value(value, separator_bytes)
+}
+
+fn fit_session_response(mut value: Value) -> Value {
+    let Some(original_size) = serialized_len(&value) else {
+        return value;
+    };
+    if original_size <= MAX_MCP_BYTES {
+        return value;
+    }
+
+    // True when core paged around a specific line (`around_raw_line`) rather than
+    // forward from `after_raw_line`. Window responses carry no forward cursor from
+    // core; if the budget clips one, the caller must still be able to continue.
+    let window_mode = value
+        .get("around_raw_line")
+        .map(|line| !line.is_null())
+        .unwrap_or(false);
+
+    let Some(events) = value.get("events").and_then(Value::as_array).cloned() else {
+        return enforce_size_bound(value, false);
+    };
+    value["events"] = json!([]);
+    value["truncated"] = json!(true);
+    value["mcp_truncated"] = json!(true);
+    value["mcp_original_size_bytes"] = json!(original_size);
+    value["message"] = json!(
+        "MCP response exceeded 256 KiB. Returned the leading events that fit; continue with next_after_raw_line."
+    );
+
+    let Some(mut budget) = ResponseBudget::from_base(&value) else {
+        return enforce_size_bound(value, false);
+    };
+    let mut kept = Vec::new();
+    for event in events {
+        let separator = usize::from(!kept.is_empty());
+        let event = if value_fits_budget(&budget, &event, separator) {
+            event
+        } else if kept.is_empty() {
+            match fit_value_string_field_to_budget(event, "text", &budget, separator) {
+                Some(fitted) => fitted,
+                None => break,
+            }
+        } else {
+            break;
+        };
+        if !budget.try_reserve_value(&event, separator) {
+            break;
+        }
+        kept.push(event);
+    }
+
+    value["events"] = Value::Array(kept);
+    value["returned"] = json!(value
+        .get("events")
+        .and_then(Value::as_array)
+        .map_or(0, Vec::len));
+    trim_array_response_to_limit(&mut value, "events");
+    // Recompute the forward cursor from what actually survived trimming. Core's
+    // inherited `next_after_raw_line` describes the events it queried, not the
+    // smaller set that fit the MCP budget; resuming from it would silently skip
+    // events. Deriving it here keeps continuation gap-free and never stale.
+    apply_session_cursor(&mut value, window_mode);
+    value
+}
+
+/// Set or clear the forward continuation cursor so it always points just past
+/// the last event in `value["events"]`. With no events left, the cursor is
+/// removed entirely rather than left pointing past data the caller never saw.
+/// In window mode an additional `window_truncated` flag records that the
+/// requested context window was clipped to fit the budget.
+fn apply_session_cursor(value: &mut Value, window_mode: bool) {
+    let last_raw_line = value
+        .get("events")
+        .and_then(Value::as_array)
+        .and_then(|events| events.last())
+        .and_then(|event| event.get("raw_line"))
+        .and_then(Value::as_i64);
+    match last_raw_line {
+        Some(last_raw_line) => {
+            value["next_after_raw_line"] = json!(last_raw_line);
+            value["continuation"] = json!({ "next_after_raw_line": last_raw_line });
+            if window_mode {
+                value["window_truncated"] = json!(true);
+            }
+        }
+        None => {
+            // Nothing fit. Drop any inherited cursor; a stale one would resume
+            // past unreturned events. The caller must shrink the request
+            // (smaller limit_events / narrower window) or use export_session.
+            if let Some(object) = value.as_object_mut() {
+                object.remove("next_after_raw_line");
+                object.remove("continuation");
+            }
+        }
+    }
+}
+
+fn fit_event_response(mut value: Value) -> Value {
+    let Some(original_size) = serialized_len(&value) else {
+        return value;
+    };
+    if original_size <= MAX_MCP_BYTES {
+        return value;
+    }
+
+    value["mcp_truncated"] = json!(true);
+    value["mcp_original_size_bytes"] = json!(original_size);
+    value["message"] =
+        json!("MCP event exceeded 256 KiB. Preserved the raw citation and truncated large fields.");
+    if let Some(envelope) = value.get_mut("envelope").and_then(Value::as_object_mut) {
+        if envelope.contains_key("payload") {
+            envelope.insert(
+                "payload".to_string(),
+                json!({
+                    "truncated": true,
+                    "message": "Payload omitted because this single event exceeds the MCP response cap. Use raw_file/raw_line or export_session format=jsonl for the exact envelope."
+                }),
+            );
+        }
+    }
+    if fits_mcp_limit(&value) {
+        return value;
+    }
+
+    fit_value_string_field_to_limit(value, "searchable_text")
+}
+
+fn fit_export_response(value: Value, allow_jsonl: bool) -> Value {
+    if allow_jsonl || fits_mcp_limit(&value) {
+        return value;
+    }
+    fit_value_string_field_to_limit(value, "content")
+}
+
+fn fit_value_string_field_to_limit(mut value: Value, field: &str) -> Value {
+    let Some(original_size) = serialized_len(&value) else {
+        return value;
+    };
+    value["mcp_truncated"] = json!(true);
+    if value.get("mcp_original_size_bytes").is_none() {
+        value["mcp_original_size_bytes"] = json!(original_size);
+    }
+    if value.get("message").is_none() {
+        value["message"] = json!(
+            "MCP response exceeded 256 KiB. The large string field was truncated to a prefix."
+        );
+    }
+
+    let Some(original) = value.get(field).and_then(Value::as_str).map(str::to_owned) else {
+        return enforce_size_bound(value, false);
+    };
+    value[format!("{field}_original_bytes")] = json!(original.len());
+    value = truncate_string_field_until_fit(value.clone(), field, &original)
+        .unwrap_or_else(|| enforce_size_bound(value, false));
+    value
+}
+
+fn fit_value_string_field_to_budget(
+    mut value: Value,
+    field: &str,
+    budget: &ResponseBudget,
+    separator_bytes: usize,
+) -> Option<Value> {
+    let original = value.get(field)?.as_str()?.to_owned();
+    value[format!("{field}_truncated")] = json!(true);
+    value[format!("{field}_original_bytes")] = json!(original.len());
+    truncate_string_field_to_budget(value, field, &original, budget, separator_bytes)
+}
+
+fn truncate_string_field_until_fit(mut value: Value, field: &str, original: &str) -> Option<Value> {
+    let mut low = 0usize;
+    let mut high = original.len().min(MAX_MCP_BYTES);
+    let mut best = None;
+    while low <= high {
+        let mid = (low + high) / 2;
+        let mut candidate = value.clone();
+        candidate[field] = json!(truncate_utf8_prefix(original, mid));
+        candidate[format!("{field}_truncated_bytes")] = json!(original.len().saturating_sub(mid));
+        if fits_mcp_limit(&candidate) {
+            best = Some(candidate);
+            low = mid.saturating_add(1);
+        } else if mid == 0 {
+            break;
+        } else {
+            high = mid - 1;
+        }
+    }
+    if best.is_none() {
+        value[field] = json!("");
+        value[format!("{field}_truncated_bytes")] = json!(original.len());
+        if fits_mcp_limit(&value) {
+            best = Some(value);
+        }
+    }
+    best
+}
+
+fn truncate_string_field_to_budget(
+    mut value: Value,
+    field: &str,
+    original: &str,
+    budget: &ResponseBudget,
+    separator_bytes: usize,
+) -> Option<Value> {
+    let mut low = 0usize;
+    let mut high = original.len().min(MAX_MCP_BYTES);
+    let mut best = None;
+    while low <= high {
+        let mid = (low + high) / 2;
+        let mut candidate = value.clone();
+        candidate[field] = json!(truncate_utf8_prefix(original, mid));
+        candidate[format!("{field}_truncated_bytes")] = json!(original.len().saturating_sub(mid));
+        if value_fits_budget(budget, &candidate, separator_bytes) {
+            best = Some(candidate);
+            low = mid.saturating_add(1);
+        } else if mid == 0 {
+            break;
+        } else {
+            high = mid - 1;
+        }
+    }
+    if best.is_none() {
+        value[field] = json!("");
+        value[format!("{field}_truncated_bytes")] = json!(original.len());
+        if value_fits_budget(budget, &value, separator_bytes) {
+            best = Some(value);
+        }
+    }
+    best
+}
+
+fn truncate_utf8_prefix(value: &str, max_bytes: usize) -> String {
+    if value.len() <= max_bytes {
+        return value.to_string();
+    }
+    let mut end = max_bytes.min(value.len());
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    value[..end].to_string()
+}
+
+fn fit_search_response(mut value: Value) -> Value {
+    let Ok(serialized) = serde_json::to_vec(&value) else {
+        return value;
+    };
+    if serialized.len() <= MAX_MCP_BYTES {
+        return value;
+    }
+
+    let Some(results) = value.get("results").and_then(Value::as_array).cloned() else {
+        return enforce_size_bound(value, false);
+    };
+    let offset = value
+        .get("offset_applied")
+        .and_then(Value::as_u64)
+        .unwrap_or(0) as usize;
+    value["results"] = json!([]);
+    value["returned"] = json!(0);
+    value["truncated"] = json!(true);
+    value["continuation"] = json!({ "next_offset": offset });
+
+    let Some(mut budget) = ResponseBudget::from_base(&value) else {
+        return enforce_size_bound(value, false);
+    };
+    let mut kept = Vec::new();
+    for result in results {
+        let separator = usize::from(!kept.is_empty());
+        if !budget.try_reserve_value(&result, separator) {
+            break;
+        }
+        kept.push(result);
+    }
+
+    value["results"] = Value::Array(kept);
+    let returned = value
+        .get("results")
+        .and_then(Value::as_array)
+        .map(Vec::len)
+        .unwrap_or(0);
+    value["returned"] = json!(returned);
+    value["continuation"] = json!({ "next_offset": offset.saturating_add(returned) });
+    trim_search_response_to_limit(&mut value, offset);
+    value
+}
+
+fn trim_search_response_to_limit(value: &mut Value, offset: usize) {
+    while serde_json::to_vec(value)
+        .map(|serialized| serialized.len() > MAX_MCP_BYTES)
+        .unwrap_or(false)
+    {
+        let Some(results) = value.get_mut("results").and_then(Value::as_array_mut) else {
+            break;
+        };
+        if results.pop().is_none() {
+            break;
+        }
+        let returned = results.len();
+        value["returned"] = json!(returned);
+        value["continuation"] = json!({ "next_offset": offset.saturating_add(returned) });
+    }
+}
+
+fn trim_array_response_to_limit(value: &mut Value, array_field: &str) {
+    while serde_json::to_vec(value)
+        .map(|serialized| serialized.len() > MAX_MCP_BYTES)
+        .unwrap_or(false)
+    {
+        let returned = {
+            let Some(items) = value.get_mut(array_field).and_then(Value::as_array_mut) else {
+                break;
+            };
+            if items.pop().is_none() {
+                break;
+            }
+            items.len()
+        };
+        value["returned"] = json!(returned);
+    }
+}
+
+fn truncate_resource(content: String) -> String {
+    if content.len() <= MAX_MCP_BYTES {
+        content
+    } else {
+        json!({
+            "truncated": true,
+            "message": "Resource exceeded 256 KiB. Call get_session with pagination or export_session for full content."
+        })
+        .to_string()
+    }
+}
+
+fn required_string<'a>(arguments: &'a Value, key: &str) -> Result<&'a str, ToolError> {
+    arguments
+        .get(key)
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| ToolError::new("VALIDATION_ERROR", format!("{key} is required"), true))
+}
+
+fn optional_string(arguments: &Value, key: &str) -> Option<String> {
+    arguments
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::to_string)
+}
+
+fn required_tool(arguments: &Value, key: &str) -> Result<Tool, ToolError> {
+    let value = required_string(arguments, key)?;
+    Tool::from_str(value).map_err(|_| {
+        ToolError::new(
+            "VALIDATION_ERROR",
+            format!("{key} must be codex, claude, or opencode"),
+            true,
+        )
+    })
+}
+
+/// Parse an optional cross-tool `tool` filter for the search/list surfaces.
+///
+/// An absent key and the explicit value `"all"` both map to `None`, which the
+/// core search applies as "no tool filter" — one query spanning codex, claude,
+/// and opencode. `"all"` is the discoverable, self-documenting spelling of the
+/// default; it never changes the meaning of omitting the key. A concrete tool
+/// name resolves to `Some(tool)`. This helper is for the cross-tool surfaces
+/// only (`search_history`, `list_sessions`, `recall_answer`); the single-session
+/// surfaces use `required_tool`, which rejects `"all"`.
+fn optional_tool(arguments: &Value, key: &str) -> Result<Option<Tool>, ToolError> {
+    let Some(value) = arguments.get(key).and_then(Value::as_str) else {
+        return Ok(None);
+    };
+    if value == "all" {
+        return Ok(None);
+    }
+    Tool::from_str(value).map(Some).map_err(|_| {
+        ToolError::new(
+            "VALIDATION_ERROR",
+            format!("{key} must be codex, claude, opencode, or all"),
+            true,
+        )
+    })
+}
+
+fn optional_search_mode(arguments: &Value) -> Result<SearchMode, ToolError> {
+    let Some(value) = arguments.get("mode").and_then(Value::as_str) else {
+        return Ok(SearchMode::Auto);
+    };
+    SearchMode::from_str(value).map_err(|_| {
+        ToolError::new(
+            "VALIDATION_ERROR",
+            "mode must be auto, lexical, or hybrid",
+            true,
+        )
+    })
+}
+
+fn optional_bool(arguments: &Value, key: &str, default: bool) -> bool {
+    arguments
+        .get(key)
+        .and_then(Value::as_bool)
+        .unwrap_or(default)
+}
+
+fn optional_i64_min(arguments: &Value, key: &str, min: i64) -> Result<Option<i64>, ToolError> {
+    let Some(value) = arguments.get(key) else {
+        return Ok(None);
+    };
+    let Some(value) = value.as_i64() else {
+        return Err(ToolError::new(
+            "VALIDATION_ERROR",
+            format!("{key} must be an integer"),
+            true,
+        ));
+    };
+    if value < min {
+        return Err(ToolError::new(
+            "VALIDATION_ERROR",
+            format!("{key} must be at least {min}"),
+            true,
+        ));
+    }
+    Ok(Some(value))
+}
+
+fn bounded_usize(
+    arguments: &Value,
+    key: &str,
+    default: usize,
+    min: usize,
+    max: usize,
+) -> Result<usize, ToolError> {
+    let Some(raw) = arguments.get(key) else {
+        return Ok(default);
+    };
+    let Some(value) = raw.as_i64() else {
+        return Err(ToolError::new(
+            "VALIDATION_ERROR",
+            format!("{key} must be an integer"),
+            true,
+        ));
+    };
+    let Ok(value) = usize::try_from(value) else {
+        return Err(ToolError::new(
+            "VALIDATION_ERROR",
+            format!("{key} must be between {min} and {max}"),
+            true,
+        ));
+    };
+    if value < min || value > max {
+        return Err(ToolError::new(
+            "VALIDATION_ERROR",
+            format!("{key} must be between {min} and {max}"),
+            true,
+        ));
+    }
+    Ok(value)
+}
+
+fn clamped_usize(
+    arguments: &Value,
+    key: &str,
+    default: usize,
+    min: usize,
+    max: usize,
+) -> Result<usize, ToolError> {
+    bounded_usize(arguments, key, default, min, max)
+}
+
+fn optional_usize_min(
+    arguments: &Value,
+    key: &str,
+    min: usize,
+) -> Result<Option<usize>, ToolError> {
+    let Some(value) = arguments.get(key) else {
+        return Ok(None);
+    };
+    let Some(value) = value.as_i64() else {
+        return Err(ToolError::new(
+            "VALIDATION_ERROR",
+            format!("{key} must be an integer"),
+            true,
+        ));
+    };
+    let Ok(value) = usize::try_from(value) else {
+        return Err(ToolError::new(
+            "VALIDATION_ERROR",
+            format!("{key} must be at least {min}"),
+            true,
+        ));
+    };
+    if value < min {
+        return Err(ToolError::new(
+            "VALIDATION_ERROR",
+            format!("{key} must be at least {min}"),
+            true,
+        ));
+    }
+    Ok(Some(value))
+}
+
+fn redact_result_snippets(value: &mut Value) {
+    let Some(results) = value.get_mut("results").and_then(Value::as_array_mut) else {
+        return;
+    };
+    for result in results {
+        if let Some(snippet) = result.get("snippet").and_then(Value::as_str) {
+            let redacted = redact_export_text(snippet);
+            result["snippet"] = Value::String(redacted);
+        }
+        if let Some(payload) = result.get_mut("payload") {
+            *payload = redact_export_json(std::mem::take(payload));
+        }
+    }
+}
+
+#[derive(Debug)]
+struct ToolError {
+    code: &'static str,
+    message: String,
+    recoverable: bool,
+    hint: String,
+    details: Value,
+}
+
+impl ToolError {
+    fn new(code: &'static str, message: impl Into<String>, recoverable: bool) -> Self {
+        let message = message.into();
+        Self {
+            code,
+            hint: hint_for_code(code).to_string(),
+            details: json!({}),
+            message,
+            recoverable,
+        }
+    }
+
+    fn with_details(
+        code: &'static str,
+        message: impl Into<String>,
+        recoverable: bool,
+        details: Value,
+    ) -> Self {
+        let message = message.into();
+        Self {
+            code,
+            hint: hint_for_code(code).to_string(),
+            details,
+            message,
+            recoverable,
+        }
+    }
+}
+
+impl std::fmt::Display for ToolError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl From<nabu_core::Error> for ToolError {
+    fn from(value: nabu_core::Error) -> Self {
+        let code = mcp_error_code(&value);
+        let message = mcp_error_message(&value);
+        let details = mcp_error_details(&value);
+        Self::with_details(code, message, true, details)
+    }
+}
+
+fn mcp_error_code(value: &nabu_core::Error) -> &'static str {
+    match value {
+        nabu_core::Error::Validation(message) if validation_message_is_not_found(message) => {
+            "NOT_FOUND"
+        }
+        nabu_core::Error::Validation(_) => "VALIDATION_ERROR",
+        nabu_core::Error::SemanticUnavailable(_) => "SEMANTIC_UNAVAILABLE",
+        nabu_core::Error::HomeUnavailable => "STORAGE_UNAVAILABLE",
+        nabu_core::Error::Io { source, .. }
+            if source.kind() == std::io::ErrorKind::PermissionDenied =>
+        {
+            "PERMISSION_DENIED"
+        }
+        nabu_core::Error::Io { .. } => "STORAGE_UNAVAILABLE",
+        nabu_core::Error::Sqlite { .. } => "INDEX_UNAVAILABLE",
+        nabu_core::Error::Json(_) => "VALIDATION_ERROR",
+        nabu_core::Error::TimeFormat(_) => "INTERNAL_ERROR",
+    }
+}
+
+fn mcp_error_message(value: &nabu_core::Error) -> String {
+    match value {
+        nabu_core::Error::Validation(message) if message.starts_with("raw line ") => {
+            "raw event not found for requested history pointer".to_string()
+        }
+        nabu_core::Error::Validation(message) if validation_message_is_not_found(message) => {
+            message.to_string()
+        }
+        nabu_core::Error::Io { source, .. }
+            if source.kind() == std::io::ErrorKind::PermissionDenied =>
+        {
+            "filesystem permission denied while accessing nabu storage".to_string()
+        }
+        nabu_core::Error::Io { .. } => "filesystem error while accessing nabu storage".to_string(),
+        nabu_core::Error::Sqlite { source, .. } => {
+            format!("sqlite index error while accessing nabu index: {source}")
+        }
+        _ => value.to_string(),
+    }
+}
+
+fn mcp_error_details(value: &nabu_core::Error) -> Value {
+    match value {
+        nabu_core::Error::Io { source, .. }
+            if source.kind() == std::io::ErrorKind::PermissionDenied =>
+        {
+            json!({
+                "attempted_operation": "filesystem access"
+            })
+        }
+        _ => json!({}),
+    }
+}
+
+fn validation_message_is_not_found(message: &str) -> bool {
+    message.starts_with("session not found for ")
+        || message.starts_with("event not found for ")
+        || (message.starts_with("raw line ") && message.split_once(" not found in ").is_some())
+}
+
+impl From<serde_json::Error> for ToolError {
+    fn from(value: serde_json::Error) -> Self {
+        Self::new("VALIDATION_ERROR", value.to_string(), true)
+    }
+}
+
+fn hint_for_code(code: &str) -> &'static str {
+    match code {
+        "NOT_FOUND" => "Call list_sessions first, then retry with an existing raw pointer.",
+        "VALIDATION_ERROR" => "Fix the MCP tool arguments and retry.",
+        "PERMISSION_DENIED" => "Check ownership and filesystem permissions for the reported path.",
+        "INDEX_UNAVAILABLE" => "Run nabu index --once and retry.",
+        "STORAGE_UNAVAILABLE" => "Run nabu init and check local filesystem permissions.",
+        "SEMANTIC_UNAVAILABLE" => {
+            "Retry with mode=lexical, or install a compatible semantic build and local model."
+        }
+        _ => "Retry after checking nabu doctor.",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nabu_core::{index_once, ingest_hook_event, init_home};
+    use serde_json::json;
+    use std::io::Cursor;
+    use tempfile::tempdir;
+
+    #[test]
+    fn stdio_initialize_lists_locked_tools() {
+        let temp = tempdir().unwrap();
+        let home = temp.path().join("home");
+        init_home(&home).unwrap();
+        let input = Cursor::new(
+            "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}\n\
+             {\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\",\"params\":{}}\n",
+        );
+        let mut output = Vec::new();
+
+        serve_with_io(home, input, &mut output).unwrap();
+        let output = String::from_utf8(output).unwrap();
+
+        assert!(output.contains("\"protocolVersion\":\"2025-03-26\""));
+        for tool in [
+            "search_history",
+            "list_sessions",
+            "get_session",
+            "export_session",
+            "get_event",
+            "history_doctor",
+            "recall_answer",
+        ] {
+            assert!(output.contains(tool), "{tool}");
+        }
+    }
+
+    #[test]
+    fn search_history_matches_indexed_fixture() {
+        let temp = tempdir().unwrap();
+        let home = temp.path().join("home");
+        init_home(&home).unwrap();
+        ingest_hook_event(
+            &home,
+            Tool::Claude,
+            json!({
+                "session_id": "fixture-session",
+                "hook_event_name": "UserPromptSubmit",
+                "message_id": "mcp-user-1",
+                "cwd": "/tmp/nabu-fixture",
+                "project_root": "/tmp/nabu-fixture",
+                "prompt": "nabu fixture marker for mcp search"
+            }),
+        )
+        .unwrap();
+        index_once(&home).unwrap();
+
+        let response = handle_message(
+            &home,
+            &json!({
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "tools/call",
+                "params": {
+                    "name": "search_history",
+                    "arguments": {
+                        "query": "nabu fixture marker",
+                        "limit": 10
+                    }
+                }
+            })
+            .to_string(),
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(response["jsonrpc"], "2.0");
+        let results = response["result"]["structuredContent"]["results"]
+            .as_array()
+            .unwrap();
+        let hit = results
+            .iter()
+            .find(|result| result["session_id"] == "fixture-session")
+            .expect("fixture hit present");
+
+        // Item 14: the native handoff command survives serialization and
+        // response fitting, and is line-addressed to the hit's raw_file/raw_line.
+        let raw_file = hit["raw_file"].as_str().unwrap();
+        let raw_line = hit["raw_line"].as_i64().unwrap();
+        assert_eq!(
+            hit["native_command"].as_str().unwrap(),
+            format!("sed -n '{raw_line}p' '{raw_file}' | jq .")
+        );
+    }
+
+    fn ingest_prompt(home: &Path, tool: Tool, session_id: &str, prompt: &str) {
+        ingest_hook_event(
+            home,
+            tool,
+            json!({
+                "session_id": session_id,
+                "hook_event_name": "UserPromptSubmit",
+                "message_id": format!("mcp-{session_id}"),
+                "cwd": "/tmp/nabu-fixture",
+                "project_root": "/tmp/nabu-fixture",
+                "prompt": prompt
+            }),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn search_history_tool_all_returns_hits_from_multiple_tools_in_one_call() {
+        let temp = tempdir().unwrap();
+        let home = temp.path().join("home");
+        init_home(&home).unwrap();
+        ingest_prompt(
+            &home,
+            Tool::Claude,
+            "claude-session",
+            "nabu crosstool marker from claude",
+        );
+        ingest_prompt(
+            &home,
+            Tool::Codex,
+            "codex-session",
+            "nabu crosstool marker from codex",
+        );
+        index_once(&home).unwrap();
+
+        let response = handle_message(
+            &home,
+            &json!({
+                "jsonrpc": "2.0",
+                "id": 7,
+                "method": "tools/call",
+                "params": {
+                    "name": "search_history",
+                    "arguments": {
+                        "query": "nabu crosstool marker",
+                        "tool": "all",
+                        "limit": 10
+                    }
+                }
+            })
+            .to_string(),
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_ne!(response["result"]["isError"], true);
+        let results = response["result"]["structuredContent"]["results"]
+            .as_array()
+            .unwrap();
+
+        // A single call spans more than one tool.
+        let tools: std::collections::BTreeSet<&str> = results
+            .iter()
+            .filter_map(|hit| hit["tool"].as_str())
+            .collect();
+        assert!(
+            tools.contains("claude") && tools.contains("codex"),
+            "tool=all must return hits from more than one tool in one call, got {tools:?}"
+        );
+
+        // Invariant #13: every hit carries its own per-hit tool + coordinates.
+        for hit in results {
+            assert!(hit["tool"].is_string(), "hit missing tool: {hit}");
+            assert!(hit["raw_file"].is_string(), "hit missing raw_file: {hit}");
+            assert!(hit["raw_line"].is_number(), "hit missing raw_line: {hit}");
+            // raw_offset is carried on every hit (Option<i64>; null only when the
+            // raw store lacks byte offsets). The key must always be present.
+            assert!(
+                hit.get("raw_offset").is_some(),
+                "hit missing raw_offset key: {hit}"
+            );
+            assert!(
+                hit["session_id"].is_string(),
+                "hit missing session_id: {hit}"
+            );
+        }
+    }
+
+    #[test]
+    fn search_history_tool_all_matches_omitting_tool() {
+        let temp = tempdir().unwrap();
+        let home = temp.path().join("home");
+        init_home(&home).unwrap();
+        ingest_prompt(&home, Tool::Claude, "claude-session", "nabu parity marker");
+        ingest_prompt(&home, Tool::Codex, "codex-session", "nabu parity marker");
+        index_once(&home).unwrap();
+
+        let call = |tool: Option<&str>| {
+            let mut arguments = json!({ "query": "nabu parity marker", "limit": 10 });
+            if let Some(tool) = tool {
+                arguments["tool"] = json!(tool);
+            }
+            let response = handle_message(
+                &home,
+                &json!({
+                    "jsonrpc": "2.0",
+                    "id": 8,
+                    "method": "tools/call",
+                    "params": { "name": "search_history", "arguments": arguments }
+                })
+                .to_string(),
+            )
+            .unwrap()
+            .unwrap();
+            response["result"]["structuredContent"]["results"]
+                .as_array()
+                .unwrap()
+                .len()
+        };
+
+        // "all" is the explicit spelling of omitting tool; both search every tool.
+        assert_eq!(call(Some("all")), call(None));
+        assert!(call(Some("all")) >= 2);
+    }
+
+    #[test]
+    fn single_session_surfaces_reject_tool_all() {
+        let temp = tempdir().unwrap();
+        let home = temp.path().join("home");
+        init_home(&home).unwrap();
+
+        for name in ["get_session", "get_event", "export_session"] {
+            let response = handle_message(
+                &home,
+                &json!({
+                    "jsonrpc": "2.0",
+                    "id": 9,
+                    "method": "tools/call",
+                    "params": {
+                        "name": name,
+                        "arguments": {
+                            "tool": "all",
+                            "session_id": "any-session"
+                        }
+                    }
+                })
+                .to_string(),
+            )
+            .unwrap()
+            .unwrap();
+
+            assert_eq!(
+                response["result"]["isError"], true,
+                "{name} must reject tool=all"
+            );
+            let error = &response["result"]["structuredContent"]["error"];
+            assert_eq!(error["code"], "VALIDATION_ERROR", "{name}");
+            assert!(
+                error["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("codex, claude, or opencode"),
+                "{name} error should name the accepted single tools, got {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn search_history_applies_default_snippet_length_when_omitted() {
+        let temp = tempdir().unwrap();
+        let home = temp.path().join("home");
+        init_home(&home).unwrap();
+        ingest_hook_event(
+            &home,
+            Tool::Claude,
+            json!({
+                "session_id": "snippet-default",
+                "hook_event_name": "UserPromptSubmit",
+                "message_id": "snippet-default-1",
+                "cwd": "/tmp/nabu-fixture",
+                "project_root": "/tmp/nabu-fixture",
+                "prompt": "nabu triage marker for snippet default"
+            }),
+        )
+        .unwrap();
+        index_once(&home).unwrap();
+
+        let value = tool_search_history(
+            &home,
+            &json!({
+                "query": "nabu triage marker",
+                "limit": 5
+            }),
+        )
+        .unwrap();
+
+        assert_eq!(
+            value["max_snippet_chars_applied"],
+            json!(DEFAULT_SEARCH_SNIPPET_CHARS)
+        );
+        assert_eq!(DEFAULT_SEARCH_SNIPPET_CHARS, 500);
+    }
+
+    #[test]
+    fn search_history_honors_override_and_clamps_above_maximum() {
+        let temp = tempdir().unwrap();
+        let home = temp.path().join("home");
+        init_home(&home).unwrap();
+        ingest_hook_event(
+            &home,
+            Tool::Claude,
+            json!({
+                "session_id": "snippet-clamp",
+                "hook_event_name": "UserPromptSubmit",
+                "message_id": "snippet-clamp-1",
+                "cwd": "/tmp/nabu-fixture",
+                "project_root": "/tmp/nabu-fixture",
+                "prompt": "nabu clamp marker for snippet override"
+            }),
+        )
+        .unwrap();
+        index_once(&home).unwrap();
+
+        let overridden = tool_search_history(
+            &home,
+            &json!({
+                "query": "nabu clamp marker",
+                "max_snippet_chars": 120
+            }),
+        )
+        .unwrap();
+        assert_eq!(overridden["max_snippet_chars_applied"], json!(120));
+
+        // Above the schema maximum the request is rejected before reaching core.
+        let rejected = tool_search_history(
+            &home,
+            &json!({
+                "query": "nabu clamp marker",
+                "max_snippet_chars": MAX_SEARCH_SNIPPET_CHARS + 1
+            }),
+        );
+        assert!(rejected.is_err());
+        assert_eq!(rejected.unwrap_err().code, "VALIDATION_ERROR");
+    }
+
+    #[test]
+    fn large_page_at_default_snippet_length_fits_response_budget() {
+        let temp = tempdir().unwrap();
+        let home = temp.path().join("home");
+        init_home(&home).unwrap();
+
+        // A long, repetitive body so each match-centered snippet saturates the
+        // default length, plus enough distinct events to fill the maximum page.
+        let body = "nabu budget marker ".repeat(400);
+        for index in 0..60 {
+            ingest_hook_event(
+                &home,
+                Tool::Claude,
+                json!({
+                    "session_id": format!("budget-{index}"),
+                    "hook_event_name": "UserPromptSubmit",
+                    "message_id": format!("budget-msg-{index}"),
+                    "cwd": "/tmp/nabu-fixture",
+                    "project_root": "/tmp/nabu-fixture",
+                    "prompt": format!("event {index} {body}")
+                }),
+            )
+            .unwrap();
+        }
+        index_once(&home).unwrap();
+
+        let value = tool_search_history(
+            &home,
+            &json!({
+                "query": "nabu budget marker",
+                "limit": 50
+            }),
+        )
+        .unwrap();
+
+        let serialized = serde_json::to_vec(&value).unwrap();
+        // A maxed-out 50-result page of saturated default-length snippets stays
+        // well inside the response budget: 50 x 500 chars plus per-result
+        // metadata is ~43 KiB against the ~256 KiB ceiling. `fit_search_response`
+        // therefore never has to drop results for size at the default.
+        assert!(
+            serialized.len() <= MAX_MCP_BYTES,
+            "fitted response is {} bytes, over the {MAX_MCP_BYTES}-byte budget",
+            serialized.len()
+        );
+        assert_eq!(value["max_snippet_chars_applied"], json!(500));
+
+        let results = value["results"].as_array().unwrap();
+        assert_eq!(results.len(), 50, "expected a full page");
+        // Every snippet honors the default cap (match-centered slices may end a
+        // few chars short on word/char boundaries, never over).
+        for result in results {
+            let snippet = result["snippet"].as_str().unwrap();
+            assert!(
+                snippet.chars().count() <= DEFAULT_SEARCH_SNIPPET_CHARS,
+                "snippet exceeds default cap: {} chars",
+                snippet.chars().count()
+            );
+        }
+        // 60 events were indexed but the page holds 50, so logical pagination
+        // (not budget trimming) marks it truncated with a forward cursor.
+        assert_eq!(value["truncated"], json!(true));
+        assert_eq!(value["continuation"]["next_offset"], json!(50));
+    }
+
+    #[test]
+    fn history_doctor_deep_rejects_large_index_before_integrity_check() {
+        let temp = tempdir().unwrap();
+        let home = temp.path().join("home");
+        let db_path = home.join("index").join("harness.db");
+        std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+        std::fs::File::create(&db_path)
+            .unwrap()
+            .set_len(DEFAULT_MCP_DEEP_DOCTOR_MAX_BYTES + 1)
+            .unwrap();
+
+        let response = handle_message(
+            &home,
+            &json!({
+                "jsonrpc": "2.0",
+                "id": 4,
+                "method": "tools/call",
+                "params": {
+                    "name": "history_doctor",
+                    "arguments": {
+                        "deep": true
+                    }
+                }
+            })
+            .to_string(),
+        )
+        .unwrap()
+        .unwrap();
+
+        let error = &response["result"]["structuredContent"]["error"];
+        assert_eq!(response["result"]["isError"], true);
+        assert_eq!(error["code"], "VALIDATION_ERROR");
+        assert!(error["message"]
+            .as_str()
+            .unwrap()
+            .contains("integrity_check"));
+        assert_eq!(error["details"]["reason"], "deep_doctor_index_too_large");
+        assert_eq!(
+            error["details"]["db_size_bytes"],
+            DEFAULT_MCP_DEEP_DOCTOR_MAX_BYTES + 1
+        );
+        assert_eq!(
+            error["details"]["max_bytes"],
+            DEFAULT_MCP_DEEP_DOCTOR_MAX_BYTES
+        );
+        assert_eq!(error["details"]["suggested_command"], "nabu doctor --deep");
+    }
+
+    #[test]
+    fn permission_denied_errors_include_recovery_details() {
+        let error = ToolError::from(nabu_core::Error::Io {
+            path: PathBuf::from("/tmp/nabu-denied"),
+            source: std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+        });
+
+        assert_eq!(error.code, "PERMISSION_DENIED");
+        assert!(error.recoverable);
+        assert!(!error.message.contains("/tmp/nabu-denied"));
+        assert!(error.details.get("path").is_none());
+        assert_eq!(error.details["attempted_operation"], "filesystem access");
+    }
+
+    #[test]
+    fn mcp_core_errors_do_not_leak_absolute_paths_or_use_broad_not_found_matching() {
+        let raw_line = ToolError::from(nabu_core::Error::Validation(
+            "raw line 99 not found in /Users/example/.nabu/raw/claude/session.jsonl".to_string(),
+        ));
+        assert_eq!(raw_line.code, "NOT_FOUND");
+        assert_eq!(
+            raw_line.message,
+            "raw event not found for requested history pointer"
+        );
+        assert!(!raw_line.message.contains("/Users/example"));
+
+        let not_really_not_found = ToolError::from(nabu_core::Error::Validation(
+            "query text says not found but is still invalid".to_string(),
+        ));
+        assert_eq!(not_really_not_found.code, "VALIDATION_ERROR");
+
+        let io_error = ToolError::from(nabu_core::Error::Io {
+            path: PathBuf::from("/Users/example/.nabu/raw/claude/session.jsonl"),
+            source: std::io::Error::from(std::io::ErrorKind::NotFound),
+        });
+        assert_eq!(io_error.code, "STORAGE_UNAVAILABLE");
+        assert!(!io_error.message.contains("/Users/example"));
+    }
+
+    fn recall_answer_structured(home: &Path, query: &str) -> Value {
+        let response = handle_message(
+            home,
+            &json!({
+                "jsonrpc": "2.0",
+                "id": 7,
+                "method": "tools/call",
+                "params": {
+                    "name": "recall_answer",
+                    "arguments": { "query": query, "limit": 5, "before": 3, "after": 3 }
+                }
+            })
+            .to_string(),
+        )
+        .unwrap()
+        .unwrap();
+        response["result"]["structuredContent"].clone()
+    }
+
+    #[test]
+    fn recall_answer_hits_and_context_carry_citation_coordinates() {
+        let temp = tempdir().unwrap();
+        let home = temp.path().join("home");
+        init_home(&home).unwrap();
+        // Three events in one session so the matched hit has surrounding context
+        // to assemble into a before/after window.
+        for (n, prompt) in [
+            "earlier nabu setup note",
+            "nabu recall marker for the cited window",
+            "later nabu cleanup note",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            ingest_hook_event(
+                &home,
+                Tool::Claude,
+                json!({
+                    "session_id": "recall-session",
+                    "hook_event_name": "UserPromptSubmit",
+                    "message_id": format!("recall-user-{n}"),
+                    "cwd": "/tmp/nabu-recall",
+                    "project_root": "/tmp/nabu-recall",
+                    "prompt": prompt
+                }),
+            )
+            .unwrap();
+        }
+        index_once(&home).unwrap();
+
+        let structured = recall_answer_structured(&home, "nabu recall marker cited window");
+
+        // No answer text is generated; the tool only assembles cited context.
+        assert!(structured.get("answer").is_none());
+        let hits = structured["hits"].as_array().unwrap();
+        assert!(!hits.is_empty(), "recall_answer returned no hits");
+
+        // Context events are merged across hits and emitted once, attached to the
+        // first hit whose window covers them; so context lives somewhere across the
+        // hit set, not necessarily on every hit.
+        let mut total_context_events = 0;
+        for hit in hits {
+            // Invariant #13: every hit carries raw_file/raw_line/raw_offset/session_id.
+            assert_eq!(hit["session_id"], "recall-session");
+            assert!(hit["tool"].is_string());
+            assert!(hit["raw_file"].is_string());
+            assert!(hit["raw_line"].is_i64());
+            assert!(hit.get("raw_offset").is_some());
+
+            // Each assembled context event must also be independently citable.
+            for event in hit["context"].as_array().unwrap() {
+                total_context_events += 1;
+                assert!(event["tool"].is_string());
+                assert_eq!(event["session_id"], "recall-session");
+                assert!(event["raw_file"].is_string());
+                assert!(event["raw_line"].is_i64());
+                assert!(event.get("raw_offset").is_some());
+            }
+        }
+        assert!(
+            total_context_events >= 2,
+            "expected assembled surrounding context across hits"
+        );
+    }
+
+    #[test]
+    fn recall_answer_description_advertises_no_llm_no_network_one_shot_niche() {
+        let description = tool_descriptions()
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| tool["name"] == "recall_answer")
+            .and_then(|tool| tool["description"].as_str())
+            .map(str::to_string)
+            .unwrap();
+
+        // No-LLM / no-network / read-only contract is explicit.
+        assert!(description.contains("call an LLM"));
+        assert!(description.contains("network"));
+        assert!(description.contains("read-only"));
+        // One-shot niche and the trade-off against the drill-down path are stated.
+        assert!(description.contains("One-shot"));
+        assert!(description.contains("get_session"));
+        assert!(description.contains("drill-down"));
+        // Cites without a follow-up: it advertises the coordinates it echoes.
+        assert!(description.contains("raw_line"));
+        assert!(description.contains("raw_offset"));
+    }
+
+    #[test]
+    fn handoff_prompt_routes_one_shot_to_recall_answer() {
+        let prompt = handle_prompt_get(&json!({ "name": "prepare_handoff_summary" }));
+        let text = prompt["messages"][0]["content"]["text"].as_str().unwrap();
+        assert!(text.contains("recall_answer"));
+        assert!(text.contains("get_session"));
+    }
+}

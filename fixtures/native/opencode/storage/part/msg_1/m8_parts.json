@@ -1,0 +1,36 @@
+[
+  {
+    "id": "opencode-native-reasoning-1",
+    "sessionID": "33333333-3333-4333-8333-333333333333",
+    "messageID": "opencode-native-message-1",
+    "type": "reasoning",
+    "text": "sanitized opencode reasoning marker"
+  },
+  {
+    "id": "opencode-native-step-start-1",
+    "sessionID": "33333333-3333-4333-8333-333333333333",
+    "messageID": "opencode-native-message-1",
+    "type": "step-start",
+    "text": "sanitized opencode step start marker"
+  },
+  {
+    "id": "opencode-native-step-finish-1",
+    "sessionID": "33333333-3333-4333-8333-333333333333",
+    "messageID": "opencode-native-message-1",
+    "type": "step-finish",
+    "text": "sanitized opencode step finish marker"
+  },
+  {
+    "id": "opencode-native-patch-1",
+    "sessionID": "33333333-3333-4333-8333-333333333333",
+    "messageID": "opencode-native-message-1",
+    "type": "patch",
+    "files": [
+      {
+        "path": "src/main.rs",
+        "action": "modified"
+      }
+    ],
+    "text": "sanitized opencode patch marker"
+  }
+]

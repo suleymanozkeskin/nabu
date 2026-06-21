@@ -1,0 +1,2 @@
+{"session_id":"fixture-session","cwd":"/tmp/harness-raven-fixture","project_root":"/tmp/harness-raven-fixture","type":"codex.transcript.user","canonical_type":"user.message","event_id":"codex-transcript-user-1","message":"Codex transcript line includes the codex fixture marker."}
+{"session_id":"fixture-session","cwd":"/tmp/harness-raven-fixture","project_root":"/tmp/harness-raven-fixture","type":"codex.transcript.changed","unexpected":{"shape":true},"message":"Changed Codex transcript shape preserves raw payload with codex fixture marker."}

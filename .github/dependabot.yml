@@ -1,0 +1,36 @@
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    cooldown:
+      default-days: 7
+      semver-major-days: 14
+    groups:
+      cargo-minor-patch:
+        update-types:
+          - minor
+          - patch
+    ignore:
+      # The semantic stack is pinned as a tested set while fastembed tracks an
+      # ONNX Runtime release candidate and sqlite-vec's C-extension ABI. Bump
+      # these deliberately (see workspace.dependencies), not via dependabot.
+      - dependency-name: fastembed
+      - dependency-name: hf-hub
+      - dependency-name: sqlite-vec
+      - dependency-name: ort
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    cooldown:
+      default-days: 7
+    groups:
+      actions-minor-patch:
+        update-types:
+          - minor
+          - patch

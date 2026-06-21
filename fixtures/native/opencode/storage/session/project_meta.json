@@ -1,0 +1,11 @@
+{
+  "id": "05a591d2sanitizedmetadata",
+  "worktree": "/Users/example/opencode-project",
+  "vcs": {
+    "branch": "main"
+  },
+  "time": {
+    "created": 1781773199000
+  },
+  "title": "sanitized OpenCode metadata"
+}

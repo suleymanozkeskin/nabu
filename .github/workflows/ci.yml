@@ -1,0 +1,105 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  lint:
+    name: fmt + clippy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Lint with latest stable clippy/rustfmt. MSRV (1.88) is verified by the
+      # `test` job below; clippy lint sets drift between versions, so pinning the
+      # linter to the MSRV would gate on lints that newer clippy no longer warns.
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Format check
+        run: cargo fmt --all --check
+
+      - name: Clippy (deny warnings)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust 1.88
+        uses: dtolnay/rust-toolchain@1.88.0
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Test workspace (default features)
+        run: cargo test --workspace
+
+      - name: Test workspace (semantic feature)
+        run: cargo test --workspace --features semantic
+
+  supply-chain:
+    name: supply-chain
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: cargo-deny
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          rust-version: "1.88.0"
+          command: check
+          arguments: --all-features
+          command-arguments: all
+
+  public-api:
+    name: nabu-core public API
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # cargo-public-api builds rustdoc JSON, which requires nightly. The
+      # nightly and cargo-public-api versions are pinned together so the
+      # rustdoc-JSON format matches the committed snapshot; bump both in lockstep
+      # and regenerate with `scripts/check-public-api.sh --update`.
+      - name: Install Rust (nightly, pinned)
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-06-19
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-public-api
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-public-api@0.52.0
+
+      # nabu-core/src/lib.rs is a facade; a dropped or renamed `pub use` can pass
+      # the workspace build because no downstream file references every symbol.
+      # This diffs the full public surface against the committed snapshot.
+      - name: Check public API snapshot
+        run: ./scripts/check-public-api.sh

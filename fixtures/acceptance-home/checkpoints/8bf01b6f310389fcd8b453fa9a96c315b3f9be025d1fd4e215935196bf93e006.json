@@ -1,0 +1,10 @@
+{
+  "source_tool": "codex",
+  "source_kind": "transcript",
+  "source_path": "fixtures/codex/subagent_stop.json",
+  "source_identity": null,
+  "session_id": "fixture-session",
+  "byte_offset": 336,
+  "last_line_hash": "d10b36aa74a59bcf4a88185837f658afaf3646eff2bb16c3928d0e9335e945d2",
+  "last_successful_import_timestamp": "2026-06-17T14:57:54.172912Z"
+}
