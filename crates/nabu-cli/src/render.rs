@@ -465,6 +465,9 @@ pub(crate) fn print_search_page(page: SearchPage, format: OutputFormat) -> nabu_
                     AlsoAt(&result.also_at),
                     result.snippet
                 );
+                if let Some(command) = result.native_command.as_deref() {
+                    println!("  jump: `{command}`");
+                }
                 print_corroboration_markdown(result.corroboration.as_ref());
             }
         }

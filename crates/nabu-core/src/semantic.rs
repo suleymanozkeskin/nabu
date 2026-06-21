@@ -776,6 +776,8 @@ fn vector_search_results_for_k(
             let distance = row.get::<_, f64>(5)?;
             let canonical_type: String = row.get(3)?;
             let summary_kind = crate::summary_kind_for_canonical_str(&canonical_type);
+            let raw_file: String = row.get(7)?;
+            let raw_line: i64 = row.get(8)?;
             Ok(RankedSearchResult {
                 event_id: row.get(0)?,
                 result: SearchResult {
@@ -791,8 +793,9 @@ fn vector_search_results_for_k(
                         query_terms,
                         max_snippet_chars,
                     ),
-                    raw_file: row.get(7)?,
-                    raw_line: row.get(8)?,
+                    native_command: native_jsonl_line_command(&raw_file, raw_line),
+                    raw_file,
+                    raw_line,
                     raw_offset: row.get(9)?,
                     compaction_state: row.get(10)?,
                     payload: Value::Null,
