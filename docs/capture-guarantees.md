@@ -1,5 +1,24 @@
 # Capture Guarantees
 
+## Compaction Survival
+
+Compaction shrinks an agent's live context window. It does not shrink nabu's
+record. Capture is independent of the window: every turn is written to the
+append-only raw store as it happens, and the `PreCompact`/`PostCompact` hooks
+fire at the compaction boundary, so the event sequence is recorded on both sides
+of it. The raw JSONL is append-only and is never rewritten by compaction.
+
+A turn that is summarized out of the live window therefore stays retrievable
+verbatim — addressed by `tool:session:raw_line` — through `search`, `show`,
+`export`, and the MCP read surfaces.
+
+The pre-compaction turns were already captured live, so when the `PreCompact`
+hook runs nabu dedupes them by event identity rather than rewriting them (see
+Event Identity); the boundary is recorded once, not duplicated, which is why the
+`PreCompact` ingest reports `skipped duplicate` while `PostCompact` appends the
+new boundary. Claude Code emits `compaction.before`/`compaction.after` events;
+Codex compatibility mode captures compaction boundaries through its hook events.
+
 ## Codex Compatibility Mode
 
 Codex compatibility mode captures supported hook events at session, prompt, tool, compaction, subagent, and stop boundaries. It also reconciles local transcript files from `$CODEX_HOME/sessions` and `$CODEX_HOME/archived_sessions` when backfill is run.

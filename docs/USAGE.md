@@ -492,6 +492,48 @@ nabu bench ingest --events fixtures/bench/events.jsonl --seed-events 10000 --ite
 nabu bench search --query "fixture marker" --home fixtures/acceptance-home --iterations 100 --limit 10
 ```
 
+## Surviving compaction
+
+Compaction summarizes an agent's live context to reclaim the window; the
+original turns leave the context but not the store. Capture is append-only and
+independent of the window (see [Compaction Survival](capture-guarantees.md#compaction-survival)),
+so anything summarized away stays retrievable verbatim, with a citation.
+
+End to end, in a live Claude Code session (Codex and OpenCode behave the same):
+
+1. Send a distinctive turn, for example `Canary token: PLUM-VELVET-3391-XYLOPHONE-QUASAR`.
+   The `UserPromptSubmit` hook captures it as it is submitted. Confirm it landed:
+
+   ```shell
+   nabu index --once
+   nabu search "XYLOPHONE QUASAR canary" --tool claude
+   # claude <session>  …/claude_<session>.jsonl:2  Canary token: PLUM-VELVET-3391-XYLOPHONE-QUASAR …
+   ```
+
+2. Keep working, then compact (`/compact` in Claude Code). The compaction hooks
+   record the boundary:
+
+   ```text
+   PreCompact  [nabu ingest hook …] completed successfully: skipped duplicate … at offset 4775
+   PostCompact [nabu ingest hook …] completed successfully: appended … at offset 74132
+   ```
+
+   `skipped duplicate` is expected: the pre-compaction turns were already
+   captured live, so nabu records the boundary once instead of rewriting them.
+
+3. The live window is now summarized, but the verbatim turn is still in nabu:
+
+   ```shell
+   nabu index --once
+   nabu search "XYLOPHONE QUASAR canary" --tool claude --session <session>
+   nabu show claude <session> --around-line 2 --before 0 --after 0
+   # user.message  …/claude_<session>.jsonl:2  Canary token: PLUM-VELVET-3391-XYLOPHONE-QUASAR. The secret number to remember is 8472 …
+   ```
+
+`nabu export claude <session>` emits the full-fidelity session and `nabu tail
+claude <session>` reads the raw JSONL directly. Compaction changes what the model
+actively carries; it does not change what nabu has already written.
+
 ## Gotchas
 
 ### Backfill only recovers history the upstream agent still keeps
