@@ -1,3 +1,12 @@
+//! Agent configuration adapters for the `nabu` CLI: install and remove the
+//! `nabu` hooks/MCP entries in Claude, Codex, and OpenCode config files.
+//!
+//! This crate is published only so the `nabu` binary (the `nabu-cli` crate)
+//! resolves its dependencies. It is not a stable public API — items may change
+//! or be removed in any release with no semver guarantee. Depend on the `nabu`
+//! CLI, not on this crate directly.
+#![doc(hidden)]
+
 use nabu_core::{opencode_server_url, Error, Result, Tool};
 use serde::Serialize;
 use serde_json::{json, Value};

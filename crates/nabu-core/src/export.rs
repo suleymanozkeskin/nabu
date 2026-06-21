@@ -5,10 +5,6 @@ use std::fs::File;
 use std::io::Read;
 use std::path::Path;
 
-pub fn export_session_jsonl(home: &Path, tool: Tool, session_id: &str) -> Result<String> {
-    export_session_jsonl_with_options(home, tool, session_id, false)
-}
-
 pub fn export_session_jsonl_with_options(
     home: &Path,
     tool: Tool,
@@ -29,10 +25,6 @@ pub fn export_session_jsonl_with_options(
     } else {
         Ok(content)
     }
-}
-
-pub fn export_session_markdown(home: &Path, tool: Tool, session_id: &str) -> Result<String> {
-    export_session_markdown_with_options(home, tool, session_id, false)
 }
 
 pub fn export_session_markdown_with_options(

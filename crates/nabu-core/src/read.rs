@@ -284,27 +284,6 @@ pub fn get_session_page(
     })
 }
 
-pub fn get_event_by_pointer(
-    home: &Path,
-    tool: Tool,
-    session_id: &str,
-    raw_line: Option<i64>,
-    raw_offset: Option<i64>,
-    redact: bool,
-) -> Result<EventPointer> {
-    get_event_by_pointer_with_options(
-        home,
-        tool,
-        session_id,
-        raw_line,
-        raw_offset,
-        EventOptions {
-            redact,
-            corroborate: false,
-        },
-    )
-}
-
 pub fn get_event_by_pointer_with_options(
     home: &Path,
     tool: Tool,

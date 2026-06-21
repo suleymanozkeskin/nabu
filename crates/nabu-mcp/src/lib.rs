@@ -1,3 +1,12 @@
+//! Model Context Protocol (MCP) server for the `nabu` CLI: exposes the local
+//! history index to coding agents over stdio.
+//!
+//! This crate is published only so the `nabu` binary (the `nabu-cli` crate)
+//! resolves its dependencies. It is not a stable public API — items may change
+//! or be removed in any release with no semver guarantee. Depend on the `nabu`
+//! CLI, not on this crate directly.
+#![doc(hidden)]
+
 use nabu_core::{
     doctor_with_options, export_session_jsonl_with_options, export_session_markdown_with_options,
     get_event_by_pointer_with_options, get_session_page, list_sessions, redact_export_json,
