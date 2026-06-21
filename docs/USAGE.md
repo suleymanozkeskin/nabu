@@ -568,6 +568,8 @@ MVP MCP tools:
 
 `search_history` is citation-first and payload-light by default. MCP callers that need prior payload behavior must pass `include_payload=true`; use `offset` for paging and `get_session` with `around_raw_line` for context windows. `mode` accepts `auto`, `lexical`, or `hybrid` with the same fallback/error behavior as CLI search.
 
+`search_history`, `list_sessions`, and `recall_answer` search across codex, claude, and opencode in a single call by default. Pass `tool="all"` for the explicit, discoverable cross-tool form, or a specific tool name to narrow; omitting `tool` is equivalent to `"all"`. Each hit carries its own `tool` plus `raw_file`/`raw_line`/`raw_offset`/`session_id`, so a cross-tool response stays attributable per hit. The single-session surfaces (`get_session`, `export_session`, `get_event`) require a concrete `tool` and reject `"all"`.
+
 `recall_answer` runs search, pulls bounded `get_session` context windows around top hits, dedupes overlapping context, and returns cited material. It does not generate prose, call an LLM, mutate history, or make network requests.
 
 MVP MCP resources:

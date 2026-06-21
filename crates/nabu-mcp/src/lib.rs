@@ -342,12 +342,12 @@ fn tool_descriptions() -> Value {
     json!([
         {
             "name": "search_history",
-            "description": "Search indexed local agent history citation-first: returns score, snippet, tool, session_id, raw_line, and payload=null by default. Drill into hits with get_session around_raw_line/before/after, get_event, or include_payload=true for full payloads. Page with offset; include_deltas restores deltas; dedupe=false restores adjacent twin rows. Set corroborate=true to add local read-only git existence checks for mentioned commits, branches, and files; PR refs are reported unresolved/needs_network and never fetched.",
+            "description": "Search indexed local agent history citation-first: returns score, snippet, tool, session_id, raw_line, and payload=null by default. Searches every tool (codex, claude, opencode) in one call by default; pass tool=\"all\" for the explicit cross-tool form or a specific tool name to narrow — do not fan out one query per tool. Each hit carries its own tool plus raw_file/raw_line/raw_offset/session_id. Drill into hits with get_session around_raw_line/before/after, get_event, or include_payload=true for full payloads. Page with offset; include_deltas restores deltas; dedupe=false restores adjacent twin rows. Set corroborate=true to add local read-only git existence checks for mentioned commits, branches, and files; PR refs are reported unresolved/needs_network and never fetched.",
             "inputSchema": tool_schema("search_history")
         },
         {
             "name": "list_sessions",
-            "description": "List recent captured sessions with triage metadata: first_user_prompt (what the session was about), last_canonical_type (what state it ended in), top_tools and top_files (what it did), plus event/message/tool/compaction counts, timestamps, and raw-file pointers. Triage which session to open from this output alone, then drill in with get_session or export_session.",
+            "description": "List recent captured sessions with triage metadata: first_user_prompt (what the session was about), last_canonical_type (what state it ended in), top_tools and top_files (what it did), plus event/message/tool/compaction counts, timestamps, and raw-file pointers. Lists across every tool by default; pass tool=\"all\" for the explicit cross-tool form or a specific tool name to narrow. Triage which session to open from this output alone, then drill in with get_session or export_session.",
             "inputSchema": tool_schema("list_sessions")
         },
         {
@@ -1041,7 +1041,7 @@ fn tool_schema(name: &str) -> Value {
             "type": "object",
             "properties": {
                 "query": { "type": "string", "minLength": 1 },
-                "tool": { "type": "string", "enum": ["codex", "claude", "opencode"] },
+                "tool": { "type": "string", "enum": ["codex", "claude", "opencode", "all"], "description": "Restrict to one tool, or \"all\" for a single cross-tool search over codex, claude, and opencode. Omitting tool is equivalent to \"all\". Each hit still carries its own tool plus raw_file/raw_line/raw_offset/session_id coordinates." },
                 "session_id": { "type": "string" },
                 "cwd": { "type": "string" },
                 "since": { "type": "string" },
@@ -1065,7 +1065,7 @@ fn tool_schema(name: &str) -> Value {
         "list_sessions" => json!({
             "type": "object",
             "properties": {
-                "tool": { "type": "string", "enum": ["codex", "claude", "opencode"] },
+                "tool": { "type": "string", "enum": ["codex", "claude", "opencode", "all"], "description": "Restrict to one tool, or \"all\" to list sessions across codex, claude, and opencode in one call. Omitting tool is equivalent to \"all\"; each session still carries its own tool." },
                 "cwd": { "type": "string" },
                 "since": { "type": "string" },
                 "limit": { "type": "integer", "minimum": 1, "maximum": 100, "default": 20 }
@@ -1126,7 +1126,7 @@ fn tool_schema(name: &str) -> Value {
             "type": "object",
             "properties": {
                 "query": { "type": "string", "minLength": 1 },
-                "tool": { "type": "string", "enum": ["codex", "claude", "opencode"] },
+                "tool": { "type": "string", "enum": ["codex", "claude", "opencode", "all"], "description": "Restrict to one tool, or \"all\" to gather cited context across codex, claude, and opencode in one call. Omitting tool is equivalent to \"all\"; each hit still carries its own tool and coordinates." },
                 "session_id": { "type": "string" },
                 "cwd": { "type": "string" },
                 "since": { "type": "string" },
@@ -1579,14 +1579,26 @@ fn required_tool(arguments: &Value, key: &str) -> Result<Tool, ToolError> {
     })
 }
 
+/// Parse an optional cross-tool `tool` filter for the search/list surfaces.
+///
+/// An absent key and the explicit value `"all"` both map to `None`, which the
+/// core search applies as "no tool filter" — one query spanning codex, claude,
+/// and opencode. `"all"` is the discoverable, self-documenting spelling of the
+/// default; it never changes the meaning of omitting the key. A concrete tool
+/// name resolves to `Some(tool)`. This helper is for the cross-tool surfaces
+/// only (`search_history`, `list_sessions`, `recall_answer`); the single-session
+/// surfaces use `required_tool`, which rejects `"all"`.
 fn optional_tool(arguments: &Value, key: &str) -> Result<Option<Tool>, ToolError> {
     let Some(value) = arguments.get(key).and_then(Value::as_str) else {
         return Ok(None);
     };
+    if value == "all" {
+        return Ok(None);
+    }
     Tool::from_str(value).map(Some).map_err(|_| {
         ToolError::new(
             "VALIDATION_ERROR",
-            format!("{key} must be codex, claude, or opencode"),
+            format!("{key} must be codex, claude, opencode, or all"),
             true,
         )
     })
@@ -1938,6 +1950,173 @@ mod tests {
             .unwrap()
             .iter()
             .any(|result| result["session_id"] == "fixture-session"));
+    }
+
+    fn ingest_prompt(home: &Path, tool: Tool, session_id: &str, prompt: &str) {
+        ingest_hook_event(
+            home,
+            tool,
+            json!({
+                "session_id": session_id,
+                "hook_event_name": "UserPromptSubmit",
+                "message_id": format!("mcp-{session_id}"),
+                "cwd": "/tmp/nabu-fixture",
+                "project_root": "/tmp/nabu-fixture",
+                "prompt": prompt
+            }),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn search_history_tool_all_returns_hits_from_multiple_tools_in_one_call() {
+        let temp = tempdir().unwrap();
+        let home = temp.path().join("home");
+        init_home(&home).unwrap();
+        ingest_prompt(
+            &home,
+            Tool::Claude,
+            "claude-session",
+            "nabu crosstool marker from claude",
+        );
+        ingest_prompt(
+            &home,
+            Tool::Codex,
+            "codex-session",
+            "nabu crosstool marker from codex",
+        );
+        index_once(&home).unwrap();
+
+        let response = handle_message(
+            &home,
+            &json!({
+                "jsonrpc": "2.0",
+                "id": 7,
+                "method": "tools/call",
+                "params": {
+                    "name": "search_history",
+                    "arguments": {
+                        "query": "nabu crosstool marker",
+                        "tool": "all",
+                        "limit": 10
+                    }
+                }
+            })
+            .to_string(),
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_ne!(response["result"]["isError"], true);
+        let results = response["result"]["structuredContent"]["results"]
+            .as_array()
+            .unwrap();
+
+        // A single call spans more than one tool.
+        let tools: std::collections::BTreeSet<&str> = results
+            .iter()
+            .filter_map(|hit| hit["tool"].as_str())
+            .collect();
+        assert!(
+            tools.contains("claude") && tools.contains("codex"),
+            "tool=all must return hits from more than one tool in one call, got {tools:?}"
+        );
+
+        // Invariant #13: every hit carries its own per-hit tool + coordinates.
+        for hit in results {
+            assert!(hit["tool"].is_string(), "hit missing tool: {hit}");
+            assert!(hit["raw_file"].is_string(), "hit missing raw_file: {hit}");
+            assert!(hit["raw_line"].is_number(), "hit missing raw_line: {hit}");
+            // raw_offset is carried on every hit (Option<i64>; null only when the
+            // raw store lacks byte offsets). The key must always be present.
+            assert!(
+                hit.get("raw_offset").is_some(),
+                "hit missing raw_offset key: {hit}"
+            );
+            assert!(
+                hit["session_id"].is_string(),
+                "hit missing session_id: {hit}"
+            );
+        }
+    }
+
+    #[test]
+    fn search_history_tool_all_matches_omitting_tool() {
+        let temp = tempdir().unwrap();
+        let home = temp.path().join("home");
+        init_home(&home).unwrap();
+        ingest_prompt(&home, Tool::Claude, "claude-session", "nabu parity marker");
+        ingest_prompt(&home, Tool::Codex, "codex-session", "nabu parity marker");
+        index_once(&home).unwrap();
+
+        let call = |tool: Option<&str>| {
+            let mut arguments = json!({ "query": "nabu parity marker", "limit": 10 });
+            if let Some(tool) = tool {
+                arguments["tool"] = json!(tool);
+            }
+            let response = handle_message(
+                &home,
+                &json!({
+                    "jsonrpc": "2.0",
+                    "id": 8,
+                    "method": "tools/call",
+                    "params": { "name": "search_history", "arguments": arguments }
+                })
+                .to_string(),
+            )
+            .unwrap()
+            .unwrap();
+            response["result"]["structuredContent"]["results"]
+                .as_array()
+                .unwrap()
+                .len()
+        };
+
+        // "all" is the explicit spelling of omitting tool; both search every tool.
+        assert_eq!(call(Some("all")), call(None));
+        assert!(call(Some("all")) >= 2);
+    }
+
+    #[test]
+    fn single_session_surfaces_reject_tool_all() {
+        let temp = tempdir().unwrap();
+        let home = temp.path().join("home");
+        init_home(&home).unwrap();
+
+        for name in ["get_session", "get_event", "export_session"] {
+            let response = handle_message(
+                &home,
+                &json!({
+                    "jsonrpc": "2.0",
+                    "id": 9,
+                    "method": "tools/call",
+                    "params": {
+                        "name": name,
+                        "arguments": {
+                            "tool": "all",
+                            "session_id": "any-session"
+                        }
+                    }
+                })
+                .to_string(),
+            )
+            .unwrap()
+            .unwrap();
+
+            assert_eq!(
+                response["result"]["isError"], true,
+                "{name} must reject tool=all"
+            );
+            let error = &response["result"]["structuredContent"]["error"];
+            assert_eq!(error["code"], "VALIDATION_ERROR", "{name}");
+            assert!(
+                error["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("codex, claude, or opencode"),
+                "{name} error should name the accepted single tools, got {error}"
+            );
+        }
     }
 
     #[test]
