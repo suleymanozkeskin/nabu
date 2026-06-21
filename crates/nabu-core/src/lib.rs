@@ -31,6 +31,8 @@ pub(crate) const DEFAULT_SEARCH_SNIPPET_CHARS: usize = 240;
 const MAX_SESSION_LIMIT: usize = 500;
 const MAX_CONTEXT_EVENTS_PER_SIDE: usize = 500;
 const MAX_DIRECTORY_SIZE_DEPTH: usize = 64;
+mod concept_expansion;
+pub(crate) use concept_expansion::expand_query_terms;
 mod semantic;
 #[cfg(all(test, feature = "semantic"))]
 pub(crate) use semantic::{

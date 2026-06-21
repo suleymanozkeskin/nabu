@@ -25,6 +25,12 @@ pub struct SearchOptions {
     pub max_snippet_chars: usize,
     pub mode: SearchMode,
     pub corroborate: bool,
+    /// Opt-in concept/synonym query expansion for the lexical match. When true,
+    /// each query term is OR-combined with a curated set of near-synonyms so a
+    /// concept query can retrieve documents that record the concept under a
+    /// different word. Off by default; never changes ranking of literal-term
+    /// hits, only widens the candidate set.
+    pub expand_concepts: bool,
 }
 
 impl Default for SearchOptions {
@@ -45,6 +51,7 @@ impl Default for SearchOptions {
             max_snippet_chars: DEFAULT_SEARCH_SNIPPET_CHARS,
             mode: SearchMode::Auto,
             corroborate: false,
+            expand_concepts: false,
         }
     }
 }
@@ -413,6 +420,7 @@ pub struct SearchPage {
     pub include_payload: bool,
     pub include_deltas: bool,
     pub dedupe: bool,
+    pub expand_concepts: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]

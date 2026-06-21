@@ -2844,6 +2844,92 @@ fn search_multi_word_query_keeps_recall_with_or_semantics() {
 }
 
 #[test]
+fn concept_expansion_retrieves_synonym_only_document_opt_in() {
+    let temp = tempdir().unwrap();
+    let home = temp.path().join("home");
+    init_home(&home).unwrap();
+
+    // The target records the concept under a synonym only: it says "error" and
+    // "latency", never the literal query words "bug" or "perf".
+    ingest_hook_event(
+        &home,
+        Tool::Claude,
+        json!({
+            "session_id": "concept-target",
+            "hook_event_name": "UserPromptSubmit",
+            "message_id": "concept-target-1",
+            "prompt": "the index reported an error and high latency during rebuild"
+        }),
+    )
+    .unwrap();
+    // A distractor with neither the literal terms nor any synonym, so expansion
+    // must not start matching unrelated documents.
+    ingest_hook_event(
+        &home,
+        Tool::Claude,
+        json!({
+            "session_id": "concept-distractor",
+            "hook_event_name": "UserPromptSubmit",
+            "message_id": "concept-distractor-1",
+            "prompt": "session export wrote markdown to disk"
+        }),
+    )
+    .unwrap();
+    index_once(&home).unwrap();
+
+    let query = "bug perf";
+
+    // Baseline lexical search has no concept knowledge: the synonym-only target
+    // is invisible because neither "bug" nor "perf" appears in it.
+    let baseline = search_history_page(
+        &home,
+        query,
+        SearchOptions {
+            mode: SearchMode::Lexical,
+            expand_concepts: false,
+            ..SearchOptions::default()
+        },
+    )
+    .unwrap();
+    assert!(
+        !baseline
+            .results
+            .iter()
+            .any(|result| result.session_id == "concept-target"),
+        "without expansion the synonym-only document must be missed"
+    );
+
+    // With the opt-in flag, "bug" expands to include "error" and "perf" to
+    // include "latency", so the target is retrieved.
+    let expanded = search_history_page(
+        &home,
+        query,
+        SearchOptions {
+            mode: SearchMode::Lexical,
+            expand_concepts: true,
+            ..SearchOptions::default()
+        },
+    )
+    .unwrap();
+    assert!(expanded.expand_concepts, "page echoes the applied flag");
+    assert!(
+        expanded
+            .results
+            .iter()
+            .any(|result| result.session_id == "concept-target"),
+        "expansion must retrieve the synonym-only document"
+    );
+    // Expansion widens recall without dragging in the unrelated distractor.
+    assert!(
+        !expanded
+            .results
+            .iter()
+            .any(|result| result.session_id == "concept-distractor"),
+        "expansion must not start matching unrelated documents"
+    );
+}
+
+#[test]
 fn search_filters_apply_session_type_file_and_command() {
     let temp = tempdir().unwrap();
     let home = temp.path().join("home");

@@ -6,11 +6,11 @@
 pub(crate) mod corroborate;
 
 use crate::{
-    normalize_date_or_duration, open_index, open_raw_offset_reader, raw_envelope_for_line_scan,
-    read_raw_envelope_at_offset, resolved_payload_for_envelope, semantic_search_available,
-    sha256_hex, vector_search_results, Error, RankedSearchResult, Result, SearchContinuation,
-    SearchMode, SearchOptions, SearchPage, SearchResult, Tool, MAX_SEARCH_LIMIT,
-    MAX_SEARCH_SNIPPET_CHARS,
+    expand_query_terms, normalize_date_or_duration, open_index, open_raw_offset_reader,
+    raw_envelope_for_line_scan, read_raw_envelope_at_offset, resolved_payload_for_envelope,
+    semantic_search_available, sha256_hex, vector_search_results, Error, RankedSearchResult,
+    Result, SearchContinuation, SearchMode, SearchOptions, SearchPage, SearchResult, Tool,
+    MAX_SEARCH_LIMIT, MAX_SEARCH_SNIPPET_CHARS,
 };
 pub(crate) use corroborate::corroborate_text;
 use rusqlite::params_from_iter;
@@ -66,7 +66,7 @@ pub fn search_history_page(home: &Path, query: &str, options: SearchOptions) -> 
             Err(error) => return Err(error),
         }
     }
-    let query_terms = searchable_terms(query)?;
+    let query_terms = effective_search_terms(query, options.expand_concepts)?;
     let fts_query = quoted_fts_terms(&query_terms);
     let limit = options.limit.clamp(1, MAX_SEARCH_LIMIT);
     let offset = options.offset;
@@ -126,6 +126,7 @@ pub fn search_history_page(home: &Path, query: &str, options: SearchOptions) -> 
         include_payload: options.include_payload,
         include_deltas: options.include_deltas,
         dedupe: options.dedupe,
+        expand_concepts: options.expand_concepts,
     })
 }
 
@@ -279,7 +280,7 @@ fn search_history_hybrid_page(
     options: SearchOptions,
     semantic_available: bool,
 ) -> Result<SearchPage> {
-    let query_terms = searchable_terms(query)?;
+    let query_terms = effective_search_terms(query, options.expand_concepts)?;
     let limit = options.limit.clamp(1, MAX_SEARCH_LIMIT);
     let offset = options.offset;
     let max_snippet_chars = options.max_snippet_chars.clamp(1, MAX_SEARCH_SNIPPET_CHARS);
@@ -342,6 +343,7 @@ fn search_history_hybrid_page(
         include_payload: options.include_payload,
         include_deltas: options.include_deltas,
         dedupe: options.dedupe,
+        expand_concepts: options.expand_concepts,
     })
 }
 
@@ -487,6 +489,19 @@ fn retrieval_twin_key(result: &SearchResult) -> (String, String, String) {
         result.canonical_type.clone(),
         result.retrieval_key.clone(),
     )
+}
+
+// Resolve the literal query into the term list used for FTS matching and
+// snippet centering. With `expand_concepts` set, the literal terms are
+// OR-extended with curated synonyms (originals kept up front); off, this is
+// exactly `searchable_terms`.
+fn effective_search_terms(query: &str, expand_concepts: bool) -> Result<Vec<String>> {
+    let terms = searchable_terms(query)?;
+    if expand_concepts {
+        Ok(expand_query_terms(&terms))
+    } else {
+        Ok(terms)
+    }
 }
 
 fn searchable_terms(query: &str) -> Result<Vec<String>> {
