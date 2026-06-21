@@ -337,7 +337,7 @@ fn tool_descriptions() -> Value {
         },
         {
             "name": "list_sessions",
-            "description": "List recent captured sessions with counts and raw-file pointers.",
+            "description": "List recent captured sessions with triage metadata: first_user_prompt (what the session was about), last_canonical_type (what state it ended in), top_tools and top_files (what it did), plus event/message/tool/compaction counts, timestamps, and raw-file pointers. Triage which session to open from this output alone, then drill in with get_session or export_session.",
             "inputSchema": tool_schema("list_sessions")
         },
         {
