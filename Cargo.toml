@@ -21,7 +21,7 @@ categories = ["command-line-utilities", "development-tools"]
 [workspace.dependencies]
 clap = { version = "4", features = ["derive"] }
 console = "0.15"
-dialoguer = { version = "0.11", default-features = false }
+dialoguer = { version = "0.12", default-features = false }
 fs2 = "0.4"
 # Keep the semantic stack pinned as a tested set while fastembed depends on the
 # ONNX Runtime 2.0 release-candidate line and sqlite-vec's C extension ABI.
