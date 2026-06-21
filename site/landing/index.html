@@ -13,7 +13,29 @@
             type="image/svg+xml"
             href="../design-system/assets/logo/nabu-logo-transparent.svg"
         />
-        <link rel="stylesheet" href="../design-system/styles.css" />
+        <!--
+            CSS is linked flat rather than through design-system/styles.css.
+            styles.css is @import-only, and tokens/fonts.css nests a further
+            @import to the font CDN, so a single styles.css link serializes:
+            HTML -> styles.css -> fonts.css -> Google Fonts -> font files.
+            CSS variables only resolve at the end of that chain, producing a
+            flash of unstyled content. Linking each file (and preconnecting to
+            the font CDN) lets them all download in parallel from first parse.
+        -->
+        <link rel="preconnect" href="https://fonts.googleapis.com" />
+        <link
+            rel="preconnect"
+            href="https://fonts.gstatic.com"
+            crossorigin
+        />
+        <link
+            rel="stylesheet"
+            href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&family=IBM+Plex+Sans:wght@400;500;600;700&family=Noto+Sans+Cuneiform&display=swap"
+        />
+        <link rel="stylesheet" href="../design-system/tokens/colors.css" />
+        <link rel="stylesheet" href="../design-system/tokens/typography.css" />
+        <link rel="stylesheet" href="../design-system/tokens/spacing.css" />
+        <link rel="stylesheet" href="../design-system/tokens/effects.css" />
         <link rel="stylesheet" href="./landing.css" />
     </head>
     <body>
