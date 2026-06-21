@@ -443,6 +443,30 @@ pub struct StoredEvent {
     pub project_root: Option<String>,
 }
 
+/// Maximum number of characters retained for the first-user-prompt triage
+/// snippet. Longer prompts are truncated on a char boundary with an ellipsis.
+pub const SESSION_PROMPT_SNIPPET_CHARS: usize = 200;
+
+/// Maximum number of distinct tool names surfaced in `top_tools`.
+pub const SESSION_TOP_TOOLS: usize = 5;
+
+/// Maximum number of edited files surfaced in `top_files`.
+pub const SESSION_TOP_FILES: usize = 5;
+
+/// A tool-name usage count derived from the session's `tool_events` rows.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ToolUsage {
+    pub tool_name: String,
+    pub count: i64,
+}
+
+/// A file the session edited (`file.changed` events), with how many times.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct FileTouch {
+    pub path: String,
+    pub edits: i64,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct SessionSummary {
     pub tool: Tool,
@@ -453,8 +477,26 @@ pub struct SessionSummary {
     pub updated_at: Option<String>,
     pub event_count: i64,
     pub message_count: i64,
+    pub tool_event_count: i64,
     pub compaction_count: i64,
     pub raw_file: String,
+    /// First user-message text of the session, truncated to
+    /// [`SESSION_PROMPT_SNIPPET_CHARS`]. The strongest triage signal: it states
+    /// what the session was about without loading it. Absent only when the
+    /// session has no indexed user message.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub first_user_prompt: Option<String>,
+    /// Canonical type of the session's last event (e.g. `assistant.message`,
+    /// `tool.call`, `compaction.after`). Reveals what state the session ended
+    /// in. Absent only when the session has no indexed events.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_canonical_type: Option<String>,
+    /// Top tool names invoked in the session, by descending call count.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub top_tools: Vec<ToolUsage>,
+    /// Top files edited in the session, by descending edit count.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub top_files: Vec<FileTouch>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]

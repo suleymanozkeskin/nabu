@@ -4341,11 +4341,182 @@ fn summary_kind_classifies_phase_handover_types_only() {
 
 #[test]
 fn search_flags_summary_events_and_not_ordinary_events() {
+// Issue #1 item 7: list_sessions must carry triage metadata derived from
+// already-indexed tables so a caller can pick a session without loading it.
+// Controlled by seeding a multi-event session with a known first prompt, a
+// known tool-name mix, and a final compaction, then asserting the derived
+// fields reflect exactly that.
+#[test]
+fn list_sessions_surfaces_triage_metadata_for_multi_event_session() {
+    let temp = tempdir().unwrap();
+    let home = temp.path().join("home");
+    init_home(&home).unwrap();
+
+    // A rich Claude session: first user prompt, three tool calls (bash x2,
+    // edit x1), then a compaction. The first prompt is the triage signal.
+    ingest_hook_event(
+        &home,
+        Tool::Claude,
+        json!({
+            "session_id": "triage-rich",
+            "hook_event_name": "UserPromptSubmit",
+            "message_id": "triage-rich-prompt",
+            "cwd": "/tmp/nabu-triage",
+            "project_root": "/tmp/nabu-triage",
+            "prompt": "Refactor the auth module and add tests"
+        }),
+    )
+    .unwrap();
+    // A later prompt must NOT win: first_user_prompt is the earliest one.
+    ingest_hook_event(
+        &home,
+        Tool::Claude,
+        json!({
+            "session_id": "triage-rich",
+            "hook_event_name": "UserPromptSubmit",
+            "message_id": "triage-rich-prompt-2",
+            "prompt": "Now also update the README"
+        }),
+    )
+    .unwrap();
+    for (idx, tool_name, command) in [
+        (0, "bash", "cargo test"),
+        (1, "bash", "cargo clippy"),
+        (2, "edit", ""),
+    ] {
+        ingest_hook_event(
+            &home,
+            Tool::Claude,
+            json!({
+                "session_id": "triage-rich",
+                "hook_event_name": "PreToolUse",
+                "message_id": format!("triage-rich-tool-{idx}"),
+                "tool_name": tool_name,
+                "command": command
+            }),
+        )
+        .unwrap();
+    }
+    ingest_hook_event(
+        &home,
+        Tool::Claude,
+        json!({
+            "session_id": "triage-rich",
+            "hook_event_name": "PreCompact",
+            "message_id": "triage-rich-compact",
+            "trigger": "auto"
+        }),
+    )
+    .unwrap();
+
+    // A second session that edits two files (one file twice) so top_files is
+    // exercised. Opencode's file.edited maps to file.changed which records the
+    // 'edited' relationship that top_files counts.
+    ingest_hook_event(
+        &home,
+        Tool::Opencode,
+        json!({
+            "hook_event_name": "session.created",
+            "id": "triage-files",
+            "directory": "/tmp/nabu-triage"
+        }),
+    )
+    .unwrap();
+    for (idx, path) in [
+        "/tmp/nabu-triage/src/auth.rs",
+        "/tmp/nabu-triage/src/auth.rs",
+        "/tmp/nabu-triage/src/lib.rs",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        // Distinct `diff` per edit so the two auth.rs edits are distinct events
+        // (byte-identical events dedupe by design).
+        ingest_hook_event(
+            &home,
+            Tool::Opencode,
+            json!({
+                "hook_event_name": "file.edited",
+                "sessionID": "triage-files",
+                "path": path,
+                "diff": format!("edit marker {idx}")
+            }),
+        )
+        .unwrap();
+    }
+    index_once(&home).unwrap();
+
+    let sessions = list_sessions(&home, None, None, None, 20).unwrap();
+
+    let rich = sessions
+        .iter()
+        .find(|session| session.session_id == "triage-rich")
+        .expect("rich session listed");
+    // Triage from the list row alone: what it was about, what it did, how it
+    // ended.
+    assert_eq!(
+        rich.first_user_prompt.as_deref(),
+        Some("Refactor the auth module and add tests")
+    );
+    assert_eq!(
+        rich.last_canonical_type.as_deref(),
+        Some("compaction.before")
+    );
+    assert_eq!(rich.compaction_count, 1);
+    assert_eq!(rich.tool_event_count, 3);
+    // bash (2) outranks edit (1); ties would break alphabetically.
+    assert_eq!(
+        rich.top_tools,
+        vec![
+            ToolUsage {
+                tool_name: "bash".to_string(),
+                count: 2,
+            },
+            ToolUsage {
+                tool_name: "edit".to_string(),
+                count: 1,
+            },
+        ]
+    );
+
+    let files = sessions
+        .iter()
+        .find(|session| session.session_id == "triage-files")
+        .expect("file session listed");
+    // auth.rs edited twice outranks lib.rs edited once.
+    assert_eq!(
+        files.top_files,
+        vec![
+            FileTouch {
+                path: "/tmp/nabu-triage/src/auth.rs".to_string(),
+                edits: 2,
+            },
+            FileTouch {
+                path: "/tmp/nabu-triage/src/lib.rs".to_string(),
+                edits: 1,
+            },
+        ]
+    );
+
+    // Triage fields serialize for MCP and omit when empty (the file session has
+    // no tool calls, so top_tools is skipped, not emitted as []).
+    let json = serde_json::to_value(files).unwrap();
+    assert!(json.get("top_tools").is_none());
+    assert!(json.get("top_files").is_some());
+    assert!(json.get("first_user_prompt").is_none());
+}
+
+// Issue #1 item 7: the first-user-prompt snippet must truncate long prompts on
+// a char boundary so the list row stays compact and never panics on multibyte
+// input. Controlled by varying only prompt length around the cap.
+#[test]
+fn list_sessions_truncates_long_first_user_prompt() {
     let temp = tempdir().unwrap();
     let home = temp.path().join("home");
     init_home(&home).unwrap();
 
     // A session-start handover (summary-bearing canonical type).
+    let long_prompt = "x".repeat(SESSION_PROMPT_SNIPPET_CHARS + 50);
     ingest_hook_event(
         &home,
         Tool::Claude,
@@ -4369,6 +4540,10 @@ fn search_flags_summary_events_and_not_ordinary_events() {
             "cwd": "/tmp/nabu-fixture",
             "project_root": "/tmp/nabu-fixture",
             "prompt": "phase handover surfacing marker followup"
+            "session_id": "triage-long",
+            "hook_event_name": "UserPromptSubmit",
+            "message_id": "triage-long-1",
+            "prompt": long_prompt
         }),
     )
     .unwrap();
@@ -4446,6 +4621,14 @@ fn session_page_flags_summary_events() {
         .find(|event| event.canonical_type == "user.message")
         .expect("user.message event present");
     assert_eq!(user.summary_kind, None);
+    let sessions = list_sessions(&home, Some(Tool::Claude), None, None, 10).unwrap();
+    let snippet = sessions[0]
+        .first_user_prompt
+        .as_deref()
+        .expect("prompt present");
+    // SESSION_PROMPT_SNIPPET_CHARS chars plus the single ellipsis char.
+    assert_eq!(snippet.chars().count(), SESSION_PROMPT_SNIPPET_CHARS + 1);
+    assert!(snippet.ends_with('\u{2026}'));
 }
 
 fn valid_envelope_json() -> Value {
