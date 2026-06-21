@@ -332,7 +332,7 @@ fn tool_descriptions() -> Value {
     json!([
         {
             "name": "search_history",
-            "description": "Search indexed local agent history citation-first: returns score, snippet, tool, session_id, raw_line, and payload=null by default. Drill into hits with get_session around_raw_line/before/after, get_event, or include_payload=true for full payloads. Page with offset; include_deltas restores deltas; dedupe=false restores adjacent twin rows. Set corroborate=true to add local read-only git existence checks for mentioned commits, branches, and files; PR refs are reported unresolved/needs_network and never fetched.",
+            "description": "Search indexed local agent history citation-first: returns score, snippet, tool, session_id, raw_line, and payload=null by default. Drill into hits with get_session around_raw_line/before/after, get_event, or include_payload=true for full payloads. Page with offset; include_deltas restores deltas; dedupe=false restores adjacent twin rows. Set corroborate=true to add local read-only git existence checks for mentioned commits, branches, and files; PR refs are reported unresolved/needs_network and never fetched. Use this for controllable, interactive drill-down; if you instead want ranked hits plus their surrounding context assembled in one cited call, use recall_answer.",
             "inputSchema": tool_schema("search_history")
         },
         {
@@ -362,7 +362,7 @@ fn tool_descriptions() -> Value {
         },
         {
             "name": "recall_answer",
-            "description": "Assemble cited context windows for a query in one read-only call. It does not write an answer, call an LLM, mutate history, or make network requests. Set corroborate=true to annotate hits/context with local read-only git existence checks; PR refs remain unresolved/needs_network.",
+            "description": "One-shot: assemble cited context windows for a question in a single read-only call. Runs the search_history ranking, then for each hit attaches the surrounding before/after events from that session. Every hit and every context event carries tool, session_id, raw_file, raw_line, and raw_offset so the caller can cite without a follow-up. It does not write an answer, call an LLM, mutate history, or make network requests. Set corroborate=true to annotate hits/context with local read-only git existence checks; PR refs remain unresolved/needs_network. Reach for this when you want ranked hits plus their context in one shot for a cited handoff. Prefer search_history then get_session when you need controllable, interactive drill-down: paging, picking exact raw lines, restoring deltas, or widening one window without re-ranking.",
             "inputSchema": tool_schema("recall_answer")
         }
     ])
@@ -943,7 +943,7 @@ fn handle_prompt_get(params: &Value) -> Value {
             "Before continuing, call search_history with a concise project query. It is citation-first and payload-light by default; page with offset and drill into relevant hits using get_session around_raw_line/before/after or get_event. Cite tool, session_id, and raw_line."
         }
         "prepare_handoff_summary" => {
-            "Call list_sessions, then get_session with around_raw_line windows or export_session for full-fidelity handoff content. Produce a compact handoff summary with citations including tool, session_id, raw_line or raw_offset."
+            "For a question-driven handoff, call recall_answer once: it returns ranked hits with their surrounding context windows already cited (tool, session_id, raw_line, raw_offset), no follow-up needed. When you instead need to walk specific sessions, call list_sessions, then get_session with around_raw_line windows or export_session for full-fidelity content. Produce a compact handoff summary with citations including tool, session_id, raw_line or raw_offset."
         }
         _ => "Unknown prompt. Call prompts/list to discover available nabu prompts.",
     };
@@ -993,7 +993,7 @@ fn prompt_descriptions() -> Value {
         },
         {
             "name": "prepare_handoff_summary",
-            "description": "Retrieve relevant sessions and prepare a cited handoff.",
+            "description": "Assemble a cited handoff: recall_answer for one-shot question-driven context, or list_sessions/get_session to walk specific sessions.",
             "arguments": []
         }
     ])
@@ -2002,5 +2002,122 @@ mod tests {
         });
         assert_eq!(io_error.code, "STORAGE_UNAVAILABLE");
         assert!(!io_error.message.contains("/Users/example"));
+    }
+
+    fn recall_answer_structured(home: &Path, query: &str) -> Value {
+        let response = handle_message(
+            home,
+            &json!({
+                "jsonrpc": "2.0",
+                "id": 7,
+                "method": "tools/call",
+                "params": {
+                    "name": "recall_answer",
+                    "arguments": { "query": query, "limit": 5, "before": 3, "after": 3 }
+                }
+            })
+            .to_string(),
+        )
+        .unwrap()
+        .unwrap();
+        response["result"]["structuredContent"].clone()
+    }
+
+    #[test]
+    fn recall_answer_hits_and_context_carry_citation_coordinates() {
+        let temp = tempdir().unwrap();
+        let home = temp.path().join("home");
+        init_home(&home).unwrap();
+        // Three events in one session so the matched hit has surrounding context
+        // to assemble into a before/after window.
+        for (n, prompt) in [
+            "earlier nabu setup note",
+            "nabu recall marker for the cited window",
+            "later nabu cleanup note",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            ingest_hook_event(
+                &home,
+                Tool::Claude,
+                json!({
+                    "session_id": "recall-session",
+                    "hook_event_name": "UserPromptSubmit",
+                    "message_id": format!("recall-user-{n}"),
+                    "cwd": "/tmp/nabu-recall",
+                    "project_root": "/tmp/nabu-recall",
+                    "prompt": prompt
+                }),
+            )
+            .unwrap();
+        }
+        index_once(&home).unwrap();
+
+        let structured = recall_answer_structured(&home, "nabu recall marker cited window");
+
+        // No answer text is generated; the tool only assembles cited context.
+        assert!(structured.get("answer").is_none());
+        let hits = structured["hits"].as_array().unwrap();
+        assert!(!hits.is_empty(), "recall_answer returned no hits");
+
+        // Context events are merged across hits and emitted once, attached to the
+        // first hit whose window covers them; so context lives somewhere across the
+        // hit set, not necessarily on every hit.
+        let mut total_context_events = 0;
+        for hit in hits {
+            // Invariant #13: every hit carries raw_file/raw_line/raw_offset/session_id.
+            assert_eq!(hit["session_id"], "recall-session");
+            assert!(hit["tool"].is_string());
+            assert!(hit["raw_file"].is_string());
+            assert!(hit["raw_line"].is_i64());
+            assert!(hit.get("raw_offset").is_some());
+
+            // Each assembled context event must also be independently citable.
+            for event in hit["context"].as_array().unwrap() {
+                total_context_events += 1;
+                assert!(event["tool"].is_string());
+                assert_eq!(event["session_id"], "recall-session");
+                assert!(event["raw_file"].is_string());
+                assert!(event["raw_line"].is_i64());
+                assert!(event.get("raw_offset").is_some());
+            }
+        }
+        assert!(
+            total_context_events >= 2,
+            "expected assembled surrounding context across hits"
+        );
+    }
+
+    #[test]
+    fn recall_answer_description_advertises_no_llm_no_network_one_shot_niche() {
+        let description = tool_descriptions()
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| tool["name"] == "recall_answer")
+            .and_then(|tool| tool["description"].as_str())
+            .map(str::to_string)
+            .unwrap();
+
+        // No-LLM / no-network / read-only contract is explicit.
+        assert!(description.contains("call an LLM"));
+        assert!(description.contains("network"));
+        assert!(description.contains("read-only"));
+        // One-shot niche and the trade-off against the drill-down path are stated.
+        assert!(description.contains("One-shot"));
+        assert!(description.contains("get_session"));
+        assert!(description.contains("drill-down"));
+        // Cites without a follow-up: it advertises the coordinates it echoes.
+        assert!(description.contains("raw_line"));
+        assert!(description.contains("raw_offset"));
+    }
+
+    #[test]
+    fn handoff_prompt_routes_one_shot_to_recall_answer() {
+        let prompt = handle_prompt_get(&json!({ "name": "prepare_handoff_summary" }));
+        let text = prompt["messages"][0]["content"]["text"].as_str().unwrap();
+        assert!(text.contains("recall_answer"));
+        assert!(text.contains("get_session"));
     }
 }
