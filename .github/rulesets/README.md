@@ -37,8 +37,8 @@ gh api -X PUT repos/suleymanozkeskin/nabu/rulesets/<id> \
 - `semantic-acceptance` is intentionally **not** a required check — it runs on a
   schedule / `workflow_dispatch`, not on pull requests, so it never reports a
   status on a PR.
-- release-plz opens its release PR with the built-in `GITHUB_TOKEN`, and PRs
-  opened by `GITHUB_TOKEN` do not trigger workflows. With the required checks
-  above, that PR would never get a CI status and could not merge. Give release-plz
-  a PAT stored as `RELEASE_PLZ_TOKEN` so its PRs run CI — see
-  [`RELEASING.md`](../../RELEASING.md).
+- Releases are cut by the manual `release` workflow, not a bot: you bump the
+  version and changelog in a normal PR (which runs CI and merges under these
+  rules like any other), then trigger the workflow. It tags and publishes with
+  the built-in `GITHUB_TOKEN` + `CARGO_REGISTRY_TOKEN`, so no PAT is needed —
+  see [`RELEASING.md`](../../RELEASING.md).

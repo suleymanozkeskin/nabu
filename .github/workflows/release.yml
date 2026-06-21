@@ -1,0 +1,154 @@
+name: release
+
+# Manual release. You bump [workspace.package].version and rename the
+# CHANGELOG "## Unreleased" section to "## <version>" in a normal PR, merge it,
+# then run this workflow from the Actions tab. It runs the test gate, publishes
+# the four crates to crates.io in dependency order, tags the commit, and creates
+# the GitHub release from the matching CHANGELOG section. No bot, no PAT.
+on:
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: >-
+          Publish to crates.io and create the tag + GitHub release. Uncheck for
+          a gate-only dry run (version/changelog checks + tests, no publish).
+        required: true
+        default: true
+        type: boolean
+
+# Never run two releases at once.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  # Resolve the version from Cargo.toml, extract its CHANGELOG section, and
+  # refuse to proceed if the tag already exists or the section is missing.
+  # Fails fast (in parallel with the gate) before anything is published.
+  preflight:
+    name: version + notes
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      tag: ${{ steps.meta.outputs.tag }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve version, extract notes, guard tag
+        id: meta
+        run: |
+          set -euo pipefail
+          version="$(grep -m1 '^version = ' Cargo.toml | sed -E 's/^version = "([^"]+)".*/\1/')"
+          [ -n "$version" ] || { echo "::error::could not read [workspace.package].version from Cargo.toml"; exit 1; }
+          tag="v${version}"
+          if git rev-parse "refs/tags/${tag}" >/dev/null 2>&1; then
+            echo "::error::tag ${tag} already exists — bump [workspace.package].version before releasing"; exit 1
+          fi
+          # Print the "## <version>" CHANGELOG section, up to the next "## ".
+          awk -v hdr="## ${version}" '
+            $0 == hdr { grab = 1; next }
+            /^## / && grab { exit }
+            grab { print }
+          ' CHANGELOG.md > release-notes.md
+          if [ ! -s release-notes.md ]; then
+            echo "::error::no '## ${version}' section in CHANGELOG.md — rename '## Unreleased' to '## ${version}'"; exit 1
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload release notes
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-notes
+          path: release-notes.md
+          if-no-files-found: error
+
+  # The same gate as CI, re-run against the exact commit being released.
+  gate:
+    name: test gate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Format check
+        run: cargo fmt --all --check
+
+      - name: Clippy (deny warnings)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Test workspace (default features)
+        run: cargo test --workspace --locked
+
+      - name: Test workspace (semantic feature)
+        run: cargo test --workspace --locked --features semantic
+
+  # Publish + tag + release. Skipped entirely when `publish` is unchecked, so an
+  # unchecked run is a pure dry validation (preflight + gate only).
+  release:
+    name: publish + release
+    needs: [preflight, gate]
+    if: ${{ inputs.publish }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.preflight.outputs.version }}
+      TAG: ${{ needs.preflight.outputs.tag }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Download release notes
+        uses: actions/download-artifact@v4
+        with:
+          name: release-notes
+
+      - name: Publish crates in dependency order
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          set -euo pipefail
+          # cargo publish waits for each crate to land in the index before
+          # returning, so the next crate's dependency on it resolves.
+          for crate in nabu-core nabu-adapters nabu-mcp nabu-cli; do
+            echo "::group::cargo publish -p ${crate}"
+            cargo publish -p "${crate}" --locked
+            echo "::endgroup::"
+          done
+
+      - name: Tag and create the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git tag "${TAG}"
+          git push origin "${TAG}"
+          gh release create "${TAG}" \
+            --title "nabu ${VERSION}" \
+            --notes-file release-notes.md

@@ -13,22 +13,62 @@ together. The internal crates (`nabu-core`, `nabu-adapters`, `nabu-mcp`) are
 still published. A default `cargo install nabu-cli` builds without the
 `semantic` feature, so it does not pull the ONNX/embedding stack.
 
+Releases are driven by you, not a bot. You bump the version and edit the
+changelog in a normal PR, then trigger the release from the Actions tab. There
+is no auto-opened release PR and no PAT.
+
 ## One-time setup
 
 1. Create a crates.io API token at <https://crates.io/settings/tokens>. Scope the
    CI token to publish only.
-2. **Local (first release):** run `cargo login` and paste the token. It is stored
-   in `~/.cargo/credentials.toml`, outside the repo.
-3. **CI (ongoing):** add the token as a repository secret named
-   `CARGO_REGISTRY_TOKEN` (Settings → Secrets and variables → Actions, or
-   `gh secret set CARGO_REGISTRY_TOKEN`). **Never commit the token** — not in
-   `Cargo.toml`, the workflow, or a tracked file.
+2. Add it as a repository secret named `CARGO_REGISTRY_TOKEN` (Settings →
+   Secrets and variables → Actions, or `gh secret set CARGO_REGISTRY_TOKEN`).
+   **Never commit the token** — not in `Cargo.toml`, the workflow, or any
+   tracked file.
 
-## First release (manual, supervised)
+No other secret is required. The release workflow tags the commit and creates
+the GitHub release with the built-in `GITHUB_TOKEN` (`contents: write`).
+
+## Cutting a release
+
+1. **Open a version-bump PR.**
+   - Set `[workspace.package].version` in the root `Cargo.toml` to the new
+     version (e.g. `0.1.1`). All four crates inherit it.
+   - In `CHANGELOG.md`, rename the `## Unreleased` heading to `## <version>`
+     and start a fresh empty `## Unreleased` above it. The release notes are
+     taken verbatim from the `## <version>` section.
+   - Open the PR, let CI pass, merge to `main`.
+
+2. **Run the release workflow.** Actions → **release** → **Run workflow**.
+   - Leave `publish` checked to publish for real.
+   - Uncheck `publish` for a dry run: it runs the version/changelog checks and
+     the full test gate but publishes nothing and creates no tag.
+
+The workflow then:
+
+- **preflight** — reads the version from `Cargo.toml`, extracts the matching
+  `## <version>` section from `CHANGELOG.md`, and fails if the `v<version>` tag
+  already exists or the changelog section is missing.
+- **gate** — `cargo fmt --check`, `cargo clippy -D warnings`, and
+  `cargo test --workspace` with and without the `semantic` feature, against the
+  exact commit being released.
+- **release** (only when `publish` is checked) — `cargo publish` for each crate
+  in dependency order (cargo waits for each to appear in the index before the
+  next resolves), then tags `v<version>` and creates the GitHub release from the
+  changelog section.
+
+Re-running for an already-released version fails closed: preflight stops on the
+existing tag, and `cargo publish` rejects a version that already exists on
+crates.io.
+
+Verify in a clean environment: `cargo install nabu-cli` installs the `nabu`
+binary.
+
+## First release (already done; for reference)
 
 The first publish claims the crate names and is irreversible (you can only
-`yank`, never delete), so do it by hand in dependency order, with dry-runs first.
-From a clean checkout of `main`:
+`yank`, never delete). It was done in dependency order with dry-runs first. To
+reproduce the manual dance from a clean checkout of `main`:
 
 ```shell
 # nabu-core has no internal deps, so its dry-run verifies fully:
@@ -42,42 +82,14 @@ cargo publish -p nabu-mcp      --dry-run --no-verify
 cargo publish -p nabu-cli      --dry-run --no-verify
 
 # then publish in order; each downstream publish verifies against the
-# now-published upstream. Wait ~30s between each so the index propagates:
+# now-published upstream:
 cargo publish -p nabu-core
 cargo publish -p nabu-adapters
 cargo publish -p nabu-mcp
 cargo publish -p nabu-cli
 ```
 
-(The `release-plz` automation below handles this ordering and index propagation
-for you; the manual dance only matters for the very first release.)
-
-Verify in a clean environment: `cargo install nabu-cli` installs the `nabu`
-binary.
-
-## Ongoing releases (automated, release-plz)
-
-`.github/workflows/release-plz.yml` runs on every push to `main`:
-
-1. On normal merges, release-plz opens or updates a **release PR** that bumps the
-   workspace version and updates `CHANGELOG.md` from the Conventional Commits
-   since the last release.
-2. Review and merge that PR. The version-bump commit lands on `main`, and the
-   `release` job publishes every changed crate to crates.io in dependency order
-   and creates the GitHub release and tags.
-
-After the first release you never run `cargo publish` by hand — you just merge
-the release PR. Configuration lives in `release-plz.toml`.
-
-### Token note for CI
-
-The `release` job uses `CARGO_REGISTRY_TOKEN` (repo secret) to publish. The
-release PR is opened with the built-in `GITHUB_TOKEN`. Note: PRs opened by
-`GITHUB_TOKEN` do **not** trigger other workflows, so CI will not run on the
-release PR itself. If you want CI to run on release PRs, create a fine-grained
-PAT with `contents: write` + `pull-requests: write`, store it as
-`RELEASE_PLZ_TOKEN`, and pass it as `GITHUB_TOKEN:` to the release-plz steps
-instead of `secrets.GITHUB_TOKEN`.
+After the first release, use the workflow above instead of publishing by hand.
 
 ## Optional: prebuilt binaries (cargo-dist)
 
@@ -90,5 +102,6 @@ cargo install cargo-dist
 dist init   # generates a release workflow + [workspace.metadata.dist]
 ```
 
-This complements release-plz: release-plz owns crates.io + version/changelog;
-cargo-dist attaches binaries to the GitHub release.
+This complements the release workflow: the workflow owns crates.io + the
+version/changelog + the GitHub release; cargo-dist attaches binaries to that
+release.
