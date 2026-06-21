@@ -247,6 +247,7 @@ nabu search QUERY [OPTIONS]
 | `--command <COMMAND>` | Restrict to events mentioning a command. | all |
 | `--mode <MODE>` | `auto`, `lexical`, or `hybrid`. | `auto` |
 | `--corroborate` | Annotate hits with read-only local git existence checks. | off |
+| `--expand-concepts` | OR-expand query terms with curated concept synonyms (`bug`~`error`/`failure`, `perf`~`latency`). | off |
 | `--limit <LIMIT>` | Maximum hits to return. | `10` |
 | `--offset <OFFSET>` | Skip this many hits (paging). | `0` |
 | `--full` | Restore full event payloads (otherwise `payload` is `null`). | off |
@@ -266,6 +267,8 @@ Search is citation-first by default: JSON keeps the stable `payload` key but set
 `--mode auto` is the default. In the default build, `auto` applies lexical BM25 because the semantic backend is not compiled. `--mode lexical` always uses BM25 and never loads a model. `--mode hybrid` requires a compatible semantic build, local model cache, and vector index; otherwise it fails with `SEMANTIC_UNAVAILABLE` instead of silently falling back.
 
 Use `--corroborate` to annotate results with local git existence checks for mentioned commits, branches, and files. The check is read-only, never fetches, never calls a forge API, and never changes ranking or filtering. PR references such as `#123` or `/pull/123` are reported as `unresolved` with `reason=needs_network` because resolving them requires network access.
+
+`--expand-concepts` widens lexical recall without the semantic backend. Each query term is OR-combined with a curated set of near-synonyms (for example `bug`~`error`/`failure`/`fault`/`defect`, `perf`~`performance`/`latency`/`throughput`), so a concept query retrieves documents that record the concept under a different word. Expansion is opt-in and additive: the original terms keep their place, BM25 still ranks literal-term hits above synonym-only ones, and the curated map relates only engineering-domain near-synonyms. It applies to the lexical match in both `lexical` and `hybrid` modes; the vector half of `hybrid` already handles concepts through the embedding. It is a recall aid, not a substitute for the embedding model — it has no notion of context and only relates words present in the curated map.
 
 ### `nabu embed` — manage the local semantic model
 

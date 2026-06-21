@@ -140,6 +140,7 @@ fn search_history_description_teaches_citation_first_payload_opt_in_loop() {
         "max_snippet_chars",
         "mode",
         "corroborate",
+        "expand_concepts",
     ] {
         assert!(schema.get(key).is_some(), "{key}");
     }

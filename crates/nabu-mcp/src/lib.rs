@@ -483,6 +483,7 @@ fn tool_search_history(home: &Path, arguments: &Value) -> Result<Value, ToolErro
         max_snippet_chars,
         mode: optional_search_mode(arguments)?,
         corroborate: optional_bool(arguments, "corroborate", false),
+        expand_concepts: optional_bool(arguments, "expand_concepts", false),
     };
     let redact = optional_bool(arguments, "redact", false);
     let mut value = serde_json::to_value(search_history_page(home, query, options)?)?;
@@ -677,6 +678,7 @@ fn tool_recall_answer(home: &Path, arguments: &Value) -> Result<Value, ToolError
             max_snippet_chars: 240,
             mode: optional_search_mode(arguments)?,
             corroborate,
+            expand_concepts: optional_bool(arguments, "expand_concepts", false),
         },
     )?;
 
@@ -1057,6 +1059,7 @@ fn tool_schema(name: &str) -> Value {
                 "dedupe": { "type": "boolean", "default": true },
                 "max_snippet_chars": { "type": "integer", "minimum": 1, "maximum": 1000, "default": 500, "description": "Per-result match-centered snippet length in characters. Defaults to 500 — enough context to triage a candidate (real bug vs. discussion of one) without a get_session round-trip. Raise toward 1000 for denser context or lower to save tokens; oversized pages are still trimmed to fit the response budget with a continuation cursor." },
                 "corroborate": { "type": "boolean", "default": false, "description": "When true, annotate results with local read-only git checks for mentioned commits, branches, and files. PR refs are unresolved with reason=needs_network; no fetch or forge call is made." },
+                "expand_concepts": { "type": "boolean", "default": false, "description": "When true, OR-expand query terms with curated concept synonyms (e.g. bug~error/failure, perf~latency) to widen lexical recall. Literal-term hits keep their ranking; only the candidate set grows." },
                 "redact": { "type": "boolean", "default": false }
             },
             "required": ["query"],
@@ -1139,6 +1142,7 @@ fn tool_schema(name: &str) -> Value {
                 "before": { "type": "integer", "minimum": 0, "maximum": 20, "default": 5 },
                 "after": { "type": "integer", "minimum": 0, "maximum": 20, "default": 5 },
                 "corroborate": { "type": "boolean", "default": false, "description": "When true, annotate hits and context with local read-only git checks. PR refs are unresolved with reason=needs_network." },
+                "expand_concepts": { "type": "boolean", "default": false, "description": "When true, OR-expand query terms with curated concept synonyms (e.g. bug~error/failure) to widen lexical recall. Literal-term hits keep their ranking." },
                 "redact": { "type": "boolean", "default": false }
             },
             "required": ["query"],

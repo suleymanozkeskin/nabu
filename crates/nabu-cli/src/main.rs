@@ -132,6 +132,11 @@ enum Command {
         mode: SearchModeArg,
         #[arg(long)]
         corroborate: bool,
+        /// Expand query terms with curated concept synonyms (e.g. "bug" also
+        /// matches "error"/"failure") to widen lexical recall. Opt-in; does not
+        /// affect ranking of literal-term hits.
+        #[arg(long)]
+        expand_concepts: bool,
         #[arg(long, default_value_t = 10)]
         limit: usize,
         #[arg(long, default_value_t = 0)]
@@ -624,6 +629,7 @@ fn run(cli: Cli) -> nabu_core::Result<()> {
             ref_filter,
             mode,
             corroborate,
+            expand_concepts,
             limit,
             offset,
             full,
@@ -652,6 +658,7 @@ fn run(cli: Cli) -> nabu_core::Result<()> {
                     max_snippet_chars,
                     mode: mode.into(),
                     corroborate,
+                    expand_concepts,
                 },
             )?;
             print_search_page(page, format)?;
