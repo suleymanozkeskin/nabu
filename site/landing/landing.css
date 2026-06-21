@@ -209,7 +209,8 @@ body {
   font-size: var(--text-xs);
 }
 .footer-glyph { font-family: var(--font-cuneiform); color: var(--text-muted); }
-.footer-tag { margin-left: auto; }
+.footer-tag { margin-left: auto; color: inherit; text-decoration: none; transition: color 0.15s ease; }
+.footer-tag:hover { color: var(--text-muted); text-decoration: underline; }
 
 /* ---- responsive ---- */
 @media (max-width: 760px) {
