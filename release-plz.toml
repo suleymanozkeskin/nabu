@@ -1,0 +1,15 @@
+# release-plz configuration — https://release-plz.dev/docs/config
+#
+# All four crates inherit `version.workspace`, so they share one version and are
+# released together. release-plz publishes them in dependency order:
+# nabu-core -> nabu-adapters -> nabu-mcp -> nabu-cli.
+#
+# The internal crates (nabu-core, nabu-adapters, nabu-mcp) are doc(hidden) and
+# exist only so `cargo install nabu-cli` can resolve its path+version deps from
+# crates.io. They are published, not skipped.
+
+[workspace]
+changelog_update = true
+git_release_enable = true
+git_tag_enable = true
+dependencies_update = false
