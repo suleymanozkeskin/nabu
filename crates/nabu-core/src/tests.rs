@@ -2922,6 +2922,210 @@ fn search_filters_apply_session_type_file_and_command() {
     assert_eq!(file_results[0].session_id, "file-session");
 }
 
+// Provenance ref indexing (issue #1, item 8). Seeds two sessions that mention a
+// PR ref and a commit SHA, indexes them, and asserts: the refs are queryable in
+// event_refs, a `ref=` search returns the right events with full coordinates
+// (invariant #13), and the commit prefix filter resolves abbreviated SHAs.
+#[test]
+fn provenance_refs_are_indexed_and_searchable() {
+    let temp = tempdir().unwrap();
+    let home = temp.path().join("home");
+    init_home(&home).unwrap();
+
+    // Discovery session: a PR reference and a full commit SHA in one message.
+    let sha = "100a8704bf3c2d1e5a6f7b8c9d0e1f2a3b4c5d6e";
+    ingest_hook_event(
+        &home,
+        Tool::Claude,
+        json!({
+            "session_id": "discovery-session",
+            "hook_event_name": "UserPromptSubmit",
+            "message_id": "prov-discovery-1",
+            "prompt": format!("provenance marker: bug found, fixed in #54 at commit {sha}")
+        }),
+    )
+    .unwrap();
+    // An unrelated session that must not match the ref filters.
+    ingest_hook_event(
+        &home,
+        Tool::Claude,
+        json!({
+            "session_id": "unrelated-session",
+            "hook_event_name": "UserPromptSubmit",
+            "message_id": "prov-unrelated-1",
+            "prompt": "provenance marker: nothing to see here, just prose"
+        }),
+    )
+    .unwrap();
+    index_once(&home).unwrap();
+
+    // The discovery session's event carries exactly the two refs in event_refs.
+    let db_path = home.join("index").join("harness.db");
+    let conn = Connection::open(&db_path).unwrap();
+    let mut stored: Vec<(String, String)> = conn
+        .prepare(
+            "SELECT er.ref_kind, er.ref_value
+             FROM event_refs er
+             JOIN events e ON e.id = er.event_id
+             WHERE e.session_id = 'discovery-session'
+             ORDER BY er.ref_kind, er.ref_value",
+        )
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .map(|row| row.unwrap())
+        .collect();
+    stored.sort();
+    assert_eq!(
+        stored,
+        vec![
+            ("commit".to_string(), sha.to_string()),
+            ("pr".to_string(), "#54".to_string()),
+        ]
+    );
+    // The unrelated session has no refs.
+    let unrelated_refs: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM event_refs er
+             JOIN events e ON e.id = er.event_id
+             WHERE e.session_id = 'unrelated-session'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(unrelated_refs, 0);
+    drop(conn);
+
+    // A `ref=#54` filter returns the discovery event with full coordinates.
+    let pr_hits = search_history_filtered(
+        &home,
+        "provenance marker",
+        SearchOptions {
+            ref_filter: Some("#54".to_string()),
+            limit: 10,
+            ..SearchOptions::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(pr_hits.len(), 1);
+    let hit = &pr_hits[0];
+    assert_eq!(hit.session_id, "discovery-session");
+    // Invariant #13: the hit carries raw_file/raw_line/raw_offset/session_id.
+    assert!(!hit.raw_file.is_empty());
+    assert!(hit.raw_line > 0);
+    assert!(hit.raw_offset.is_some());
+    assert!(!hit.session_id.is_empty());
+
+    // A bare PR number (`ref=54`) resolves to the same `#54` row.
+    let pr_bare = search_history_filtered(
+        &home,
+        "provenance marker",
+        SearchOptions {
+            ref_filter: Some("54".to_string()),
+            limit: 10,
+            ..SearchOptions::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(pr_bare.len(), 1);
+    assert_eq!(pr_bare[0].session_id, "discovery-session");
+
+    // An abbreviated commit SHA prefix matches the stored full SHA.
+    let commit_hits = search_history_filtered(
+        &home,
+        "provenance marker",
+        SearchOptions {
+            ref_filter: Some("100a8704".to_string()),
+            limit: 10,
+            ..SearchOptions::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(commit_hits.len(), 1);
+    assert_eq!(commit_hits[0].session_id, "discovery-session");
+
+    // A PR number that is not present yields nothing.
+    let absent = search_history_filtered(
+        &home,
+        "provenance marker",
+        SearchOptions {
+            ref_filter: Some("#999".to_string()),
+            limit: 10,
+            ..SearchOptions::default()
+        },
+    )
+    .unwrap();
+    assert!(absent.is_empty());
+}
+
+// The event_refs migration must backfill a pre-provenance index: an index built
+// without the table (simulated by dropping it) regains its refs on the next
+// open, without a full reindex.
+#[test]
+fn provenance_refs_backfill_on_open_of_legacy_index() {
+    let temp = tempdir().unwrap();
+    let home = temp.path().join("home");
+    init_home(&home).unwrap();
+
+    ingest_hook_event(
+        &home,
+        Tool::Claude,
+        json!({
+            "session_id": "legacy-session",
+            "hook_event_name": "UserPromptSubmit",
+            "message_id": "legacy-prov-1",
+            "prompt": "legacy backfill marker: shipped in #73"
+        }),
+    )
+    .unwrap();
+    index_once(&home).unwrap();
+
+    // Simulate a pre-provenance index: drop the event_refs table outright. A
+    // raw Connection::open does not run the ensure_* migrations, so the table
+    // stays absent until we reopen through open_index.
+    let db_path = home.join("index").join("harness.db");
+    {
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch("DROP TABLE IF EXISTS event_refs;")
+            .unwrap();
+        let still_present: i64 = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name = 'event_refs')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(still_present, 0, "event_refs should be dropped");
+    }
+
+    // open_index runs ensure_event_refs_schema, which recreates the table and
+    // backfills from the already-indexed events' searchable_text.
+    let conn = open_index(&db_path).unwrap();
+    let backfilled: Vec<(String, String)> = conn
+        .prepare("SELECT ref_kind, ref_value FROM event_refs ORDER BY ref_kind, ref_value")
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .map(|row| row.unwrap())
+        .collect();
+    assert_eq!(backfilled, vec![("pr".to_string(), "#73".to_string())]);
+    drop(conn);
+
+    // The backfilled ref is searchable end-to-end.
+    let hits = search_history_filtered(
+        &home,
+        "legacy backfill marker",
+        SearchOptions {
+            ref_filter: Some("#73".to_string()),
+            limit: 10,
+            ..SearchOptions::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].session_id, "legacy-session");
+}
+
 // P0 bug #2: a session-scoped search must fail open. Controlled by varying
 // only session_id while holding the query fixed. Also covers invariant #13
 // (every hit carries raw_file, raw_line, raw_offset, session_id) and that the

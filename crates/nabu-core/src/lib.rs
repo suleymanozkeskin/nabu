@@ -150,8 +150,8 @@ pub(crate) use search::corroborate_text;
 pub(crate) use search::search_history_filtered;
 #[cfg(feature = "semantic")]
 pub(crate) use search::{
-    match_centered_snippet, resolve_session_filter_ids, retrieval_key_for_text,
-    unique_ranked_results_by_event,
+    match_centered_snippet, normalize_ref_filter, resolve_session_filter_ids,
+    retrieval_key_for_text, unique_ranked_results_by_event,
 };
 pub use search::{search_history, search_history_page};
 
@@ -165,6 +165,9 @@ pub use export::{export_session_jsonl_with_options, export_session_markdown_with
 mod redact;
 pub use redact::{redact_export_json, redact_export_text};
 pub(crate) use redact::{redact_json_value, redact_text};
+
+mod provenance;
+pub(crate) use provenance::extract_refs;
 
 mod raw;
 pub(crate) use raw::{

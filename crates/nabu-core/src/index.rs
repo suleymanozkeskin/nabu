@@ -5,7 +5,7 @@
 
 use crate::{
     compaction_state_for, embed_index_if_available_with_progress, ensure_semantic_vector_schema,
-    file_paths_for_payload, hash_line, init_home, insert_vector_unit_rows,
+    extract_refs, file_paths_for_payload, hash_line, init_home, insert_vector_unit_rows,
     message_text_for_document, open_index, raw_index_checkpoint_is_current,
     resolved_payload_for_envelope, role_for, search_document_for_event, source_file_metadata,
     string_field, tool_status_for, write_raw_index_checkpoint, CanonicalType,
@@ -347,6 +347,7 @@ fn insert_derived_rows(
     }
 
     insert_event_file_rows(conn, path, event_id, envelope, payload)?;
+    insert_event_ref_rows(conn, path, event_id, search_document)?;
 
     if matches!(
         envelope.canonical_type,
@@ -467,6 +468,29 @@ pub(crate) fn recalculate_all_session_counts(conn: &Connection, db_path: &Path) 
         path: db_path.to_path_buf(),
         source,
     })
+}
+
+// Provenance refs (PR references, commit SHAs) extracted from the rendered
+// searchable text. The same extractor backfills pre-existing events in
+// `db::ensure_event_refs_schema`, so both paths produce identical rows.
+fn insert_event_ref_rows(
+    conn: &Connection,
+    path: &Path,
+    event_id: i64,
+    search_document: &SearchDocument,
+) -> Result<()> {
+    for reference in extract_refs(&search_document.render()) {
+        conn.execute(
+            "INSERT OR IGNORE INTO event_refs(event_id, ref_kind, ref_value)
+             VALUES (?1, ?2, ?3)",
+            params![event_id, reference.kind.as_str(), reference.value],
+        )
+        .map_err(|source| Error::Sqlite {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    }
+    Ok(())
 }
 
 fn insert_event_file_rows(

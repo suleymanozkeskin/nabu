@@ -129,6 +129,53 @@ pub fn search_history_page(home: &Path, query: &str, options: SearchOptions) -> 
     })
 }
 
+/// How a `ref=` search filter compares against the stored `event_refs` rows.
+pub(crate) struct RefFilterMatch {
+    /// `pr` or `commit`.
+    pub(crate) kind: &'static str,
+    /// A `LIKE` pattern (with `\` as the escape character) applied to
+    /// `event_refs.ref_value`.
+    pub(crate) value_pattern: String,
+}
+
+/// Resolve a raw `ref=` filter string into the `event_refs` row it should match.
+///
+/// PR forms (`#54`, `54`, `PR #54`, `org/repo#54`) normalize to an exact match
+/// on the `pr` kind value `#54`. A bare hex token is treated as a `commit` SHA
+/// and matched by case-insensitive prefix (`abc123` matches `abc123def...`), so
+/// abbreviated SHAs resolve the way they are written in transcripts. Any `%`/`_`
+/// in the input is escaped so it cannot act as a wildcard.
+pub(crate) fn normalize_ref_filter(raw: &str) -> RefFilterMatch {
+    let trimmed = raw.trim();
+    let pr_digits = trimmed
+        .strip_prefix('#')
+        .or_else(|| trimmed.rsplit_once('#').map(|(_, tail)| tail))
+        .map(str::trim)
+        .filter(|tail| !tail.is_empty() && tail.bytes().all(|byte| byte.is_ascii_digit()));
+    if let Some(digits) = pr_digits.or_else(|| {
+        // `ref=54` (no `#`) is a PR number when it is purely decimal.
+        (!trimmed.is_empty() && trimmed.bytes().all(|byte| byte.is_ascii_digit()))
+            .then_some(trimmed)
+    }) {
+        let normalized = digits.trim_start_matches('0');
+        let normalized = if normalized.is_empty() {
+            "0"
+        } else {
+            normalized
+        };
+        return RefFilterMatch {
+            kind: "pr",
+            value_pattern: escape_like(&format!("#{normalized}")),
+        };
+    }
+    // Otherwise treat the input as a commit SHA (or SHA prefix), matched by
+    // prefix against the lowercased stored value.
+    RefFilterMatch {
+        kind: "commit",
+        value_pattern: format!("{}%", escape_like(&trimmed.to_ascii_lowercase())),
+    }
+}
+
 fn lexical_search_ranked_results(
     home: &Path,
     options: &SearchOptions,
@@ -211,6 +258,20 @@ fn lexical_search_ranked_results(
               )",
         );
         params.push(SqlValue::Text(format!("%{command}%")));
+    }
+    if let Some(ref_filter) = options.ref_filter.as_deref() {
+        let ref_match = normalize_ref_filter(ref_filter);
+        sql.push_str(
+            " AND EXISTS (
+                SELECT 1
+                FROM event_refs er
+                WHERE er.event_id = e.id
+                  AND er.ref_kind = ?
+                  AND er.ref_value LIKE ? ESCAPE '\\'
+              )",
+        );
+        params.push(SqlValue::Text(ref_match.kind.to_string()));
+        params.push(SqlValue::Text(ref_match.value_pattern));
     }
     sql.push_str(
         " ORDER BY bm25(events_fts, 8.0, 6.0, 4.0, 1.0, 0.5), e.captured_at DESC, e.raw_line ASC

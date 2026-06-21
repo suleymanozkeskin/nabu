@@ -124,6 +124,10 @@ enum Command {
         file: Option<String>,
         #[arg(long)]
         command: Option<String>,
+        /// Filter to events whose extracted provenance refs match, e.g.
+        /// `--ref '#54'` (a PR reference) or `--ref <commit-sha-prefix>`.
+        #[arg(long = "ref")]
+        ref_filter: Option<String>,
         #[arg(long, value_enum, default_value_t = SearchModeArg::Auto)]
         mode: SearchModeArg,
         #[arg(long)]
@@ -617,6 +621,7 @@ fn run(cli: Cli) -> nabu_core::Result<()> {
             canonical_type,
             file,
             command,
+            ref_filter,
             mode,
             corroborate,
             limit,
@@ -638,6 +643,7 @@ fn run(cli: Cli) -> nabu_core::Result<()> {
                     canonical_type,
                     file,
                     command,
+                    ref_filter,
                     limit,
                     offset,
                     include_payload: full,

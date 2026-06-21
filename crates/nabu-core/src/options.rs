@@ -17,6 +17,10 @@ pub struct SearchOptions {
     pub canonical_type: Option<String>,
     pub file: Option<String>,
     pub command: Option<String>,
+    /// Filter to events whose extracted provenance refs include this value, e.g.
+    /// `#54` (a PR reference) or a commit SHA prefix. Normalized to match the
+    /// stored `event_refs.ref_value` form before comparison.
+    pub ref_filter: Option<String>,
     pub limit: usize,
     pub offset: usize,
     pub include_payload: bool,
@@ -37,6 +41,7 @@ impl Default for SearchOptions {
             canonical_type: None,
             file: None,
             command: None,
+            ref_filter: None,
             limit: 10,
             offset: 0,
             include_payload: false,
