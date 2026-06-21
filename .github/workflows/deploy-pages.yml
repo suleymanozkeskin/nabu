@@ -1,0 +1,75 @@
+name: deploy-pages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "site/**"
+      - "demo/demo-full.gif"
+      - ".github/workflows/deploy-pages.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "site/**"
+      - ".github/workflows/deploy-pages.yml"
+  workflow_dispatch:
+
+# One in-flight Pages deploy at a time; don't cancel a running deploy.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  build:
+    name: build site artifact
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Stage static site
+        run: |
+          set -euo pipefail
+          # The landing's asset paths are relative to site/landing/ and reach
+          # ../design-system and ../../demo, so the published root must contain
+          # both site/ and demo/. Stage exactly what the page references.
+          mkdir -p _site/site _site/demo
+          cp -R site/landing _site/site/landing
+          cp -R site/design-system _site/site/design-system
+          cp demo/demo-full.gif _site/demo/demo-full.gif
+          # Root redirect so https://<user>.github.io/nabu/ lands on the page.
+          # Relative paths keep working under the /nabu/ project base path.
+          cat > _site/index.html <<'HTML'
+          <!doctype html>
+          <meta charset="utf-8">
+          <title>nabu — the scribe for your coding agents</title>
+          <meta http-equiv="refresh" content="0; url=./site/landing/">
+          <link rel="canonical" href="./site/landing/">
+          <a href="./site/landing/">nabu — the scribe for your coding agents</a>
+          HTML
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    name: deploy to Pages
+    needs: build
+    # Build runs on PRs to validate staging; only main deploys.
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy
+        id: deployment
+        uses: actions/deploy-pages@v4
