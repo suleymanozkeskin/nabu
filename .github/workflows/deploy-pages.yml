@@ -43,12 +43,15 @@ jobs:
           cp demo/demo-full.gif _site/demo/demo-full.gif
           # Root redirect so https://<user>.github.io/nabu/ lands on the page.
           # Relative paths keep working under the /nabu/ project base path.
+          # Inline dark background (--lapis-900) and matching link color so the
+          # brief redirect frame doesn't flash white before bouncing.
           cat > _site/index.html <<'HTML'
           <!doctype html>
           <meta charset="utf-8">
           <title>nabu — the scribe for your coding agents</title>
           <meta http-equiv="refresh" content="0; url=./site/landing/">
           <link rel="canonical" href="./site/landing/">
+          <style>html{background:#0e1322;color:#d2c4a6;font-family:system-ui,sans-serif}a{color:#d2c4a6}</style>
           <a href="./site/landing/">nabu — the scribe for your coding agents</a>
           HTML
 
