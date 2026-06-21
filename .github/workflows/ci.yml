@@ -15,7 +15,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6.0.3
 
       # Lint with latest stable clippy/rustfmt. MSRV (1.88) is verified by the
       # `test` job below; clippy lint sets drift between versions, so pinning the
@@ -45,7 +45,7 @@ jobs:
           - macos-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6.0.3
 
       - name: Install Rust 1.88
         uses: dtolnay/rust-toolchain@1.88.0
@@ -64,7 +64,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6.0.3
 
       - name: cargo-deny
         uses: EmbarkStudios/cargo-deny-action@v2
@@ -79,7 +79,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6.0.3
 
       # cargo-public-api builds rustdoc JSON, which requires nightly. The
       # nightly and cargo-public-api versions are pinned together so the
