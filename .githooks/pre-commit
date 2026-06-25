@@ -1,0 +1,27 @@
+#!/bin/sh
+# nabu pre-commit hook: enforce formatting locally so the CI "fmt + clippy" job
+# does not fail on style alone. Mirrors `cargo fmt --all --check` from
+# .github/workflows/ci.yml. Clippy is heavier and runs in the pre-push hook
+# instead, keeping commits fast.
+#
+# Enable for this clone with:  sh scripts/setup-hooks.sh
+set -eu
+
+# Skip the Rust gate unless the commit touches Rust sources or a manifest.
+if ! git diff --cached --name-only --diff-filter=ACMR \
+    | grep -qE '\.rs$|(^|/)Cargo\.(toml|lock)$'; then
+    exit 0
+fi
+
+if ! command -v cargo >/dev/null 2>&1; then
+    echo "pre-commit: cargo not found on PATH; skipping fmt check." >&2
+    exit 0
+fi
+
+echo "pre-commit: cargo fmt --all --check"
+if ! cargo fmt --all --check; then
+    echo >&2
+    echo "pre-commit: formatting check failed." >&2
+    echo "  Run 'cargo fmt --all', re-stage, and commit again." >&2
+    exit 1
+fi

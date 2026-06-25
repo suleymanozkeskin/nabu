@@ -19,6 +19,21 @@ Supply-chain checks use `cargo-deny`:
 cargo deny --all-features check all
 ```
 
+### Git hooks (optional)
+
+Tracked hooks under `.githooks/` run the same `fmt`/`clippy` gates as CI so
+style and lint failures surface locally. They are not enabled automatically;
+opt in once per clone:
+
+```shell
+sh scripts/setup-hooks.sh
+```
+
+This sets `core.hooksPath` to `.githooks/`. The `pre-commit` hook runs
+`cargo fmt --all --check` (fast); the `pre-push` hook runs
+`cargo clippy --workspace --all-targets -- -D warnings`. Bypass a hook with
+`git commit --no-verify` / `git push --no-verify` when needed.
+
 The model-backed semantic acceptance tests are ignored during normal test runs.
 Run them only when a local `embeddinggemma-300m-q4` cache is available:
 
