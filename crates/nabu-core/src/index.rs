@@ -4,20 +4,102 @@
 //! and moves to the `semantic` module in the final phase.
 
 use crate::{
-    compaction_state_for, embed_index_if_available_with_progress, ensure_semantic_vector_schema,
-    extract_refs, file_paths_for_payload, hash_line, init_home, insert_vector_unit_rows,
-    message_text_for_document, open_index, raw_index_checkpoint_is_current,
+    chmod, compaction_state_for, embed_index_if_available_with_progress,
+    ensure_semantic_vector_schema, extract_refs, file_paths_for_payload, hash_line, init_home,
+    insert_vector_unit_rows, message_text_for_document, open_index, raw_index_checkpoint_is_current,
     resolved_payload_for_envelope, role_for, search_document_for_event, source_file_metadata,
     string_field, tool_status_for, write_raw_index_checkpoint, CanonicalType,
     EmbeddingIndexProgress, Error, EventEnvelope, IndexOptions, IndexReport, Result,
     SearchDocument, Tool,
 };
+use fs2::FileExt;
 use rusqlite::{params, Connection};
 use serde_json::Value;
 use std::collections::HashSet;
-use std::fs::{self, File};
+use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader};
 use std::path::Path;
+
+/// Outcome of [`index_once_single_flight`]: a pass ran (with its merged report)
+/// or another pass already held the index lock and this attempt was a no-op.
+/// Skips are expected under per-event triggering — the holding pass drains the
+/// same delta, so a skipped trigger loses no coverage.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SingleFlightOutcome {
+    Ran(IndexReport),
+    Skipped,
+}
+
+/// Upper bound on re-passes within a single lock hold. Each pass drains the
+/// delta present when it started; an append landing mid-pass is caught by one
+/// more pass. The cap prevents livelock under continuous concurrent writes —
+/// the next capture hook re-triggers and resumes draining.
+const SINGLE_FLIGHT_MAX_PASSES: usize = 8;
+
+/// Run the incremental index under a non-blocking exclusive lock so at most one
+/// pass touches a home at a time. Returns [`SingleFlightOutcome::Skipped`]
+/// without indexing when another pass holds the lock. While holding the lock it
+/// re-runs the pass until one indexes zero new events, so a delta appended after
+/// the scan started but before the lock is released is still drained.
+///
+/// This is the entry point the capture hook spawns: it is idempotent, bounded,
+/// and safe to invoke concurrently from every hook event.
+pub fn index_once_single_flight(home: &Path, options: IndexOptions) -> Result<SingleFlightOutcome> {
+    init_home(home)?;
+    let lock_path = home.join("index").join(".index.lock");
+    let lock_file = OpenOptions::new()
+        .create(true)
+        // Lock sentinel: content is never written, so do not truncate.
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .map_err(|source| Error::Io {
+            path: lock_path.clone(),
+            source,
+        })?;
+    chmod(&lock_path, 0o600)?;
+
+    match lock_file.try_lock_exclusive() {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+            return Ok(SingleFlightOutcome::Skipped);
+        }
+        Err(source) => {
+            return Err(Error::Io {
+                path: lock_path,
+                source,
+            });
+        }
+    }
+
+    let mut indexed_events = 0usize;
+    let mut pass_result = Ok(());
+    for _ in 0..SINGLE_FLIGHT_MAX_PASSES {
+        match index_once_with_options(home, options) {
+            Ok(report) => {
+                indexed_events += report.indexed_events;
+                if report.indexed_events == 0 {
+                    break;
+                }
+            }
+            Err(error) => {
+                pass_result = Err(error);
+                break;
+            }
+        }
+    }
+
+    // Release the lock unconditionally, even when a pass failed.
+    let unlock_result = FileExt::unlock(&lock_file).map_err(|source| Error::Io {
+        path: lock_path,
+        source,
+    });
+
+    pass_result?;
+    unlock_result?;
+    Ok(SingleFlightOutcome::Ran(IndexReport { indexed_events }))
+}
 
 pub fn index_once(home: &Path) -> Result<IndexReport> {
     index_once_with_progress(home, |_| {})

@@ -33,9 +33,9 @@ use nabu_core::{
     canonical_raw_path, doctor_with_options, download_embedding_model_with_progress,
     embedding_model_disclosure, embedding_model_status, export_session_jsonl_with_options,
     export_session_markdown_with_options, index_once_with_options_and_progress, ingest_file,
-    ingest_hook_event, init_home, prune_embedding_cache, purge_all, purge_before, purge_session,
-    resolve_home, search_history_page, Error, IndexOptions, PurgeAllOptions, SearchMode,
-    SearchOptions, SessionOptions, Source, Tool,
+    index_once_single_flight, ingest_hook_event, init_home, prune_embedding_cache, purge_all,
+    purge_before, purge_session, resolve_home, search_history_page, Error, IndexOptions,
+    PurgeAllOptions, SearchMode, SearchOptions, SessionOptions, SingleFlightOutcome, Source, Tool,
 };
 use serde_json::Value;
 use std::fs::File;
@@ -77,6 +77,11 @@ enum Command {
         no_embed: bool,
         #[arg(long)]
         json_progress: bool,
+        /// Skip (no-op) instead of running when another index pass holds the
+        /// index lock. Used by the capture hook so per-event triggers collapse
+        /// to a single in-flight pass. Requires --once.
+        #[arg(long)]
+        single_flight: bool,
     },
     Backfill {
         #[arg(long)]
@@ -436,6 +441,31 @@ fn main() {
     }
 }
 
+/// Spawn a detached, non-blocking incremental index of the freshly captured
+/// delta. The child runs `nabu --home <home> index --once --no-embed
+/// --single-flight`: `--no-embed` keeps the optional embedding pass — the only
+/// slow stage — off the capture path, and `--single-flight` collapses
+/// overlapping per-event triggers into one in-flight pass. stdio is detached so
+/// the child outlives this short-lived hook process. A spawn failure is
+/// swallowed: capture must never fail because indexing could not start, and the
+/// next hook event re-triggers.
+fn spawn_background_index(home: &Path) {
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    let _ = std::process::Command::new(exe)
+        .arg("--home")
+        .arg(home)
+        .arg("index")
+        .arg("--once")
+        .arg("--no-embed")
+        .arg("--single-flight")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+}
+
 fn run(cli: Cli) -> nabu_core::Result<()> {
     let Cli { home, command } = cli;
     let home = resolve_home(home)?;
@@ -462,6 +492,13 @@ fn run(cli: Cli) -> nabu_core::Result<()> {
             match ingest_hook_event(&home, tool, payload) {
                 Ok(report) => {
                     if report.appended {
+                        // Capture must stay non-blocking: trigger an incremental
+                        // index of the just-appended delta in a detached child
+                        // and return immediately. Indexing latency never lands on
+                        // the hook (and thus the prompt) path. Single-flight in the
+                        // child collapses concurrent per-event triggers into one
+                        // in-flight pass.
+                        spawn_background_index(&home);
                         println!(
                             "appended {} at offset {}",
                             report.raw_file.display(),
@@ -496,9 +533,26 @@ fn run(cli: Cli) -> nabu_core::Result<()> {
             watch,
             no_embed,
             json_progress,
+            single_flight,
         } => {
             let progress = ProgressEmitter::new(json_progress);
             let index_options = IndexOptions { embed: !no_embed };
+            if single_flight {
+                if !once {
+                    return Err(Error::Validation(
+                        "index --single-flight requires --once".to_string(),
+                    ));
+                }
+                match index_once_single_flight(&home, index_options)? {
+                    SingleFlightOutcome::Ran(report) => {
+                        println!("indexed {} new events", report.indexed_events);
+                    }
+                    SingleFlightOutcome::Skipped => {
+                        println!("skipped: another index pass is already running");
+                    }
+                }
+                return Ok(());
+            }
             if watch {
                 loop {
                     progress.emit("index", "index", "started", 0, None, "starting index pass");

@@ -47,6 +47,11 @@ pub const DEFAULT_SEARCH_SNIPPET_CHARS: usize = 500;
 const MAX_SESSION_LIMIT: usize = 500;
 const MAX_CONTEXT_EVENTS_PER_SIDE: usize = 500;
 const MAX_DIRECTORY_SIZE_DEPTH: usize = 64;
+/// Raw capture leading the index by more than this many seconds marks a tool's
+/// freshness as stale in `history_doctor`. With hook-triggered indexing a pass
+/// runs within seconds of each event; a lag beyond this means the trigger chain
+/// is broken (e.g. the binary on PATH lacks the hook spawn).
+pub const INDEX_STALENESS_THRESHOLD_SECONDS: i64 = 300;
 mod concept_expansion;
 pub(crate) use concept_expansion::expand_query_terms;
 mod semantic;
@@ -103,8 +108,9 @@ pub use options::{
     BackfillImportPreview, BackfillProgress, BackfillReport, CorroboratedRef, Corroboration,
     CoverageSummary, DoctorCheck, DoctorReport, DoctorStats, EmbeddingDownloadProgress,
     EmbeddingDownloadReport, EmbeddingIndexProgress, EmbeddingModelDisclosure,
-    EmbeddingModelStatus, EventOptions, EventPointer, FileIngestReport, FileTouch, IndexOptions,
-    IndexReport, InitReport, PurgeAction, PurgeAllArtifact, PurgeAllOptions, PurgeAllReport,
+    EmbeddingModelStatus, EventOptions, EventPointer, FileIngestReport, FileTouch, IndexFreshness,
+    IndexOptions, IndexReport, InitReport, PurgeAction, PurgeAllArtifact, PurgeAllOptions,
+    PurgeAllReport,
     PurgeReport, PurgeTier, SearchContinuation, SearchMode, SearchOptions, SearchPage,
     SearchResult, SessionOptions, SessionPage, SessionSummary, StorageFootprint, StoredEvent,
     ToolUsage, SESSION_PROMPT_SNIPPET_CHARS, SESSION_TOP_FILES, SESSION_TOP_TOOLS,
@@ -141,7 +147,10 @@ pub(crate) use ingest::{
 pub use ingest::{ingest_file, ingest_hook_event, ingest_opencode_server_messages, init_home};
 
 mod index;
-pub use index::{index_once, index_once_with_options, index_once_with_options_and_progress};
+pub use index::{
+    index_once, index_once_single_flight, index_once_with_options,
+    index_once_with_options_and_progress, SingleFlightOutcome,
+};
 pub(crate) use index::{recalculate_all_session_counts, RawIndexFileReport};
 
 mod search;

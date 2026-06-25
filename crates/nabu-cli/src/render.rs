@@ -259,12 +259,14 @@ pub(crate) fn print_purge_all_result(report: &PurgeAllReport) {
 }
 
 pub(crate) fn print_tool_doctor_human(home: &Path, tool: DoctorTool) -> nabu_core::Result<()> {
+    let report = doctor_with_options(home, false);
     if matches!(tool, DoctorTool::Claude | DoctorTool::All) {
         let status = claude_status(home)?;
         println!("claude.installed={}", status.claude_installed);
         println!("claude.hooks_installed={}", status.hooks_installed);
         println!("claude.storage_writable={}", status.storage_writable);
         println!("claude.settings_path={}", status.settings_path.display());
+        print_freshness_human(&report, "claude");
     }
     if matches!(tool, DoctorTool::Codex | DoctorTool::All) {
         let status = codex_status(home)?;
@@ -273,6 +275,7 @@ pub(crate) fn print_tool_doctor_human(home: &Path, tool: DoctorTool) -> nabu_cor
         println!("codex.storage_writable={}", status.storage_writable);
         println!("codex.hooks_path={}", status.hooks_path.display());
         println!("codex.trust_guidance={}", status.trust_guidance);
+        print_freshness_human(&report, "codex");
     }
     if matches!(tool, DoctorTool::Opencode | DoctorTool::All) {
         let status = opencode_status(home)?;
@@ -288,8 +291,36 @@ pub(crate) fn print_tool_doctor_human(home: &Path, tool: DoctorTool) -> nabu_cor
         if let Some(server_url) = status.server_url {
             println!("opencode.server_url={server_url}");
         }
+        print_freshness_human(&report, "opencode");
     }
     Ok(())
+}
+
+/// Print one `<tool>.index_*` line group from the doctor report's freshness map.
+/// When `stale` is set, the lag is prefixed with `STALE` so a broken
+/// capture→index chain is visible at a glance rather than silently masked by the
+/// index's own (lagging) latest-event timestamp.
+fn print_freshness_human(report: &nabu_core::DoctorReport, tool: &str) {
+    let Some(freshness) = report.index_freshness.get(tool) else {
+        return;
+    };
+    println!(
+        "{tool}.index_stale={}{}",
+        freshness.stale,
+        match freshness.lag_seconds {
+            Some(lag) if freshness.stale => format!("  STALE lag={lag}s"),
+            Some(lag) => format!("  lag={lag}s"),
+            None => String::new(),
+        }
+    );
+    println!(
+        "{tool}.latest_raw_at={}",
+        OptionalValue(freshness.latest_raw_at.as_deref())
+    );
+    println!(
+        "{tool}.latest_indexed_at={}",
+        OptionalValue(freshness.latest_indexed_at.as_deref())
+    );
 }
 
 pub(crate) struct AlsoAt<'a>(pub(crate) &'a [i64]);

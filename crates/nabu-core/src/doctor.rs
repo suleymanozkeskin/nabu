@@ -3,12 +3,15 @@
 
 use crate::{
     latest_event, open_index, table_count, table_exists, CoverageSummary, DoctorCheck,
-    DoctorReport, DoctorStats, Error, Result, StorageFootprint, StoredEvent, Tool,
-    MAX_DIRECTORY_SIZE_DEPTH, SEMANTIC_VECTOR_DIMENSIONS,
+    DoctorReport, DoctorStats, Error, IndexFreshness, Result, StorageFootprint, StoredEvent, Tool,
+    INDEX_STALENESS_THRESHOLD_SECONDS, MAX_DIRECTORY_SIZE_DEPTH, SEMANTIC_VECTOR_DIMENSIONS,
 };
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
+use std::time::SystemTime;
+use time::format_description::well_known::Rfc3339;
+use time::OffsetDateTime;
 
 pub fn doctor(home: &Path) -> DoctorReport {
     doctor_with_options(home, false)
@@ -62,6 +65,7 @@ pub fn doctor_with_progress(
     on_stage(DoctorStage::Footprint, true);
 
     let latest_captured_events = latest_events_for_doctor(home);
+    let index_freshness = index_freshness_for_doctor(home, &latest_captured_events);
     on_stage(DoctorStage::LatestEvents, true);
 
     let stats = if deep { index_stats(home).ok() } else { None };
@@ -100,6 +104,7 @@ pub fn doctor_with_progress(
         coverage,
         storage_footprint,
         latest_captured_events,
+        index_freshness,
         stats,
     }
 }
@@ -113,6 +118,71 @@ fn latest_events_for_doctor(home: &Path) -> BTreeMap<String, Option<StoredEvent>
         );
     }
     events
+}
+
+/// Per-tool raw-vs-index freshness. The raw frontier is the mtime of the most
+/// recently appended `raw/<tool>/*.jsonl` file (capture stamps each event at
+/// append time, so the newest-mtime file holds the newest capture). The indexed
+/// frontier is the `captured_at` of the newest indexed event, reused from the
+/// already-computed `latest_indexed` map to avoid a second query.
+fn index_freshness_for_doctor(
+    home: &Path,
+    latest_indexed: &BTreeMap<String, Option<StoredEvent>>,
+) -> BTreeMap<String, IndexFreshness> {
+    let mut freshness = BTreeMap::new();
+    for tool in Tool::all() {
+        let key = tool.as_str().to_string();
+        let raw_mtime = newest_raw_mtime(&home.join("raw").join(tool.as_str()));
+        let latest_raw_at = raw_mtime.and_then(|when| when.format(&Rfc3339).ok());
+
+        let latest_indexed_at = latest_indexed
+            .get(&key)
+            .and_then(|event| event.as_ref())
+            .map(|event| event.timestamp.clone());
+        let indexed_unix = latest_indexed_at.as_deref().and_then(parse_rfc3339_unix);
+
+        let lag_seconds = match (raw_mtime.map(OffsetDateTime::unix_timestamp), indexed_unix) {
+            (Some(raw), Some(indexed)) => Some(raw - indexed),
+            _ => None,
+        };
+        let stale = (raw_mtime.is_some() && indexed_unix.is_none())
+            || lag_seconds.is_some_and(|lag| lag > INDEX_STALENESS_THRESHOLD_SECONDS);
+
+        freshness.insert(
+            key,
+            IndexFreshness {
+                latest_raw_at,
+                latest_indexed_at,
+                lag_seconds,
+                stale,
+            },
+        );
+    }
+    freshness
+}
+
+fn newest_raw_mtime(raw_dir: &Path) -> Option<OffsetDateTime> {
+    let entries = fs::read_dir(raw_dir).ok()?;
+    let mut newest: Option<SystemTime> = None;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|value| value.to_str()) != Some("jsonl") {
+            continue;
+        }
+        let Ok(modified) = entry.metadata().and_then(|meta| meta.modified()) else {
+            continue;
+        };
+        if newest.is_none_or(|current| modified > current) {
+            newest = Some(modified);
+        }
+    }
+    newest.map(OffsetDateTime::from)
+}
+
+fn parse_rfc3339_unix(value: &str) -> Option<i64> {
+    OffsetDateTime::parse(value, &Rfc3339)
+        .ok()
+        .map(|when| when.unix_timestamp())
 }
 
 fn storage_is_healthy(home: &Path) -> bool {

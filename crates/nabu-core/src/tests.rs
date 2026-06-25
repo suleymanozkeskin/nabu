@@ -5216,3 +5216,110 @@ fn codex_exec_wrapper_tool_call_is_searchable_by_command_without_scaffolding() {
         "scaffolding key became searchable"
     );
 }
+
+#[test]
+fn single_flight_indexes_appended_delta() {
+    let temp = tempdir().unwrap();
+    let home = temp.path().join("home");
+    init_home(&home).unwrap();
+    ingest_hook_event(
+        &home,
+        Tool::Claude,
+        json!({
+            "session_id": "sf-session",
+            "hook_event_name": "UserPromptSubmit",
+            "message_id": "sf-1",
+            "prompt": "single flight delta marker"
+        }),
+    )
+    .unwrap();
+
+    match index_once_single_flight(&home, IndexOptions { embed: false }).unwrap() {
+        SingleFlightOutcome::Ran(report) => assert!(report.indexed_events >= 1),
+        SingleFlightOutcome::Skipped => panic!("expected a pass to run"),
+    }
+    assert!(latest_event(&home, Tool::Claude).unwrap().is_some());
+
+    // A second pass with no new data indexes nothing but still ran (lock was free).
+    let again = index_once_single_flight(&home, IndexOptions { embed: false }).unwrap();
+    assert_eq!(again, SingleFlightOutcome::Ran(IndexReport { indexed_events: 0 }));
+}
+
+#[test]
+fn single_flight_skips_when_lock_held_then_drains_after_release() {
+    use fs2::FileExt;
+    use std::fs::OpenOptions;
+
+    let temp = tempdir().unwrap();
+    let home = temp.path().join("home");
+    init_home(&home).unwrap();
+    ingest_hook_event(
+        &home,
+        Tool::Claude,
+        json!({
+            "session_id": "sf-lock",
+            "hook_event_name": "UserPromptSubmit",
+            "message_id": "sf-lock-1",
+            "prompt": "held lock marker"
+        }),
+    )
+    .unwrap();
+
+    let lock_path = home.join("index").join(".index.lock");
+    let holder = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .unwrap();
+    holder.lock_exclusive().unwrap();
+
+    // Another pass holds the lock: the attempt is a no-op, nothing indexed.
+    assert_eq!(
+        index_once_single_flight(&home, IndexOptions { embed: false }).unwrap(),
+        SingleFlightOutcome::Skipped
+    );
+    assert!(latest_event(&home, Tool::Claude).unwrap().is_none());
+
+    // Once free, the next trigger drains the same delta — no coverage lost.
+    FileExt::unlock(&holder).unwrap();
+    assert!(matches!(
+        index_once_single_flight(&home, IndexOptions { embed: false }).unwrap(),
+        SingleFlightOutcome::Ran(report) if report.indexed_events >= 1
+    ));
+}
+
+#[test]
+fn doctor_freshness_flags_unindexed_capture_then_clears_after_index() {
+    let temp = tempdir().unwrap();
+    let home = temp.path().join("home");
+    init_home(&home).unwrap();
+    ingest_hook_event(
+        &home,
+        Tool::Claude,
+        json!({
+            "session_id": "fresh-session",
+            "hook_event_name": "UserPromptSubmit",
+            "message_id": "fresh-1",
+            "prompt": "freshness marker"
+        }),
+    )
+    .unwrap();
+
+    // Captured but not indexed: a raw frontier exists with no indexed frontier.
+    let report = doctor_with_options(&home, false);
+    let before = report.index_freshness.get("claude").unwrap();
+    assert!(before.stale, "unindexed capture must read as stale");
+    assert!(before.latest_raw_at.is_some());
+    assert!(before.latest_indexed_at.is_none());
+
+    index_once_with_options(&home, IndexOptions { embed: false }).unwrap();
+
+    // Indexed now: the frontiers are within threshold, so freshness clears.
+    let report = doctor_with_options(&home, false);
+    let after = report.index_freshness.get("claude").unwrap();
+    assert!(!after.stale, "indexed capture must not read as stale");
+    assert!(after.latest_indexed_at.is_some());
+    assert!(after.lag_seconds.is_some());
+}

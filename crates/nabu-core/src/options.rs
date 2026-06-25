@@ -299,8 +299,29 @@ pub struct DoctorReport {
     pub backfill: DoctorCheck,
     pub coverage: CoverageSummary,
     pub storage_footprint: StorageFootprint,
+    /// Per-tool latest event as recorded in the SQLite index. This is the
+    /// indexed frontier, not the raw-capture frontier — compare against
+    /// [`DoctorReport::index_freshness`] to detect index lag.
     pub latest_captured_events: BTreeMap<String, Option<StoredEvent>>,
+    /// Per-tool comparison of the raw-capture frontier against the indexed
+    /// frontier. Surfaces index lag loudly: capture writes raw files in real
+    /// time, but events are invisible to search until indexed.
+    pub index_freshness: BTreeMap<String, IndexFreshness>,
     pub stats: Option<DoctorStats>,
+}
+
+/// Raw-vs-index freshness for one tool. `latest_raw_at` is the wall-clock mtime
+/// of the most recently appended raw capture file; `latest_indexed_at` is the
+/// `captured_at` of the newest indexed event. A positive `lag_seconds` means raw
+/// capture is ahead of the index. `stale` is set when the lag exceeds
+/// [`crate::INDEX_STALENESS_THRESHOLD_SECONDS`], or when raw files exist with no
+/// indexed events at all.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct IndexFreshness {
+    pub latest_raw_at: Option<String>,
+    pub latest_indexed_at: Option<String>,
+    pub lag_seconds: Option<i64>,
+    pub stale: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
