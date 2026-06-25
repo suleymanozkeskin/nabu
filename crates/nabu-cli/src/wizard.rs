@@ -1895,6 +1895,7 @@ mod tests {
                 total_bytes: 0,
             },
             latest_captured_events: Default::default(),
+            index_freshness: Default::default(),
             stats: None,
         }
     }

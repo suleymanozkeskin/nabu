@@ -229,6 +229,23 @@ pub(crate) fn checkpoint_matches_source(
     Ok(last_hash.as_ref() == Some(expected_hash))
 }
 
+/// Bytes of `source_path` the raw-index checkpoint has already consumed, or 0
+/// when the file was never indexed. The doctor uses this against the file's
+/// current size to compute unindexed (capture-ahead-of-index) bytes without
+/// touching any clock.
+pub(crate) fn raw_index_checkpoint_offset(
+    conn: &Connection,
+    db_path: &Path,
+    tool: Tool,
+    source_path: &Path,
+) -> Result<u64> {
+    Ok(
+        load_checkpoint_from_conn(conn, db_path, tool, "raw_jsonl", source_path)?
+            .map(|checkpoint| checkpoint.byte_offset)
+            .unwrap_or(0),
+    )
+}
+
 pub(crate) fn raw_index_checkpoint_is_current(
     conn: &Connection,
     db_path: &Path,
