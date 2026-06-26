@@ -1,0 +1,22 @@
+#!/bin/sh
+# nabu pre-push hook: run the clippy half of the CI "fmt + clippy" job before
+# changes leave the machine. Mirrors
+# `cargo clippy --workspace --all-targets -- -D warnings` from
+# .github/workflows/ci.yml. Kept out of pre-commit because clippy is slow enough
+# to make per-commit gating painful.
+#
+# Enable for this clone with:  sh scripts/setup-hooks.sh
+set -eu
+
+if ! command -v cargo >/dev/null 2>&1; then
+    echo "pre-push: cargo not found on PATH; skipping clippy." >&2
+    exit 0
+fi
+
+echo "pre-push: cargo clippy --workspace --all-targets -- -D warnings"
+if ! cargo clippy --workspace --all-targets -- -D warnings; then
+    echo >&2
+    echo "pre-push: clippy failed (warnings are denied in CI)." >&2
+    echo "  Fix the lints above, or push with --no-verify to bypass." >&2
+    exit 1
+fi
