@@ -1342,7 +1342,7 @@ dependencies = [
 
 [[package]]
 name = "nabu-adapters"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "hex",
  "nabu-core",
@@ -1355,7 +1355,7 @@ dependencies = [
 
 [[package]]
 name = "nabu-cli"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "clap",
  "console 0.15.11",
@@ -1372,7 +1372,7 @@ dependencies = [
 
 [[package]]
 name = "nabu-core"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "fastembed",
  "fs2",
@@ -1394,7 +1394,7 @@ dependencies = [
 
 [[package]]
 name = "nabu-mcp"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "nabu-core",
  "serde",
