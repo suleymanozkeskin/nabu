@@ -103,11 +103,11 @@ pub use options::{
     BackfillImportPreview, BackfillProgress, BackfillReport, CorroboratedRef, Corroboration,
     CoverageSummary, DoctorCheck, DoctorReport, DoctorStats, EmbeddingDownloadProgress,
     EmbeddingDownloadReport, EmbeddingIndexProgress, EmbeddingModelDisclosure,
-    EmbeddingModelStatus, EventOptions, EventPointer, FileIngestReport, FileTouch, IndexOptions,
-    IndexReport, InitReport, PurgeAction, PurgeAllArtifact, PurgeAllOptions, PurgeAllReport,
-    PurgeReport, PurgeTier, SearchContinuation, SearchMode, SearchOptions, SearchPage,
-    SearchResult, SessionOptions, SessionPage, SessionSummary, StorageFootprint, StoredEvent,
-    ToolUsage, SESSION_PROMPT_SNIPPET_CHARS, SESSION_TOP_FILES, SESSION_TOP_TOOLS,
+    EmbeddingModelStatus, EventOptions, EventPointer, FileIngestReport, FileTouch, IndexFreshness,
+    IndexOptions, IndexReport, InitReport, PurgeAction, PurgeAllArtifact, PurgeAllOptions,
+    PurgeAllReport, PurgeReport, PurgeTier, SearchContinuation, SearchMode, SearchOptions,
+    SearchPage, SearchResult, SessionOptions, SessionPage, SessionSummary, StorageFootprint,
+    StoredEvent, ToolUsage, SESSION_PROMPT_SNIPPET_CHARS, SESSION_TOP_FILES, SESSION_TOP_TOOLS,
 };
 
 mod purge;
@@ -115,7 +115,7 @@ pub use purge::{purge_all, purge_before, purge_session};
 
 mod doctor;
 pub(crate) use doctor::{directory_size, storage_footprint};
-pub use doctor::{doctor, doctor_with_options, doctor_with_progress, DoctorStage};
+pub use doctor::{doctor, doctor_with_options, doctor_with_progress, index_freshness, DoctorStage};
 mod json;
 pub(crate) use json::{i64_pointer, required_string, string_pointer};
 
@@ -127,7 +127,8 @@ pub(crate) use backfill::{
 pub(crate) use backfill::{
     append_prepared_events, message_id_for_payload, normalize_date_or_duration,
     opencode_hook_session_id, opencode_server_events_from_payload, parse_ingest_file_source,
-    raw_index_checkpoint_is_current, source_file_metadata, write_raw_index_checkpoint,
+    raw_index_checkpoint_is_current, raw_index_checkpoint_offset, source_file_metadata,
+    write_raw_index_checkpoint,
 };
 #[cfg(test)]
 pub(crate) use backfill::{backfill_dry_run, backfill_since};
@@ -141,7 +142,10 @@ pub(crate) use ingest::{
 pub use ingest::{ingest_file, ingest_hook_event, ingest_opencode_server_messages, init_home};
 
 mod index;
-pub use index::{index_once, index_once_with_options, index_once_with_options_and_progress};
+pub use index::{
+    index_once, index_once_single_flight, index_once_with_options,
+    index_once_with_options_and_progress, SingleFlightOutcome,
+};
 pub(crate) use index::{recalculate_all_session_counts, RawIndexFileReport};
 
 mod search;

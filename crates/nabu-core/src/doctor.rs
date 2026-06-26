@@ -2,10 +2,11 @@
 //! and storage-footprint summaries, and the staged doctor report.
 
 use crate::{
-    latest_event, open_index, table_count, table_exists, CoverageSummary, DoctorCheck,
-    DoctorReport, DoctorStats, Error, Result, StorageFootprint, StoredEvent, Tool,
-    MAX_DIRECTORY_SIZE_DEPTH, SEMANTIC_VECTOR_DIMENSIONS,
+    latest_event, open_index, raw_index_checkpoint_offset, table_count, table_exists,
+    CoverageSummary, DoctorCheck, DoctorReport, DoctorStats, Error, IndexFreshness, Result,
+    StorageFootprint, StoredEvent, Tool, MAX_DIRECTORY_SIZE_DEPTH, SEMANTIC_VECTOR_DIMENSIONS,
 };
+use rusqlite::Connection;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
@@ -62,6 +63,7 @@ pub fn doctor_with_progress(
     on_stage(DoctorStage::Footprint, true);
 
     let latest_captured_events = latest_events_for_doctor(home);
+    let index_freshness = index_freshness_for_doctor(home);
     on_stage(DoctorStage::LatestEvents, true);
 
     let stats = if deep { index_stats(home).ok() } else { None };
@@ -100,6 +102,7 @@ pub fn doctor_with_progress(
         coverage,
         storage_footprint,
         latest_captured_events,
+        index_freshness,
         stats,
     }
 }
@@ -113,6 +116,79 @@ fn latest_events_for_doctor(home: &Path) -> BTreeMap<String, Option<StoredEvent>
         );
     }
     events
+}
+
+/// Per-tool raw-vs-index freshness, measured in bytes. For each
+/// `raw/<tool>/*.jsonl` file, the index checkpoint records how many bytes have
+/// been consumed; the file's current size minus that offset is the unindexed
+/// remainder. Summed per tool, a non-zero remainder means capture is ahead of
+/// the index. This compares like to like (raw bytes on disk vs. checkpointed
+/// bytes), unlike a filesystem-mtime-vs-`captured_at` comparison which diverges
+/// for backfilled history whose events keep their original timestamps.
+/// Per-tool index freshness without running the full doctor pipeline. The human
+/// `nabu doctor` printer uses this to show freshness lines without paying for the
+/// storage-footprint walk, coverage counts, and latest-event queries it does not
+/// display.
+pub fn index_freshness(home: &Path) -> BTreeMap<String, IndexFreshness> {
+    index_freshness_for_doctor(home)
+}
+
+fn index_freshness_for_doctor(home: &Path) -> BTreeMap<String, IndexFreshness> {
+    let db_path = home.join("index").join("harness.db");
+    let conn = open_index(&db_path).ok();
+    let mut freshness = BTreeMap::new();
+    for tool in Tool::all() {
+        freshness.insert(
+            tool.as_str().to_string(),
+            tool_index_freshness(conn.as_ref(), &db_path, home, tool),
+        );
+    }
+    freshness
+}
+
+fn tool_index_freshness(
+    conn: Option<&Connection>,
+    db_path: &Path,
+    home: &Path,
+    tool: Tool,
+) -> IndexFreshness {
+    let raw_dir = home.join("raw").join(tool.as_str());
+    let mut raw_bytes = 0u64;
+    let mut indexed_bytes = 0u64;
+    let mut pending_files = 0usize;
+
+    if let Ok(entries) = fs::read_dir(&raw_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|value| value.to_str()) != Some("jsonl") {
+                continue;
+            }
+            let Ok(size) = entry.metadata().map(|meta| meta.len()) else {
+                continue;
+            };
+            raw_bytes += size;
+            // Clamp to size: a rotated/truncated file can leave a checkpoint
+            // offset beyond the current length, which would otherwise underflow
+            // the unindexed total.
+            let consumed = conn
+                .and_then(|conn| raw_index_checkpoint_offset(conn, db_path, tool, &path).ok())
+                .unwrap_or(0)
+                .min(size);
+            indexed_bytes += consumed;
+            if consumed < size {
+                pending_files += 1;
+            }
+        }
+    }
+
+    let unindexed_bytes = raw_bytes.saturating_sub(indexed_bytes);
+    IndexFreshness {
+        raw_bytes,
+        indexed_bytes,
+        unindexed_bytes,
+        pending_files,
+        stale: unindexed_bytes > 0,
+    }
 }
 
 fn storage_is_healthy(home: &Path) -> bool {

@@ -12,10 +12,11 @@ use crate::mcp_config::{
 use crate::{DoctorTool, OutputFormat};
 use nabu_adapters::{claude_status, codex_status, opencode_status, ConfigChangeReport};
 use nabu_core::{
-    doctor_with_options, latest_event, Corroboration, Error, PurgeAction, PurgeAllReport,
-    PurgeTier, SearchPage, SessionPage, SummaryKind, Tool,
+    doctor_with_options, index_freshness, latest_event, Corroboration, Error, IndexFreshness,
+    PurgeAction, PurgeAllReport, PurgeTier, SearchPage, SessionPage, SummaryKind, Tool,
 };
 use serde_json::{json, Value};
+use std::collections::BTreeMap;
 use std::path::Path;
 
 pub(crate) fn doctor_json_data(
@@ -259,12 +260,16 @@ pub(crate) fn print_purge_all_result(report: &PurgeAllReport) {
 }
 
 pub(crate) fn print_tool_doctor_human(home: &Path, tool: DoctorTool) -> nabu_core::Result<()> {
+    // Freshness only — the full doctor pipeline (footprint walk, coverage,
+    // latest-event queries) is not displayed here, so do not pay for it.
+    let freshness = index_freshness(home);
     if matches!(tool, DoctorTool::Claude | DoctorTool::All) {
         let status = claude_status(home)?;
         println!("claude.installed={}", status.claude_installed);
         println!("claude.hooks_installed={}", status.hooks_installed);
         println!("claude.storage_writable={}", status.storage_writable);
         println!("claude.settings_path={}", status.settings_path.display());
+        print_freshness_human(&freshness, "claude");
     }
     if matches!(tool, DoctorTool::Codex | DoctorTool::All) {
         let status = codex_status(home)?;
@@ -273,6 +278,7 @@ pub(crate) fn print_tool_doctor_human(home: &Path, tool: DoctorTool) -> nabu_cor
         println!("codex.storage_writable={}", status.storage_writable);
         println!("codex.hooks_path={}", status.hooks_path.display());
         println!("codex.trust_guidance={}", status.trust_guidance);
+        print_freshness_human(&freshness, "codex");
     }
     if matches!(tool, DoctorTool::Opencode | DoctorTool::All) {
         let status = opencode_status(home)?;
@@ -288,8 +294,32 @@ pub(crate) fn print_tool_doctor_human(home: &Path, tool: DoctorTool) -> nabu_cor
         if let Some(server_url) = status.server_url {
             println!("opencode.server_url={server_url}");
         }
+        print_freshness_human(&freshness, "opencode");
     }
     Ok(())
+}
+
+/// Print one `<tool>.index_*` line group from the freshness map. When the index
+/// is behind capture, the `STALE` detail names the unindexed byte count so a
+/// broken capture→index chain is visible at a glance.
+fn print_freshness_human(freshness: &BTreeMap<String, IndexFreshness>, tool: &str) {
+    let Some(freshness) = freshness.get(tool) else {
+        return;
+    };
+    println!(
+        "{tool}.index_stale={}{}",
+        freshness.stale,
+        if freshness.stale {
+            format!(
+                "  STALE unindexed={}B in {} file(s)",
+                freshness.unindexed_bytes, freshness.pending_files
+            )
+        } else {
+            String::new()
+        }
+    );
+    println!("{tool}.raw_bytes={}", freshness.raw_bytes);
+    println!("{tool}.indexed_bytes={}", freshness.indexed_bytes);
 }
 
 pub(crate) struct AlsoAt<'a>(pub(crate) &'a [i64]);

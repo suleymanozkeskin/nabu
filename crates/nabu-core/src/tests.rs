@@ -5216,3 +5216,168 @@ fn codex_exec_wrapper_tool_call_is_searchable_by_command_without_scaffolding() {
         "scaffolding key became searchable"
     );
 }
+
+#[test]
+fn single_flight_indexes_appended_delta() {
+    let temp = tempdir().unwrap();
+    let home = temp.path().join("home");
+    init_home(&home).unwrap();
+    ingest_hook_event(
+        &home,
+        Tool::Claude,
+        json!({
+            "session_id": "sf-session",
+            "hook_event_name": "UserPromptSubmit",
+            "message_id": "sf-1",
+            "prompt": "single flight delta marker"
+        }),
+    )
+    .unwrap();
+
+    match index_once_single_flight(&home, IndexOptions { embed: false }).unwrap() {
+        SingleFlightOutcome::Ran(report) => assert!(report.indexed_events >= 1),
+        SingleFlightOutcome::Skipped => panic!("expected a pass to run"),
+    }
+    assert!(latest_event(&home, Tool::Claude).unwrap().is_some());
+
+    // A second pass with no new data indexes nothing but still ran (lock was free).
+    let again = index_once_single_flight(&home, IndexOptions { embed: false }).unwrap();
+    assert_eq!(
+        again,
+        SingleFlightOutcome::Ran(IndexReport { indexed_events: 0 })
+    );
+}
+
+#[test]
+fn single_flight_skips_when_lock_held_then_drains_after_release() {
+    use fs2::FileExt;
+    use std::fs::OpenOptions;
+
+    let temp = tempdir().unwrap();
+    let home = temp.path().join("home");
+    init_home(&home).unwrap();
+    ingest_hook_event(
+        &home,
+        Tool::Claude,
+        json!({
+            "session_id": "sf-lock",
+            "hook_event_name": "UserPromptSubmit",
+            "message_id": "sf-lock-1",
+            "prompt": "held lock marker"
+        }),
+    )
+    .unwrap();
+
+    let lock_path = home.join("index").join(".index.lock");
+    let holder = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .unwrap();
+    holder.lock_exclusive().unwrap();
+
+    // Another pass holds the lock: the attempt is a no-op, nothing indexed.
+    assert_eq!(
+        index_once_single_flight(&home, IndexOptions { embed: false }).unwrap(),
+        SingleFlightOutcome::Skipped
+    );
+    assert!(latest_event(&home, Tool::Claude).unwrap().is_none());
+
+    // Once free, the next trigger drains the same delta — no coverage lost.
+    FileExt::unlock(&holder).unwrap();
+    assert!(matches!(
+        index_once_single_flight(&home, IndexOptions { embed: false }).unwrap(),
+        SingleFlightOutcome::Ran(report) if report.indexed_events >= 1
+    ));
+}
+
+#[test]
+fn doctor_freshness_flags_unindexed_capture_then_clears_after_index() {
+    let temp = tempdir().unwrap();
+    let home = temp.path().join("home");
+    init_home(&home).unwrap();
+    ingest_hook_event(
+        &home,
+        Tool::Claude,
+        json!({
+            "session_id": "fresh-session",
+            "hook_event_name": "UserPromptSubmit",
+            "message_id": "fresh-1",
+            "prompt": "freshness marker"
+        }),
+    )
+    .unwrap();
+
+    // Captured but not indexed: raw bytes exist, none consumed by a checkpoint.
+    let report = doctor_with_options(&home, false);
+    let before = report.index_freshness.get("claude").unwrap();
+    assert!(before.stale, "unindexed capture must read as stale");
+    assert!(before.raw_bytes > 0);
+    assert_eq!(before.indexed_bytes, 0);
+    assert_eq!(before.unindexed_bytes, before.raw_bytes);
+    assert_eq!(before.pending_files, 1);
+
+    index_once_with_options(&home, IndexOptions { embed: false }).unwrap();
+
+    // Indexed now: the checkpoint has consumed the whole file, so lag clears.
+    let report = doctor_with_options(&home, false);
+    let after = report.index_freshness.get("claude").unwrap();
+    assert!(!after.stale, "indexed capture must not read as stale");
+    assert_eq!(after.unindexed_bytes, 0);
+    assert_eq!(after.pending_files, 0);
+    assert_eq!(after.indexed_bytes, after.raw_bytes);
+}
+
+#[test]
+fn doctor_freshness_counts_partially_indexed_delta() {
+    // Index a first event, then append a second without re-indexing. Freshness
+    // must report exactly the un-checkpointed tail as unindexed — proving the
+    // signal tracks byte offsets, not whole-file or clock state.
+    let temp = tempdir().unwrap();
+    let home = temp.path().join("home");
+    init_home(&home).unwrap();
+    ingest_hook_event(
+        &home,
+        Tool::Claude,
+        json!({
+            "session_id": "partial-session",
+            "hook_event_name": "UserPromptSubmit",
+            "message_id": "partial-1",
+            "prompt": "first event, will be indexed"
+        }),
+    )
+    .unwrap();
+    index_once_with_options(&home, IndexOptions { embed: false }).unwrap();
+    let indexed_after_first = doctor_with_options(&home, false)
+        .index_freshness
+        .get("claude")
+        .unwrap()
+        .indexed_bytes;
+
+    ingest_hook_event(
+        &home,
+        Tool::Claude,
+        json!({
+            "session_id": "partial-session",
+            "hook_event_name": "UserPromptSubmit",
+            "message_id": "partial-2",
+            "prompt": "second event, left unindexed"
+        }),
+    )
+    .unwrap();
+
+    let freshness = doctor_with_options(&home, false)
+        .index_freshness
+        .get("claude")
+        .unwrap()
+        .clone();
+    assert!(freshness.stale, "a pending tail must read as stale");
+    assert_eq!(freshness.pending_files, 1);
+    assert_eq!(freshness.indexed_bytes, indexed_after_first);
+    assert_eq!(
+        freshness.unindexed_bytes,
+        freshness.raw_bytes - indexed_after_first
+    );
+}

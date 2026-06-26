@@ -299,8 +299,33 @@ pub struct DoctorReport {
     pub backfill: DoctorCheck,
     pub coverage: CoverageSummary,
     pub storage_footprint: StorageFootprint,
+    /// Per-tool latest event as recorded in the SQLite index. This is the
+    /// indexed frontier, not the raw-capture frontier — compare against
+    /// [`DoctorReport::index_freshness`] to detect index lag.
     pub latest_captured_events: BTreeMap<String, Option<StoredEvent>>,
+    /// Per-tool comparison of the raw-capture frontier against the indexed
+    /// frontier. Surfaces index lag loudly: capture writes raw files in real
+    /// time, but events are invisible to search until indexed.
+    pub index_freshness: BTreeMap<String, IndexFreshness>,
     pub stats: Option<DoctorStats>,
+}
+
+/// Raw-vs-index freshness for one tool, measured in bytes rather than clocks.
+/// `raw_bytes` is the total size of the tool's `raw/<tool>/*.jsonl` capture
+/// files; `indexed_bytes` is how far the index checkpoints have consumed them;
+/// `unindexed_bytes` is the remainder (capture written but not yet indexed).
+/// `pending_files` counts raw files with unindexed bytes. `stale` is set
+/// whenever `unindexed_bytes > 0` — the exact condition that capture is ahead of
+/// the index. This deliberately avoids comparing filesystem mtime to event
+/// `captured_at` (two unrelated clocks that diverge under backfill, purge, and
+/// clock skew); byte offsets are the same quantity the indexer checkpoints on.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct IndexFreshness {
+    pub raw_bytes: u64,
+    pub indexed_bytes: u64,
+    pub unindexed_bytes: u64,
+    pub pending_files: usize,
+    pub stale: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
