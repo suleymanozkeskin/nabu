@@ -18,7 +18,7 @@ default = []
 semantic = ["nabu-core/semantic"]
 
 [dependencies]
-nabu-core = { path = "../nabu-core", version = "0.1.1" }
+nabu-core = { path = "../nabu-core", version = "0.1.2" }
 serde.workspace = true
 serde_json.workspace = true
 

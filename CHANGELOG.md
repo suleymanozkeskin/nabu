@@ -5,6 +5,8 @@ in `docs/release-notes.md`.
 
 ## Unreleased
 
+## 0.1.2
+
 - Index captured events automatically: each capture hook now triggers a
   detached, single-flight incremental index of the new delta, so
   `search_history` / `list_sessions` see sessions without a manual
