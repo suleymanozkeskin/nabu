@@ -1,7 +1,9 @@
 //! Raw JSONL capture-file readers: locate a session's raw file and parse
 //! stored event envelopes by pointer, line, or byte offset.
 
-use crate::{open_index, resolved_payload_for_envelope, Error, EventEnvelope, Result, Tool};
+use crate::{
+    open_index, resolved_payload_for_envelope, Error, EventEnvelope, NotFound, Result, Tool,
+};
 use rusqlite::OptionalExtension;
 use serde_json::Value;
 use std::fs::File;
@@ -22,11 +24,10 @@ pub(crate) fn session_raw_file(home: &Path, tool: Tool, session_id: &str) -> Res
         source,
     })?
     .ok_or_else(|| {
-        Error::Validation(format!(
-            "session not found for {}:{}",
-            tool.as_str(),
-            session_id
-        ))
+        Error::NotFound(NotFound::Session {
+            tool: tool.as_str().to_string(),
+            session_id: session_id.to_string(),
+        })
     })
 }
 
@@ -45,10 +46,10 @@ pub(crate) fn read_raw_line(path: &Path, requested_line: i64) -> Result<String> 
             return Ok(line);
         }
     }
-    Err(Error::Validation(format!(
-        "raw line {requested_line} not found in {}",
-        path.display()
-    )))
+    Err(Error::NotFound(NotFound::RawLine {
+        line: requested_line,
+        path: path.to_path_buf(),
+    }))
 }
 
 pub(crate) fn raw_envelope_for_pointer(

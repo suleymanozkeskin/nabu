@@ -103,7 +103,7 @@ pub(crate) fn json_error(error: &Error) -> Value {
 
 fn cli_error_code(error: &Error) -> &'static str {
     match error {
-        Error::Validation(message) if cli_validation_message_is_not_found(message) => "NOT_FOUND",
+        Error::NotFound(_) => "NOT_FOUND",
         Error::SemanticUnavailable(_) => "SEMANTIC_UNAVAILABLE",
         Error::Validation(_) | Error::Json(_) => "VALIDATION_ERROR",
         Error::Io { source, .. } if source.kind() == std::io::ErrorKind::PermissionDenied => {
@@ -113,12 +113,6 @@ fn cli_error_code(error: &Error) -> &'static str {
         Error::Sqlite { .. } => "INDEX_UNAVAILABLE",
         Error::TimeFormat(_) => "INTERNAL_ERROR",
     }
-}
-
-fn cli_validation_message_is_not_found(message: &str) -> bool {
-    message.starts_with("session not found for ")
-        || message.starts_with("event not found for ")
-        || (message.starts_with("raw line ") && message.split_once(" not found in ").is_some())
 }
 
 fn cli_error_hint(code: &str) -> &'static str {

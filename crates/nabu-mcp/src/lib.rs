@@ -1827,9 +1827,7 @@ impl From<nabu_core::Error> for ToolError {
 
 fn mcp_error_code(value: &nabu_core::Error) -> &'static str {
     match value {
-        nabu_core::Error::Validation(message) if validation_message_is_not_found(message) => {
-            "NOT_FOUND"
-        }
+        nabu_core::Error::NotFound(_) => "NOT_FOUND",
         nabu_core::Error::Validation(_) => "VALIDATION_ERROR",
         nabu_core::Error::SemanticUnavailable(_) => "SEMANTIC_UNAVAILABLE",
         nabu_core::Error::HomeUnavailable => "STORAGE_UNAVAILABLE",
@@ -1847,11 +1845,10 @@ fn mcp_error_code(value: &nabu_core::Error) -> &'static str {
 
 fn mcp_error_message(value: &nabu_core::Error) -> String {
     match value {
-        nabu_core::Error::Validation(message) if message.starts_with("raw line ") => {
+        // A raw-line miss reflects an index/raw drift, not a caller-supplied id;
+        // the path is elided so no absolute filesystem path leaks over MCP.
+        nabu_core::Error::NotFound(nabu_core::NotFound::RawLine { .. }) => {
             "raw event not found for requested history pointer".to_string()
-        }
-        nabu_core::Error::Validation(message) if validation_message_is_not_found(message) => {
-            message.to_string()
         }
         nabu_core::Error::Io { source, .. }
             if source.kind() == std::io::ErrorKind::PermissionDenied =>
@@ -1877,12 +1874,6 @@ fn mcp_error_details(value: &nabu_core::Error) -> Value {
         }
         _ => json!({}),
     }
-}
-
-fn validation_message_is_not_found(message: &str) -> bool {
-    message.starts_with("session not found for ")
-        || message.starts_with("event not found for ")
-        || (message.starts_with("raw line ") && message.split_once(" not found in ").is_some())
 }
 
 impl From<serde_json::Error> for ToolError {
@@ -2373,9 +2364,10 @@ mod tests {
 
     #[test]
     fn mcp_core_errors_do_not_leak_absolute_paths_or_use_broad_not_found_matching() {
-        let raw_line = ToolError::from(nabu_core::Error::Validation(
-            "raw line 99 not found in /Users/example/.nabu/raw/claude/session.jsonl".to_string(),
-        ));
+        let raw_line = ToolError::from(nabu_core::Error::NotFound(nabu_core::NotFound::RawLine {
+            line: 99,
+            path: PathBuf::from("/Users/example/.nabu/raw/claude/session.jsonl"),
+        }));
         assert_eq!(raw_line.code, "NOT_FOUND");
         assert_eq!(
             raw_line.message,

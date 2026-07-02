@@ -72,7 +72,7 @@ pub fn search_history_page(home: &Path, query: &str, options: SearchOptions) -> 
     let offset = options.offset;
     let max_snippet_chars = options.max_snippet_chars.clamp(1, MAX_SEARCH_SNIPPET_CHARS);
     let raw_fetch_limit = search_overfetch_limit(offset, limit);
-    let (mut results, has_more_raw_rows) = lexical_search_ranked_results(
+    let (results, has_more_raw_rows) = lexical_search_ranked_results(
         home,
         &options,
         &query_terms,
@@ -80,6 +80,58 @@ pub fn search_history_page(home: &Path, query: &str, options: SearchOptions) -> 
         raw_fetch_limit,
         max_snippet_chars,
     )?;
+
+    finalize_search_page(
+        &options,
+        SearchPageAssembly {
+            results,
+            has_more_raw_rows,
+            mode_requested,
+            mode_applied,
+            semantic_available,
+            limit,
+            offset,
+            max_snippet_chars,
+        },
+    )
+}
+
+/// Ranked results plus the pagination facts a page needs before its shared
+/// finalization. Both the lexical and hybrid paths produce one of these; the
+/// only path-specific inputs are `mode_applied` and the ranked list itself.
+pub(crate) struct SearchPageAssembly {
+    pub(crate) results: Vec<RankedSearchResult>,
+    /// The ranked list was overfetch-truncated (more matching rows exist than
+    /// were retrieved), so the total is unknown and `total_estimated` is `None`.
+    pub(crate) has_more_raw_rows: bool,
+    pub(crate) mode_requested: SearchMode,
+    pub(crate) mode_applied: SearchMode,
+    pub(crate) semantic_available: bool,
+    pub(crate) limit: usize,
+    pub(crate) offset: usize,
+    pub(crate) max_snippet_chars: usize,
+}
+
+/// Shared page assembly for every search path: dedupe, total-estimate
+/// semantics, window slicing, payload hydration, corroboration, and the
+/// pagination cursor. Extracting this keeps the lexical and hybrid paths from
+/// drifting — every result path applies the same dedupe/total/corroboration
+/// rules, so citation completeness and `--corroborate` behave identically.
+fn finalize_search_page(
+    options: &SearchOptions,
+    assembly: SearchPageAssembly,
+) -> Result<SearchPage> {
+    let SearchPageAssembly {
+        mut results,
+        has_more_raw_rows,
+        mode_requested,
+        mode_applied,
+        semantic_available,
+        limit,
+        offset,
+        max_snippet_chars,
+    } = assembly;
+
     if options.dedupe {
         results = dedupe_ranked_search_results(results)?;
     }
@@ -354,7 +406,7 @@ fn search_history_hybrid_page(
     let raw_fetch_limit = search_overfetch_limit(offset, limit);
     let fts_query = quoted_fts_terms(&query_terms);
 
-    let (lexical_results, _) = lexical_search_ranked_results(
+    let (lexical_results, lexical_has_more_raw_rows) = lexical_search_ranked_results(
         home,
         &options,
         &query_terms,
@@ -370,48 +422,25 @@ fn search_history_hybrid_page(
         &query_terms,
         max_snippet_chars,
     )?;
-    let mut results = reciprocal_rank_fuse(lexical_results, vector_results);
+    let results = reciprocal_rank_fuse(lexical_results, vector_results);
 
-    if options.dedupe {
-        results = dedupe_ranked_search_results(results)?;
-    }
-    let total_estimated = Some(results.len());
-    let has_more_logical_rows = results.len() > offset.saturating_add(limit);
-    let mut page_results = results
-        .into_iter()
-        .skip(offset)
-        .take(limit)
-        .map(|ranked| ranked.result)
-        .collect::<Vec<_>>();
-    if options.include_payload {
-        hydrate_search_result_payloads(&mut page_results)?;
-    }
-    let returned = page_results.len();
-    let continuation = if returned > 0 && has_more_logical_rows {
-        Some(SearchContinuation {
-            next_offset: offset.saturating_add(returned),
-        })
-    } else {
-        None
-    };
-
-    Ok(SearchPage {
-        results: page_results,
-        truncated: continuation.is_some(),
-        returned,
-        total_estimated,
-        continuation,
-        mode_requested: options.mode,
-        mode_applied: SearchMode::Hybrid,
-        semantic_available,
-        limit_applied: limit,
-        offset_applied: offset,
-        max_snippet_chars_applied: max_snippet_chars,
-        include_payload: options.include_payload,
-        include_deltas: options.include_deltas,
-        dedupe: options.dedupe,
-        expand_concepts: options.expand_concepts,
-    })
+    finalize_search_page(
+        &options,
+        SearchPageAssembly {
+            results,
+            // The fused set inherits the lexical overfetch truncation: if the
+            // lexical side dropped rows, the true total is unknown, so
+            // total_estimated must be None (matching the lexical path) rather
+            // than the fused length.
+            has_more_raw_rows: lexical_has_more_raw_rows,
+            mode_requested: options.mode,
+            mode_applied: SearchMode::Hybrid,
+            semantic_available,
+            limit,
+            offset,
+            max_snippet_chars,
+        },
+    )
 }
 
 fn reciprocal_rank_fuse(
@@ -756,4 +785,122 @@ fn escape_like(value: &str) -> String {
         }
     }
     escaped
+}
+
+#[cfg(test)]
+mod page_assembly_tests {
+    //! Exercises the finalization the lexical and hybrid paths share. Before the
+    //! extraction, the hybrid page carried its own copy that skipped
+    //! corroboration and set `total_estimated` to the fused length even after
+    //! overfetch truncation; these tests pin the shared function so the two paths
+    //! cannot drift apart again.
+    use super::*;
+
+    fn ranked(event_id: i64, raw_line: i64) -> RankedSearchResult {
+        RankedSearchResult {
+            event_id,
+            result: SearchResult {
+                tool: Tool::Claude,
+                session_id: "session".to_string(),
+                canonical_type: "assistant.message".to_string(),
+                summary_kind: None,
+                timestamp: "2026-01-01T00:00:00Z".to_string(),
+                score: 1.0,
+                snippet: "snippet".to_string(),
+                native_command: None,
+                raw_file: "/tmp/nabu-page-assembly.jsonl".to_string(),
+                raw_line,
+                raw_offset: None,
+                compaction_state: "none".to_string(),
+                payload: Value::Null,
+                also_at: Vec::new(),
+                corroboration: None,
+                retrieval_key: format!("retrieval-key-{event_id}"),
+                // A PR ref resolves without touching the filesystem or git.
+                corroboration_text: "resolved in PR #42".to_string(),
+                cwd: None,
+                project_root: None,
+            },
+        }
+    }
+
+    // A hybrid-shaped assembly: `mode_applied` is Hybrid, matching what
+    // `search_history_hybrid_page` builds.
+    fn hybrid_assembly(
+        results: Vec<RankedSearchResult>,
+        has_more_raw_rows: bool,
+    ) -> SearchPageAssembly {
+        SearchPageAssembly {
+            results,
+            has_more_raw_rows,
+            mode_requested: SearchMode::Auto,
+            mode_applied: SearchMode::Hybrid,
+            semantic_available: true,
+            limit: 10,
+            offset: 0,
+            max_snippet_chars: 200,
+        }
+    }
+
+    #[test]
+    fn hybrid_page_honors_corroborate() {
+        let options = SearchOptions {
+            corroborate: true,
+            dedupe: false,
+            ..SearchOptions::default()
+        };
+        let page = finalize_search_page(
+            &options,
+            hybrid_assembly(vec![ranked(1, 1), ranked(2, 2)], false),
+        )
+        .unwrap();
+        assert_eq!(page.mode_applied, SearchMode::Hybrid);
+        assert_eq!(page.results.len(), 2);
+        for result in &page.results {
+            assert!(
+                result.corroboration.is_some(),
+                "corroborate=true must annotate every hybrid result"
+            );
+        }
+    }
+
+    #[test]
+    fn page_without_corroborate_leaves_it_unset() {
+        let options = SearchOptions {
+            corroborate: false,
+            dedupe: false,
+            ..SearchOptions::default()
+        };
+        let page =
+            finalize_search_page(&options, hybrid_assembly(vec![ranked(1, 1)], false)).unwrap();
+        assert!(page.results[0].corroboration.is_none());
+    }
+
+    #[test]
+    fn hybrid_total_estimated_is_none_when_overfetch_truncated() {
+        let options = SearchOptions {
+            dedupe: false,
+            ..SearchOptions::default()
+        };
+        let truncated = finalize_search_page(
+            &options,
+            hybrid_assembly(vec![ranked(1, 1), ranked(2, 2)], true),
+        )
+        .unwrap();
+        assert_eq!(
+            truncated.total_estimated, None,
+            "a truncated overfetch means the true total is unknown"
+        );
+        assert!(
+            truncated.continuation.is_some(),
+            "truncation must advance the pagination cursor"
+        );
+
+        let complete = finalize_search_page(
+            &options,
+            hybrid_assembly(vec![ranked(1, 1), ranked(2, 2)], false),
+        )
+        .unwrap();
+        assert_eq!(complete.total_estimated, Some(2));
+    }
 }
