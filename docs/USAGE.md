@@ -245,6 +245,7 @@ nabu search QUERY [OPTIONS]
 | `--type <CANONICAL_TYPE>` | Restrict to a canonical event type. | all |
 | `--file <FILE>` | Restrict to events mentioning a file path. | all |
 | `--command <COMMAND>` | Restrict to events mentioning a command. | all |
+| `--ref <REF>` | Restrict to events whose extracted provenance refs match, e.g. `--ref '#54'` (a PR reference) or `--ref <commit-sha-prefix>`. | all |
 | `--mode <MODE>` | `auto`, `lexical`, or `hybrid`. | `auto` |
 | `--corroborate` | Annotate hits with read-only local git existence checks. | off |
 | `--expand-concepts` | OR-expand query terms with curated concept synonyms (`bug`~`error`/`failure`, `perf`~`latency`). | off |

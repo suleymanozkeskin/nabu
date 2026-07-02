@@ -34,9 +34,9 @@ use nabu_core::{
     embedding_model_disclosure, embedding_model_status, export_session_jsonl_with_options,
     export_session_markdown_with_options, index_once_single_flight,
     index_once_with_options_and_progress, ingest_file, ingest_hook_event, init_home,
-    prune_embedding_cache, purge_all, purge_before, purge_session, resolve_home,
-    search_history_page, Error, IndexOptions, PurgeAllOptions, SearchMode, SearchOptions,
-    SessionOptions, SingleFlightOutcome, Source, Tool,
+    malformed_native_payload, prune_embedding_cache, purge_all, purge_before, purge_session,
+    resolve_home, search_history_page, Error, IndexOptions, PurgeAllOptions, SearchMode,
+    SearchOptions, SessionOptions, SingleFlightOutcome, Source, Tool,
 };
 use serde_json::Value;
 use std::fs::File;
@@ -478,6 +478,36 @@ fn spawn_background_index(home: &Path) {
     }
 }
 
+/// Synthetic session id for hook payloads that failed to parse. Grouping them
+/// under one name (rather than a random one per occurrence) keeps parse
+/// failures out of the way of real sessions while still landing in a single,
+/// greppable raw file instead of being dropped.
+const HOOK_PARSE_ERROR_SESSION_ID: &str = "hook-parse-error";
+
+/// Parse raw hook stdin into a payload `ingest_hook_event` can append.
+///
+/// Live hook ingest must never break the calling agent (see the `Error::Io`
+/// handling around its call site) and must never silently drop a capture
+/// either. Malformed or truncated JSON is therefore wrapped in the same
+/// synthetic `"type": "parse_error"` shape backfill uses for unreadable
+/// native lines, tagged with a fixed session id so it can still be ingested
+/// (a real session id can't be recovered from unparseable input).
+fn hook_stdin_payload(input: &str) -> Value {
+    match serde_json::from_str(input) {
+        Ok(payload) => payload,
+        Err(error) => {
+            let mut payload = malformed_native_payload(Path::new("<stdin>"), 0, input, error);
+            if let Value::Object(map) = &mut payload {
+                map.insert(
+                    "session_id".to_string(),
+                    Value::String(HOOK_PARSE_ERROR_SESSION_ID.to_string()),
+                );
+            }
+            payload
+        }
+    }
+}
+
 fn run(cli: Cli) -> nabu_core::Result<()> {
     let Cli { home, command } = cli;
     let home = resolve_home(home)?;
@@ -500,7 +530,7 @@ fn run(cli: Cli) -> nabu_core::Result<()> {
                     path: PathBuf::from("<stdin>"),
                     source,
                 })?;
-            let payload: Value = serde_json::from_str(&input)?;
+            let payload = hook_stdin_payload(&input);
             match ingest_hook_event(&home, tool, payload) {
                 Ok(report) => {
                     if report.appended {
@@ -1194,6 +1224,19 @@ fn follow_session_jsonl(home: &Path, tool: Tool, session_id: &str) -> nabu_core:
     loop {
         match File::open(&path) {
             Ok(mut file) => {
+                let len = file
+                    .metadata()
+                    .map_err(|source| Error::Io {
+                        path: path.clone(),
+                        source,
+                    })?
+                    .len();
+                // The file shrank (truncated) or was replaced (rotated) since the
+                // last read: the saved position is past EOF, so restart from the
+                // top instead of seeking past the end and streaming nothing.
+                if len < position {
+                    position = 0;
+                }
                 file.seek(SeekFrom::Start(position))
                     .map_err(|source| Error::Io {
                         path: path.clone(),
@@ -1258,6 +1301,47 @@ mod tests {
 
         let json_mcp = Cli::try_parse_from(["nabu", "mcp", "validate", "all", "--json"]).unwrap();
         assert!(json_mcp.renders_errors_as_json());
+    }
+
+    #[test]
+    fn hook_stdin_payload_passes_through_valid_json_unchanged() {
+        let payload = hook_stdin_payload(
+            r#"{"session_id":"s1","hook_event_name":"UserPromptSubmit","prompt":"hi"}"#,
+        );
+        assert_eq!(payload["session_id"], "s1");
+        assert_eq!(payload["hook_event_name"], "UserPromptSubmit");
+    }
+
+    #[test]
+    fn hook_stdin_payload_wraps_malformed_json_as_parse_error() {
+        let payload = hook_stdin_payload("{not json");
+
+        assert_eq!(payload["type"], "parse_error");
+        assert_eq!(payload["raw_line"], "{not json");
+        assert_eq!(payload["session_id"], HOOK_PARSE_ERROR_SESSION_ID);
+        assert!(payload["parse_error"].is_string());
+    }
+
+    #[test]
+    fn hook_ingest_never_drops_malformed_stdin_payload() {
+        // Mirrors backfill's fidelity contract: unparseable input is captured
+        // as a synthetic parse_error event instead of aborting the hook.
+        let temp = tempdir().unwrap();
+        let home = temp.path().join("home");
+        init_home(&home).unwrap();
+
+        let payload = hook_stdin_payload("{ this is not valid json");
+        let report = ingest_hook_event(&home, Tool::Claude, payload).unwrap();
+
+        assert!(report.appended);
+        assert_eq!(report.session_id, HOOK_PARSE_ERROR_SESSION_ID);
+        let raw = fs::read_to_string(&report.raw_file).unwrap();
+        assert!(raw.contains("parse_error"));
+        assert!(raw.contains("this is not valid json"));
+
+        // The capture is real, not just written to a file: it survives a
+        // normal index pass without erroring.
+        index_once(&home).unwrap();
     }
 
     #[test]

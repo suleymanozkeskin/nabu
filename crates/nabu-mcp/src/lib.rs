@@ -35,14 +35,16 @@ const DEFAULT_MCP_DEEP_DOCTOR_MAX_BYTES: u64 = 500 * 1024 * 1024;
 const DEFAULT_MAX_CONCURRENCY: usize = 8;
 
 /// How many MCP requests may be handled concurrently. `NABU_MCP_MAX_CONCURRENCY`
-/// overrides; otherwise scale to the host CPU count, clamped to a sane band.
+/// overrides (clamped to 1..=64 so a mistyped value can't spawn an unbounded
+/// number of OS threads); otherwise scale to the host CPU count, clamped to a
+/// sane band.
 fn max_concurrency() -> usize {
     if let Some(value) = std::env::var("NABU_MCP_MAX_CONCURRENCY")
         .ok()
         .and_then(|raw| raw.parse::<usize>().ok())
         .filter(|&n| n > 0)
     {
-        return value;
+        return value.clamp(1, 64);
     }
     thread::available_parallelism()
         .map(|n| n.get())
