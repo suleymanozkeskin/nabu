@@ -1194,6 +1194,19 @@ fn follow_session_jsonl(home: &Path, tool: Tool, session_id: &str) -> nabu_core:
     loop {
         match File::open(&path) {
             Ok(mut file) => {
+                let len = file
+                    .metadata()
+                    .map_err(|source| Error::Io {
+                        path: path.clone(),
+                        source,
+                    })?
+                    .len();
+                // The file shrank (truncated) or was replaced (rotated) since the
+                // last read: the saved position is past EOF, so restart from the
+                // top instead of seeking past the end and streaming nothing.
+                if len < position {
+                    position = 0;
+                }
                 file.seek(SeekFrom::Start(position))
                     .map_err(|source| Error::Io {
                         path: path.clone(),
