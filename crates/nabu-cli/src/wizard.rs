@@ -1346,6 +1346,20 @@ fn summary(
     prompter.blank();
     prompter.info("Try it");
     prompter.command(SAMPLE_SEARCH_COMMAND);
+    // Run the sample query for real so the "you're set" screen reflects whether
+    // history is already queryable, not just whether capture is configured.
+    match actions.sample_search(home, SAMPLE_QUERY) {
+        Ok(count) if count > 0 => prompter.field(
+            "Searchable now",
+            &format!(
+                "{count} matching event{} for the sample query",
+                if count == 1 { "" } else { "s" }
+            ),
+        ),
+        Ok(_) | Err(_) => prompter.note(
+            "No matches yet for the sample query — run `nabu backfill --tool all` to import existing history.",
+        ),
+    }
     prompter.blank();
     prompter.info("Anytime");
     prompter.command("nabu wizard    this menu");
@@ -1359,9 +1373,6 @@ fn summary(
             prompter.command("nabu embed download --yes");
         }
     }
-    // Touch the sample-search action so the "you're set" screen reflects whether
-    // history is already queryable; the count is informational only.
-    let _ = actions.sample_search(home, SAMPLE_QUERY);
     Ok(())
 }
 
@@ -1797,6 +1808,8 @@ mod tests {
     pub(crate) struct SpyActions {
         pub calls: Vec<String>,
         detected: Vec<ToolState>,
+        /// Canned `sample_search` result; defaults to `Ok(0)` (no matches).
+        sample_search_result: Result<usize>,
     }
 
     impl SpyActions {
@@ -1804,7 +1817,14 @@ mod tests {
             Self {
                 calls: Vec::new(),
                 detected,
+                sample_search_result: Ok(0),
             }
+        }
+
+        /// Script the next `sample_search` call to return `result`.
+        fn with_sample_search(mut self, result: Result<usize>) -> Self {
+            self.sample_search_result = result;
+            self
         }
 
         fn all_present_unconfigured() -> Self {
@@ -2004,7 +2024,7 @@ mod tests {
 
         fn sample_search(&mut self, _home: &Path, _query: &str) -> Result<usize> {
             self.calls.push("sample_search".to_string());
-            Ok(0)
+            std::mem::replace(&mut self.sample_search_result, Ok(0))
         }
 
         fn settings(&mut self, _home: &Path) -> Result<SettingsView> {
@@ -2236,5 +2256,62 @@ mod tests {
             .calls
             .iter()
             .any(|c| c == "uninstall:claude:dry=false"));
+    }
+
+    #[test]
+    fn summary_reports_matching_event_count_when_sample_search_finds_history() {
+        let mut prompter = ScriptedPrompter::new();
+        let mut actions = SpyActions::all_present_configured().with_sample_search(Ok(3));
+
+        summary(&mut prompter, &mut actions, Path::new(HOME)).unwrap();
+
+        assert!(
+            actions.calls.iter().any(|c| c == "sample_search"),
+            "expected the summary screen to run the sample search, got {:?}",
+            actions.calls
+        );
+        assert!(
+            prompter
+                .info_log
+                .iter()
+                .any(|line| line.contains("3 matching events")),
+            "expected a matching-event count line, got {:?}",
+            prompter.info_log
+        );
+    }
+
+    #[test]
+    fn summary_hints_backfill_when_sample_search_finds_nothing() {
+        let mut prompter = ScriptedPrompter::new();
+        let mut actions = SpyActions::all_present_configured().with_sample_search(Ok(0));
+
+        summary(&mut prompter, &mut actions, Path::new(HOME)).unwrap();
+
+        assert!(
+            prompter
+                .info_log
+                .iter()
+                .any(|line| line.contains("nabu backfill")),
+            "expected a backfill hint, got {:?}",
+            prompter.info_log
+        );
+    }
+
+    #[test]
+    fn summary_hints_backfill_when_sample_search_errors() {
+        let mut prompter = ScriptedPrompter::new();
+        let mut actions = SpyActions::all_present_configured()
+            .with_sample_search(Err(Error::Validation("index unavailable".to_string())));
+
+        summary(&mut prompter, &mut actions, Path::new(HOME)).unwrap();
+
+        assert!(
+            prompter
+                .info_log
+                .iter()
+                .any(|line| line.contains("nabu backfill")),
+            "expected a backfill hint on search error, got {:?}",
+            prompter.info_log
+        );
     }
 }
