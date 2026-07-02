@@ -1236,7 +1236,7 @@ mod tests {
     use crate::jsonc_edit::jsonc_to_json_value;
     use crate::mcp_config::{
         add_claude_mcp, add_codex_mcp_block, add_opencode_mcp, mcp_apply_opencode,
-        opencode_mcp_entry_installed,
+        mcp_validation_status, opencode_mcp_entry_installed,
     };
     use crate::testsupport::{env_lock, file_mode, set_mode, EnvGuard};
     use nabu_core::{search_history, EmbeddingIndexProgress, EmbeddingModelDisclosure};
@@ -1763,14 +1763,16 @@ mod tests {
         // only added `nabu` and, when already present, wrote nothing.)
         let opencode = add_opencode_mcp(json!({
             "mcp": { "tupsharrum": { "command": ["tupsharrum", "mcp", "serve"] } }
-        }));
+        }))
+        .unwrap();
         let mcp = opencode.get("mcp").unwrap().as_object().unwrap();
         assert!(mcp.contains_key("nabu"));
         assert!(!mcp.contains_key("tupsharrum"));
 
         let claude = add_claude_mcp(json!({
             "mcpServers": { "tupsharrum": { "command": "tupsharrum" } }
-        }));
+        }))
+        .unwrap();
         let servers = claude.get("mcpServers").unwrap().as_object().unwrap();
         assert!(servers.contains_key("nabu"));
         assert!(!servers.contains_key("tupsharrum"));
@@ -2022,6 +2024,187 @@ mod tests {
         assert!(matches!(error, Error::Validation(_)));
         assert_eq!(fs::read_to_string(&opencode_json).unwrap(), before);
         drop(env_guard);
+    }
+
+    #[test]
+    fn codex_mcp_reinstall_over_commented_header_is_idempotent() {
+        // A user table whose header carries a trailing comment must be matched
+        // and replaced, not left in place while a second `[mcp_servers.nabu]`
+        // table is appended (which produced invalid TOML Codex refused to parse).
+        let commented = "[model]\nname = \"x\"\n\n[mcp_servers.nabu] # existing\ncommand = \"nabu\"\nargs = [\"mcp\"]\nenabled = true\n";
+        let once = add_codex_mcp_block(commented);
+        assert_eq!(once.matches("[mcp_servers.nabu]").count(), 1);
+        assert!(once.contains("[model]"));
+        // Re-running over the canonical output changes nothing.
+        assert_eq!(add_codex_mcp_block(&once), once);
+    }
+
+    #[test]
+    fn codex_mcp_uninstall_removes_commented_header_table() {
+        let _guard = env_lock();
+        let temp = tempdir().unwrap();
+        let codex_home = temp.path().join("codex");
+        let raven_home = temp.path().join("raven");
+        fs::create_dir_all(&codex_home).unwrap();
+        init_home(&raven_home).unwrap();
+
+        let codex_config = codex_home.join("config.toml");
+        fs::write(
+            &codex_config,
+            "[model]\nname = \"x\"\n\n[mcp_servers.nabu] # note\ncommand = \"nabu\"\nargs = [\"mcp\"]\nenabled = true\n",
+        )
+        .unwrap();
+        let env_guard = EnvGuard::set([("CODEX_HOME", codex_home.as_os_str())]);
+
+        let reports = mcp_apply_all(
+            &raven_home,
+            AgentTool::Codex,
+            McpConfigAction::Uninstall,
+            false,
+        )
+        .unwrap();
+        assert!(reports[0].changed);
+        let after = fs::read_to_string(&codex_config).unwrap();
+        assert!(!after.contains("[mcp_servers.nabu]"));
+        assert!(after.contains("[model]"));
+        drop(env_guard);
+    }
+
+    #[test]
+    fn claude_mcp_install_refuses_array_root_without_writing() {
+        // A valid-JSON-but-non-object user config must be refused, never clobbered
+        // with `{}`. Uses the file fallback path (no `claude` on PATH).
+        let _guard = env_lock();
+        let temp = tempdir().unwrap();
+        let home = temp.path().join("home");
+        let empty_bin = temp.path().join("bin");
+        let raven_home = temp.path().join("raven");
+        fs::create_dir_all(&home).unwrap();
+        fs::create_dir_all(&empty_bin).unwrap();
+        init_home(&raven_home).unwrap();
+
+        let claude_config = home.join(".claude.json");
+        let before = "[1, 2, 3]";
+        fs::write(&claude_config, before).unwrap();
+        let env_guard =
+            EnvGuard::set([("HOME", home.as_os_str()), ("PATH", empty_bin.as_os_str())]);
+
+        let error = mcp_apply_all(
+            &raven_home,
+            AgentTool::Claude,
+            McpConfigAction::Install,
+            false,
+        )
+        .unwrap_err();
+        assert!(matches!(error, Error::Validation(_)));
+        assert_eq!(fs::read_to_string(&claude_config).unwrap(), before);
+        drop(env_guard);
+    }
+
+    #[test]
+    fn opencode_mcp_uninstall_after_line_comment_leaves_no_trailing_comma() {
+        // Reproduced case: a line comment sits between the previous property and
+        // the nabu key. Removing nabu must strip the joining comma too, so the
+        // result stays strict-JSON parseable with no dangling comma.
+        let _guard = env_lock();
+        let temp = tempdir().unwrap();
+        let harness_home = temp.path().join("harness-home");
+        let opencode_config = temp.path().join("opencode");
+        fs::create_dir_all(&opencode_config).unwrap();
+        init_home(&harness_home).unwrap();
+
+        let opencode_json = opencode_config.join("opencode.json");
+        fs::write(
+            &opencode_json,
+            "{\n  \"mcp\": {\n    \"other\": {}, // keep\n    \"nabu\": { \"type\": \"local\", \"command\": [\"nabu\"] }\n  }\n}\n",
+        )
+        .unwrap();
+        let env_guard = EnvGuard::set([("OPENCODE_CONFIG_DIR", opencode_config.as_os_str())]);
+
+        let report = mcp_apply_opencode(&harness_home, McpConfigAction::Uninstall, false).unwrap();
+        assert!(report.changed);
+        let after = fs::read_to_string(&opencode_json).unwrap();
+        assert!(!after.contains("\"nabu\""));
+        // Comment-stripping parse panics on a trailing comma, so a clean parse
+        // proves the dangling comma is gone.
+        let parsed = jsonc_to_json_value(&after);
+        assert!(parsed.pointer("/mcp/other").is_some());
+        assert!(parsed.pointer("/mcp/nabu").is_none());
+        drop(env_guard);
+    }
+
+    #[test]
+    fn mcp_dry_run_reports_no_change_on_already_installed_config() {
+        // Dry-run must compute `changed` from the real before/after, not a canned
+        // `true`, so previewing an already-installed config reports no change.
+        let _guard = env_lock();
+        let temp = tempdir().unwrap();
+        let home = temp.path().join("home");
+        let codex_home = temp.path().join("codex");
+        let opencode_config = temp.path().join("opencode");
+        let empty_bin = temp.path().join("bin");
+        let raven_home = temp.path().join("raven");
+        for dir in [&home, &codex_home, &opencode_config, &empty_bin] {
+            fs::create_dir_all(dir).unwrap();
+        }
+        init_home(&raven_home).unwrap();
+
+        fs::write(codex_home.join("config.toml"), "[model]\nname = \"x\"\n").unwrap();
+        fs::write(home.join(".claude.json"), "{\"theme\":\"dark\"}").unwrap();
+        fs::write(
+            opencode_config.join("opencode.json"),
+            "{\"theme\":\"dark\"}",
+        )
+        .unwrap();
+        let env_guard = EnvGuard::set([
+            ("HOME", home.as_os_str()),
+            ("CODEX_HOME", codex_home.as_os_str()),
+            ("OPENCODE_CONFIG_DIR", opencode_config.as_os_str()),
+            ("PATH", empty_bin.as_os_str()),
+        ]);
+
+        let install =
+            mcp_apply_all(&raven_home, AgentTool::All, McpConfigAction::Install, false).unwrap();
+        assert!(install.iter().all(|report| report.changed));
+
+        let dry_run =
+            mcp_apply_all(&raven_home, AgentTool::All, McpConfigAction::Install, true).unwrap();
+        assert!(dry_run.iter().all(|report| report.dry_run));
+        assert!(dry_run.iter().all(|report| !report.changed));
+        drop(env_guard);
+    }
+
+    #[test]
+    fn mcp_health_probe_reports_healthy_in_process_server() {
+        // The probe seeds a throwaway home and exercises the in-process server;
+        // it must not depend on any agent CLI or the user's real home/index.
+        let _guard = env_lock();
+        let temp = tempdir().unwrap();
+        let empty_bin = temp.path().join("bin");
+        fs::create_dir_all(&empty_bin).unwrap();
+        let env_guard = EnvGuard::set([("PATH", empty_bin.as_os_str())]);
+
+        let value = mcp_validate_all(temp.path(), AgentTool::All).unwrap();
+        for tool in ["codex", "claude", "opencode"] {
+            let server = &value[tool]["fixture_server"];
+            assert_eq!(server["initialize_ok"], json!(true), "{tool}");
+            assert_eq!(server["search_history_advertised"], json!(true), "{tool}");
+            assert_eq!(server["fixture_query_ok"], json!(true), "{tool}");
+        }
+        drop(env_guard);
+    }
+
+    #[test]
+    fn mcp_validation_status_flags_server_health() {
+        let client = json!({ "status": "ok", "contains_nabu": true });
+        let healthy = json!({ "search_history_advertised": true, "fixture_query_ok": true });
+        assert_eq!(mcp_validation_status(true, true, &client, &healthy), "ok");
+
+        let unhealthy = json!({ "search_history_advertised": true, "fixture_query_ok": false });
+        assert_eq!(
+            mcp_validation_status(true, true, &client, &unhealthy),
+            "server_unhealthy"
+        );
     }
 
     #[cfg(unix)]

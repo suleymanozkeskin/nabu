@@ -37,11 +37,29 @@ pub(crate) fn write_text_config(path: &PathBuf, content: &str, mode: u32) -> nab
             chmod_path(parent, 0o700)?;
         }
     }
-    fs::write(path, content).map_err(|source| Error::Io {
-        path: path.clone(),
+    // Atomic replace: write a sibling temp file in the target's directory, set
+    // its mode, then rename over the target. A same-directory rename is atomic
+    // on the destination filesystem, so a reader never observes a half-written
+    // config even if the process is interrupted mid-write.
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("config");
+    let tmp_path = parent.join(format!(".{file_name}.nabu-tmp.{}", std::process::id()));
+    fs::write(&tmp_path, content).map_err(|source| Error::Io {
+        path: tmp_path.clone(),
         source,
     })?;
-    chmod_path(path, final_mode)
+    chmod_path(&tmp_path, final_mode)?;
+    if let Err(source) = fs::rename(&tmp_path, path) {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(Error::Io {
+            path: path.clone(),
+            source,
+        });
+    }
+    Ok(())
 }
 
 pub(crate) fn backup_cli_config(
