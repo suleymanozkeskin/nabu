@@ -132,7 +132,9 @@ pub(crate) use backfill::{
 };
 #[cfg(test)]
 pub(crate) use backfill::{backfill_dry_run, backfill_since};
-pub use backfill::{backfill_dry_run_with_progress, backfill_since_with_progress};
+pub use backfill::{
+    backfill_dry_run_with_progress, backfill_since_with_progress, malformed_native_payload,
+};
 mod ingest;
 pub(crate) use ingest::{
     append_envelope_locked, append_envelopes_locked, load_full_dedupe_sidecar_events,

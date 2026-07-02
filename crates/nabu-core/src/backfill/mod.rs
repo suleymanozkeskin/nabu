@@ -984,7 +984,11 @@ fn timestamp_millis_to_rfc3339(value: i64) -> Option<String> {
         .and_then(|timestamp| timestamp.format(&Rfc3339).ok())
 }
 
-fn malformed_native_payload(
+/// Wrap an unparseable raw line/payload in a synthetic `"type": "parse_error"`
+/// event so malformed input is captured instead of silently dropped. Shared by
+/// the backfill file scanners and the live hook-ingest path (see
+/// `ingest::ingest_hook_event` callers in `nabu-cli`).
+pub fn malformed_native_payload(
     source_path: &Path,
     byte_offset: u64,
     raw_line: &str,
