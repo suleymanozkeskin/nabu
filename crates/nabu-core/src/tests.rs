@@ -1468,6 +1468,276 @@ fn oversized_payloads_are_spilled_and_indexed_from_blob() {
 }
 
 #[test]
+fn purge_session_deletes_exclusive_spilled_blob_but_keeps_shared_blob() {
+    let temp = tempdir().unwrap();
+    let home = temp.path().join("home");
+    init_home(&home).unwrap();
+
+    let oversized = |marker: &str| marker.repeat((MAX_INLINE_ENVELOPE_BYTES / marker.len()) + 1024);
+
+    // Two oversized events in the session to purge spill to two distinct blobs.
+    ingest_hook_event(
+        &home,
+        Tool::Claude,
+        json!({
+            "session_id": "purge-me",
+            "hook_event_name": "UserPromptSubmit",
+            "message_id": "purge-me-exclusive",
+            "cwd": "/tmp/nabu-fixture",
+            "project_root": "/tmp/nabu-fixture",
+            "prompt": oversized("exclusive blob marker ")
+        }),
+    )
+    .unwrap();
+    ingest_hook_event(
+        &home,
+        Tool::Claude,
+        json!({
+            "session_id": "purge-me",
+            "hook_event_name": "UserPromptSubmit",
+            "message_id": "purge-me-shared",
+            "cwd": "/tmp/nabu-fixture",
+            "project_root": "/tmp/nabu-fixture",
+            "prompt": oversized("shared blob marker ")
+        }),
+    )
+    .unwrap();
+
+    let raw_path = canonical_raw_path(&home, Tool::Claude, "purge-me");
+    let raw = fs::read_to_string(&raw_path).unwrap();
+    let hashes: Vec<String> = raw
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            let value: Value = serde_json::from_str(line).unwrap();
+            value
+                .get("payload_ref")
+                .and_then(Value::as_str)
+                .unwrap()
+                .strip_prefix("sha256:")
+                .unwrap()
+                .to_string()
+        })
+        .collect();
+    assert_eq!(hashes.len(), 2);
+    let exclusive_hash = hashes[0].clone();
+    let shared_hash = hashes[1].clone();
+    assert_ne!(exclusive_hash, shared_hash);
+
+    let blob = |hash: &str| {
+        home.join("blobs")
+            .join("sha256")
+            .join(format!("{hash}.json"))
+    };
+    assert!(blob(&exclusive_hash).is_file());
+    assert!(blob(&shared_hash).is_file());
+
+    // A surviving session references the shared, content-addressed blob.
+    let keep_path = canonical_raw_path(&home, Tool::Claude, "keep-me");
+    fs::write(
+        &keep_path,
+        format!(
+            "{}\n",
+            json!({ "payload_ref": format!("sha256:{shared_hash}") })
+        ),
+    )
+    .unwrap();
+
+    purge_session(&home, Tool::Claude, "purge-me").unwrap();
+
+    assert!(!raw_path.exists());
+    assert!(
+        !blob(&exclusive_hash).exists(),
+        "blob referenced only by the purged session must be reclaimed"
+    );
+    assert!(
+        blob(&shared_hash).is_file(),
+        "blob shared with a surviving session must be kept"
+    );
+}
+
+#[test]
+fn purge_before_deletes_orphaned_blob_but_keeps_shared_blob() {
+    let temp = tempdir().unwrap();
+    let home = temp.path().join("home");
+    init_home(&home).unwrap();
+
+    let orphan_hash = "a".repeat(64);
+    let shared_hash = "b".repeat(64);
+    let blob_dir = home.join("blobs").join("sha256");
+    fs::create_dir_all(&blob_dir).unwrap();
+    fs::write(blob_dir.join(format!("{orphan_hash}.json")), b"{}").unwrap();
+    fs::write(blob_dir.join(format!("{shared_hash}.json")), b"{}").unwrap();
+
+    let line = |captured_at: &str, message_id: &str, hash: &str| {
+        let mut env = valid_envelope_json();
+        env["tool"] = json!("claude");
+        env["session_id"] = json!("before-session");
+        env["filename_session_id"] = json!("before-session");
+        env["captured_at"] = json!(captured_at);
+        env["message_id"] = json!(message_id);
+        env["canonical_type"] = json!("user.message");
+        env["source_event_type"] = json!("UserPromptSubmit");
+        env["payload"] = Value::Null;
+        env["payload_ref"] = json!(format!("sha256:{hash}"));
+        serde_json::to_string(&env).unwrap()
+    };
+
+    let raw_path = canonical_raw_path(&home, Tool::Claude, "before-session");
+    let contents = format!(
+        "{}\n{}\n{}\n",
+        line("2020-01-01T00:00:00Z", "old-orphan", &orphan_hash),
+        line("2020-01-01T00:00:00Z", "old-shared", &shared_hash),
+        line("2099-01-01T00:00:00Z", "recent-shared", &shared_hash),
+    );
+    fs::write(&raw_path, contents).unwrap();
+
+    purge_before(&home, "2021-01-01").unwrap();
+
+    assert!(
+        !blob_dir.join(format!("{orphan_hash}.json")).exists(),
+        "blob referenced only by purged lines must be reclaimed"
+    );
+    assert!(
+        blob_dir.join(format!("{shared_hash}.json")).is_file(),
+        "blob still referenced by a surviving line must be kept"
+    );
+}
+
+#[cfg(feature = "semantic")]
+#[test]
+fn purge_session_removes_purged_vector_rows_but_keeps_shared_ones() {
+    let temp = tempdir().unwrap();
+    let home = temp.path().join("home");
+    init_home(&home).unwrap();
+
+    // The same prompt text in two sessions maps to one shared, content-addressed
+    // vector_unit_texts row referenced by both sessions' units.
+    for (session, message) in [
+        ("keep-session", "keep-1"),
+        ("purge-session", "purge-shared"),
+    ] {
+        ingest_hook_event(
+            &home,
+            Tool::Claude,
+            json!({
+                "session_id": session,
+                "hook_event_name": "UserPromptSubmit",
+                "message_id": message,
+                "cwd": "/tmp/nabu-fixture",
+                "project_root": "/tmp/nabu-fixture",
+                "prompt": "shared vector unit marker text"
+            }),
+        )
+        .unwrap();
+    }
+    // A unit unique to the purged session.
+    ingest_hook_event(
+        &home,
+        Tool::Claude,
+        json!({
+            "session_id": "purge-session",
+            "hook_event_name": "UserPromptSubmit",
+            "message_id": "purge-unique",
+            "cwd": "/tmp/nabu-fixture",
+            "project_root": "/tmp/nabu-fixture",
+            "prompt": "unique purged vector unit secret"
+        }),
+    )
+    .unwrap();
+
+    index_once(&home).unwrap();
+
+    let db_path = home.join("index").join("harness.db");
+    let mut conn = open_index(&db_path).unwrap();
+
+    // Embed every materialized unit with the fake embedder.
+    embed_unembedded_units_with_config(
+        &mut conn,
+        &db_path,
+        &FakeEmbedder::new(8, 1, None),
+        EmbeddingWriteConfig {
+            write_chunk_size: 8,
+        },
+        |_| {},
+    )
+    .unwrap();
+
+    let text_rows = |conn: &Connection, marker: &str| -> i64 {
+        conn.query_row(
+            "SELECT COUNT(*) FROM vector_unit_texts WHERE text LIKE ?1",
+            params![format!("%{marker}%")],
+            |row| row.get(0),
+        )
+        .unwrap()
+    };
+
+    // Pre-state: shared text present and backing units in both sessions.
+    assert_eq!(text_rows(&conn, "shared vector unit marker"), 1);
+    assert_eq!(text_rows(&conn, "unique purged vector unit secret"), 1);
+    let shared_refs: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM vector_units vu
+             JOIN vector_unit_texts t ON t.text_hash = vu.text_hash
+             WHERE t.text LIKE '%shared vector unit marker%'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        shared_refs, 2,
+        "shared text must back units in both sessions"
+    );
+    let embeddings_before = table_count(&conn, &db_path, "vector_unit_embeddings").unwrap();
+    let units_before = table_count(&conn, &db_path, "vector_units").unwrap();
+    assert!(embeddings_before > 0);
+    assert_eq!(embeddings_before, units_before, "every unit embedded");
+
+    drop(conn);
+    purge_session(&home, Tool::Claude, "purge-session").unwrap();
+    let conn = open_index(&db_path).unwrap();
+
+    // Purged session's units gone; the surviving session's remain.
+    assert_eq!(
+        conn.query_row(
+            "SELECT COUNT(*) FROM vector_units WHERE session_id = 'purge-session'",
+            [],
+            |row| row.get::<_, i64>(0)
+        )
+        .unwrap(),
+        0
+    );
+    assert!(
+        conn.query_row(
+            "SELECT COUNT(*) FROM vector_units WHERE session_id = 'keep-session'",
+            [],
+            |row| row.get::<_, i64>(0)
+        )
+        .unwrap()
+            > 0
+    );
+
+    // Plaintext leak closed: unique purged text removed; shared text kept
+    // because the surviving session still references it.
+    assert_eq!(text_rows(&conn, "unique purged vector unit secret"), 0);
+    assert_eq!(text_rows(&conn, "shared vector unit marker"), 1);
+
+    // No orphan embeddings: embeddings match remaining units, but fewer than
+    // before, and the survivor's embeddings are retained.
+    let embeddings_after = table_count(&conn, &db_path, "vector_unit_embeddings").unwrap();
+    let units_after = table_count(&conn, &db_path, "vector_units").unwrap();
+    assert_eq!(embeddings_after, units_after);
+    assert!(
+        embeddings_after < embeddings_before,
+        "purged units' embeddings must be reclaimed"
+    );
+    assert!(
+        embeddings_after > 0,
+        "surviving session's embeddings must be kept"
+    );
+}
+
+#[test]
 fn markdown_export_includes_sensitivity_warning() {
     let temp = tempdir().unwrap();
     let home = temp.path().join("home");
