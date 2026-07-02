@@ -516,9 +516,10 @@ fn cleanup_orphaned_vector_rows(tx: &Transaction, db_path: &Path) -> Result<()> 
     // A `vec0` virtual table can only be mutated when its SQLite module is
     // registered, which happens exclusively under the `semantic` feature. A
     // non-semantic binary cannot issue this DELETE (`no such module: vec0`), so
-    // it leaves the orphan embeddings — which carry no plaintext — for the next
-    // semantic index/embed pass to reconcile. The plaintext removal above is
-    // never gated, so purge's deletion promise holds in both builds.
+    // it leaves the orphan embeddings — which carry no plaintext — until the
+    // next purge run by a semantic-enabled binary reaches this cleanup. The
+    // plaintext removal above is never gated, so purge's deletion promise holds
+    // in both builds.
     #[cfg(feature = "semantic")]
     if table_exists(tx, db_path, "vector_unit_embeddings")? {
         tx.execute(
