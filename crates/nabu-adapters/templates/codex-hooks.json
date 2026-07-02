@@ -3,55 +3,55 @@
     "SessionStart": [
       {
         "type": "command",
-        "command": "nabu ingest hook --tool codex --home __NABU_HOME__"
+        "command": "nabu ingest hook --tool codex --home '__NABU_HOME__'"
       }
     ],
     "UserPromptSubmit": [
       {
         "type": "command",
-        "command": "nabu ingest hook --tool codex --home __NABU_HOME__"
+        "command": "nabu ingest hook --tool codex --home '__NABU_HOME__'"
       }
     ],
     "PreToolUse": [
       {
         "type": "command",
-        "command": "nabu ingest hook --tool codex --home __NABU_HOME__"
+        "command": "nabu ingest hook --tool codex --home '__NABU_HOME__'"
       }
     ],
     "PostToolUse": [
       {
         "type": "command",
-        "command": "nabu ingest hook --tool codex --home __NABU_HOME__"
+        "command": "nabu ingest hook --tool codex --home '__NABU_HOME__'"
       }
     ],
     "PreCompact": [
       {
         "type": "command",
-        "command": "nabu ingest hook --tool codex --home __NABU_HOME__"
+        "command": "nabu ingest hook --tool codex --home '__NABU_HOME__'"
       }
     ],
     "PostCompact": [
       {
         "type": "command",
-        "command": "nabu ingest hook --tool codex --home __NABU_HOME__"
+        "command": "nabu ingest hook --tool codex --home '__NABU_HOME__'"
       }
     ],
     "SubagentStart": [
       {
         "type": "command",
-        "command": "nabu ingest hook --tool codex --home __NABU_HOME__"
+        "command": "nabu ingest hook --tool codex --home '__NABU_HOME__'"
       }
     ],
     "SubagentStop": [
       {
         "type": "command",
-        "command": "nabu ingest hook --tool codex --home __NABU_HOME__"
+        "command": "nabu ingest hook --tool codex --home '__NABU_HOME__'"
       }
     ],
     "Stop": [
       {
         "type": "command",
-        "command": "nabu ingest hook --tool codex --home __NABU_HOME__"
+        "command": "nabu ingest hook --tool codex --home '__NABU_HOME__'"
       }
     ]
   }

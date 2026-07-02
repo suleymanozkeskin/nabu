@@ -32,6 +32,7 @@ pub(crate) fn doctor_json_data(
             "status": tool_status_label(claude.claude_installed, claude.hooks_installed),
             "settings_path": claude.settings_path,
             "hooks_installed": claude.hooks_installed,
+            "config_parse_error": claude.parse_error,
             "mcp_entry_installed": claude_mcp_entry_installed(),
             "claude_installed": claude.claude_installed,
             "trusted_active": null,
@@ -45,6 +46,7 @@ pub(crate) fn doctor_json_data(
             "status": tool_status_label(codex.codex_installed, codex.hooks_installed),
             "hooks_path": codex.hooks_path,
             "hooks_installed": codex.hooks_installed,
+            "config_parse_error": codex.parse_error,
             "mcp_entry_installed": codex_mcp_entry_installed(),
             "codex_installed": codex.codex_installed,
             "trust_guidance": codex.trust_guidance,
@@ -267,6 +269,9 @@ pub(crate) fn print_tool_doctor_human(home: &Path, tool: DoctorTool) -> nabu_cor
         let status = claude_status(home)?;
         println!("claude.installed={}", status.claude_installed);
         println!("claude.hooks_installed={}", status.hooks_installed);
+        if let Some(error) = &status.parse_error {
+            println!("claude.config_parse_error={error}");
+        }
         println!("claude.storage_writable={}", status.storage_writable);
         println!("claude.settings_path={}", status.settings_path.display());
         print_freshness_human(&freshness, "claude");
@@ -275,6 +280,9 @@ pub(crate) fn print_tool_doctor_human(home: &Path, tool: DoctorTool) -> nabu_cor
         let status = codex_status(home)?;
         println!("codex.installed={}", status.codex_installed);
         println!("codex.hooks_installed={}", status.hooks_installed);
+        if let Some(error) = &status.parse_error {
+            println!("codex.config_parse_error={error}");
+        }
         println!("codex.storage_writable={}", status.storage_writable);
         println!("codex.hooks_path={}", status.hooks_path.display());
         println!("codex.trust_guidance={}", status.trust_guidance);

@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "nabu ingest hook --tool claude --home __NABU_HOME__"
+            "command": "nabu ingest hook --tool claude --home '__NABU_HOME__'"
           }
         ]
       }
@@ -15,7 +15,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "nabu ingest hook --tool claude --home __NABU_HOME__"
+            "command": "nabu ingest hook --tool claude --home '__NABU_HOME__'"
           }
         ]
       }
@@ -25,7 +25,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "nabu ingest hook --tool claude --home __NABU_HOME__"
+            "command": "nabu ingest hook --tool claude --home '__NABU_HOME__'"
           }
         ]
       }
@@ -35,7 +35,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "nabu ingest hook --tool claude --home __NABU_HOME__"
+            "command": "nabu ingest hook --tool claude --home '__NABU_HOME__'"
           }
         ]
       }
@@ -45,7 +45,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "nabu ingest hook --tool claude --home __NABU_HOME__"
+            "command": "nabu ingest hook --tool claude --home '__NABU_HOME__'"
           }
         ]
       }
@@ -55,7 +55,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "nabu ingest hook --tool claude --home __NABU_HOME__"
+            "command": "nabu ingest hook --tool claude --home '__NABU_HOME__'"
           }
         ]
       }
@@ -65,7 +65,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "nabu ingest hook --tool claude --home __NABU_HOME__"
+            "command": "nabu ingest hook --tool claude --home '__NABU_HOME__'"
           }
         ]
       }
@@ -75,7 +75,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "nabu ingest hook --tool claude --home __NABU_HOME__"
+            "command": "nabu ingest hook --tool claude --home '__NABU_HOME__'"
           }
         ]
       }
@@ -85,7 +85,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "nabu ingest hook --tool claude --home __NABU_HOME__"
+            "command": "nabu ingest hook --tool claude --home '__NABU_HOME__'"
           }
         ]
       }
@@ -95,7 +95,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "nabu ingest hook --tool claude --home __NABU_HOME__"
+            "command": "nabu ingest hook --tool claude --home '__NABU_HOME__'"
           }
         ]
       }
@@ -105,7 +105,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "nabu ingest hook --tool claude --home __NABU_HOME__"
+            "command": "nabu ingest hook --tool claude --home '__NABU_HOME__'"
           }
         ]
       }
@@ -115,7 +115,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "nabu ingest hook --tool claude --home __NABU_HOME__"
+            "command": "nabu ingest hook --tool claude --home '__NABU_HOME__'"
           }
         ]
       }
