@@ -11,7 +11,7 @@ use crate::backup::{backup_cli_config, read_text_or_empty, text_diff, write_text
 use crate::paths::ToolLayout;
 use crate::{jsonc_edit, AgentTool, McpConfigAction};
 use nabu_adapters::ConfigChangeReport;
-use nabu_core::{Error, Tool};
+use nabu_core::{index_once_with_options, ingest_hook_event, init_home, Error, IndexOptions, Tool};
 use serde_json::{json, Value};
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
@@ -63,29 +63,6 @@ fn mcp_apply_codex(
     dry_run: bool,
 ) -> nabu_core::Result<ConfigChangeReport> {
     let target_path = Tool::Codex.mcp_config_path()?;
-    if dry_run {
-        let diff = match action {
-            McpConfigAction::Install => {
-                "planned TOML snippet:\n[mcp_servers.nabu]\ncommand = \"nabu\"\nargs = [\"mcp\", \"serve\", \"--transport\", \"stdio\"]\nenabled = true\n"
-            }
-            McpConfigAction::Uninstall => {
-                "planned removal:\n[mcp_servers.nabu]\n"
-            }
-        }
-        .to_string();
-        return Ok(ConfigChangeReport {
-            tool: Tool::Codex,
-            target_path,
-            changed: true,
-            dry_run,
-            summary: match action {
-                McpConfigAction::Install => "dry-run: Codex MCP config plan only",
-                McpConfigAction::Uninstall => "dry-run: Codex MCP removal plan only",
-            }
-            .to_string(),
-            diff,
-        });
-    }
     let before = read_text_or_empty(&target_path)?;
     let after = match action {
         McpConfigAction::Install => add_codex_mcp_block(&before),
@@ -136,6 +113,18 @@ fn run_claude_cli(args: &[&str]) -> nabu_core::Result<std::process::Output> {
         })
 }
 
+/// Re-read the Claude user config and report whether the `nabu` MCP server is
+/// registered. Used to verify the on-disk result of the native `claude` CLI
+/// instead of trusting our synthesized diff.
+fn claude_registry_has_nabu(path: &Path) -> nabu_core::Result<bool> {
+    let text = read_text_or_empty(&path.to_path_buf())?;
+    if text.trim().is_empty() {
+        return Ok(false);
+    }
+    let value: Value = serde_json::from_str(&text)?;
+    Ok(value.pointer("/mcpServers/nabu").is_some())
+}
+
 fn mcp_apply_claude(
     home: &Path,
     action: McpConfigAction,
@@ -157,11 +146,13 @@ fn mcp_apply_claude(
         serde_json::from_str(&before_text)?
     };
     let after = match action {
-        McpConfigAction::Install => add_claude_mcp(before.clone()),
+        McpConfigAction::Install => add_claude_mcp(before.clone())?,
         McpConfigAction::Uninstall => remove_claude_mcp(before.clone()),
     };
     let after_text = serde_json::to_string_pretty(&after)?;
-    let changed = before != after;
+    // File-diff signal: exact for the fallback path, and a faithful estimate for
+    // the native dry-run preview (the `claude` CLI owns the on-disk shape).
+    let file_changed = before != after;
 
     let diff = if dry_run && use_native {
         format!("native command:\n{command}\n")
@@ -169,59 +160,85 @@ fn mcp_apply_claude(
         text_diff(&before_text, &after_text)
     };
 
-    if !dry_run {
-        if use_native {
-            // The `claude` CLI owns its MCP registry; back up its config, then
-            // upsert idempotently. `claude mcp add` errors if the server already
-            // exists, and our file-based change detection can disagree with the
-            // CLI's own store — so always remove-then-add. Also drop the legacy
-            // `tupsharrum` registration so an upgrade leaves no broken entry.
-            if target_path.exists() {
-                backup_cli_config(home, Tool::Claude, mcp_operation_name(action), &target_path)?;
+    let changed = if dry_run {
+        // Preview only: report the real before/after delta, never a canned value.
+        file_changed
+    } else if use_native {
+        // The `claude` CLI owns its MCP registry; back up its config, then upsert
+        // idempotently. `claude mcp add` errors if the server already exists and
+        // our file-based detection can disagree with the CLI's own store, so
+        // always remove-then-add. Whether the operation actually changed anything
+        // is decided by re-reading the registry the CLI just wrote — not by our
+        // synthesized diff.
+        if target_path.exists() {
+            backup_cli_config(home, Tool::Claude, mcp_operation_name(action), &target_path)?;
+        }
+        let before_registered = claude_registry_has_nabu(&target_path)?;
+        // `claude mcp remove` exits non-zero when the entry is absent, which is
+        // expected during install and during an already-clean uninstall; these
+        // removals are best-effort and verified below by re-reading the registry.
+        let _ = run_claude_cli(&["mcp", "remove", "--scope", "user", "nabu"]);
+        let _ = run_claude_cli(&["mcp", "remove", "--scope", "user", "tupsharrum"]);
+        if let McpConfigAction::Install = action {
+            let output = run_claude_cli(&[
+                "mcp",
+                "add",
+                "--scope",
+                "user",
+                "--transport",
+                "stdio",
+                "nabu",
+                "--",
+                "nabu",
+                "mcp",
+                "serve",
+                "--transport",
+                "stdio",
+            ])?;
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                let detail = stderr.trim();
+                return Err(Error::Validation(if detail.is_empty() {
+                    format!("Claude MCP command exited with status {}", output.status)
+                } else {
+                    format!(
+                        "Claude MCP command exited with status {}: {detail}",
+                        output.status
+                    )
+                }));
             }
-            let _ = run_claude_cli(&["mcp", "remove", "--scope", "user", "nabu"]);
-            let _ = run_claude_cli(&["mcp", "remove", "--scope", "user", "tupsharrum"]);
-            if matches!(action, McpConfigAction::Install) {
-                let output = run_claude_cli(&[
-                    "mcp",
-                    "add",
-                    "--scope",
-                    "user",
-                    "--transport",
-                    "stdio",
-                    "nabu",
-                    "--",
-                    "nabu",
-                    "mcp",
-                    "serve",
-                    "--transport",
-                    "stdio",
-                ])?;
-                if !output.status.success() {
-                    let stderr = String::from_utf8_lossy(&output.stderr);
-                    let detail = stderr.trim();
-                    return Err(Error::Validation(if detail.is_empty() {
-                        format!("Claude MCP command exited with status {}", output.status)
-                    } else {
-                        format!(
-                            "Claude MCP command exited with status {}: {detail}",
-                            output.status
-                        )
-                    }));
-                }
+        }
+        let after_registered = claude_registry_has_nabu(&target_path)?;
+        match action {
+            McpConfigAction::Install if !after_registered => {
+                return Err(Error::Validation(
+                    "Claude MCP install ran but nabu is not registered in the user config"
+                        .to_string(),
+                ));
             }
-        } else if changed {
+            McpConfigAction::Uninstall if after_registered => {
+                return Err(Error::Validation(
+                    "Claude MCP uninstall ran but nabu is still registered in the user config"
+                        .to_string(),
+                ));
+            }
+            _ => {}
+        }
+        before_registered != after_registered
+    } else {
+        if file_changed {
             if target_path.exists() {
                 backup_cli_config(home, Tool::Claude, mcp_operation_name(action), &target_path)?;
             }
             write_text_config(&target_path, &after_text, 0o600)?;
         }
-    }
+        file_changed
+    };
 
     Ok(ConfigChangeReport {
         tool: Tool::Claude,
         target_path,
-        changed: if dry_run && use_native { true } else { changed },
+        changed,
         dry_run,
         summary: match (action, dry_run, use_native, changed) {
             (McpConfigAction::Install, true, true, _) => {
@@ -266,27 +283,6 @@ pub(crate) fn mcp_apply_opencode(
     dry_run: bool,
 ) -> nabu_core::Result<ConfigChangeReport> {
     let target_path = Tool::Opencode.mcp_config_path()?;
-    if dry_run {
-        let diff = match action {
-            McpConfigAction::Install => {
-                "planned JSON entry:\n{\n  \"mcp\": {\n    \"nabu\": {\n      \"type\": \"local\",\n      \"command\": [\"nabu\", \"mcp\", \"serve\", \"--transport\", \"stdio\"],\n      \"enabled\": true\n    }\n  }\n}\n"
-            }
-            McpConfigAction::Uninstall => "planned removal:\nmcp.nabu\n",
-        }
-        .to_string();
-        return Ok(ConfigChangeReport {
-            tool: Tool::Opencode,
-            target_path,
-            changed: true,
-            dry_run,
-            summary: match action {
-                McpConfigAction::Install => "dry-run: OpenCode MCP config plan only",
-                McpConfigAction::Uninstall => "dry-run: OpenCode MCP removal plan only",
-            }
-            .to_string(),
-            diff,
-        });
-    }
     let before_text = read_text_or_empty(&target_path)?;
     let after_text = rewrite_opencode_mcp_text(&before_text, action)?;
     let changed = before_text != after_text;
@@ -324,9 +320,9 @@ pub(crate) fn mcp_apply_opencode(
     })
 }
 
-pub(crate) fn mcp_validate_all(home: &Path, tool: AgentTool) -> nabu_core::Result<Value> {
+pub(crate) fn mcp_validate_all(_home: &Path, tool: AgentTool) -> nabu_core::Result<Value> {
     let mut value = json!({});
-    let fixture = mcp_fixture_validation(home)?;
+    let fixture = mcp_server_health_probe()?;
     for &tool in selected_agent_tools(tool) {
         match tool {
             AgentTool::Codex => {
@@ -374,7 +370,7 @@ pub(crate) fn mcp_validate_all(home: &Path, tool: AgentTool) -> nabu_core::Resul
     Ok(value)
 }
 
-fn mcp_validation_status(
+pub(crate) fn mcp_validation_status(
     client_installed: bool,
     entry_installed: bool,
     client: &Value,
@@ -403,8 +399,40 @@ fn mcp_validation_status(
     "ok"
 }
 
-fn mcp_fixture_validation(home: &Path) -> nabu_core::Result<Value> {
-    let fixture_home = mcp_fixture_home(home);
+/// Probe that the in-process MCP server actually works end to end. Rather than
+/// asserting a magic string exists in the user's real index (the old
+/// `CARGO_MANIFEST_DIR` fixture, which does not exist for an installed binary
+/// and silently fell back to the user's home — misdiagnosing healthy installs
+/// and mutating the real index as a side effect), this seeds a throwaway home
+/// with one raw event, indexes it, and runs `initialize` + `tools/list` +
+/// `search_history` over it, then deletes the temporary home. It touches
+/// neither the user's home nor any committed fixture.
+fn mcp_server_health_probe() -> nabu_core::Result<Value> {
+    let probe_home = unique_probe_home();
+    let result = run_server_health_probe(&probe_home);
+    // Always remove the throwaway home, even when the probe fails partway.
+    let _ = std::fs::remove_dir_all(&probe_home);
+    result
+}
+
+fn run_server_health_probe(probe_home: &Path) -> nabu_core::Result<Value> {
+    init_home(probe_home)?;
+    ingest_hook_event(
+        probe_home,
+        Tool::Claude,
+        json!({
+            "session_id": "nabu-health-probe",
+            "hook_event_name": "UserPromptSubmit",
+            "message_id": "nabu-health-probe-1",
+            "cwd": "/nabu/health/probe",
+            "project_root": "/nabu/health/probe",
+            "prompt": "nabu health probe marker event"
+        }),
+    )?;
+    // Lexical index only: the probe verifies the query pipeline, not embeddings,
+    // so it stays fast and offline-safe.
+    index_once_with_options(probe_home, IndexOptions { embed: false })?;
+
     let mut input = Vec::new();
     for message in [
         json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}),
@@ -415,7 +443,7 @@ fn mcp_fixture_validation(home: &Path) -> nabu_core::Result<Value> {
             "method":"tools/call",
             "params":{
                 "name":"search_history",
-                "arguments":{"query":"fixture marker","limit":1}
+                "arguments":{"query":"health probe marker","mode":"lexical","limit":1}
             }
         }),
     ] {
@@ -423,7 +451,7 @@ fn mcp_fixture_validation(home: &Path) -> nabu_core::Result<Value> {
         input.push(b'\n');
     }
     let mut output = Vec::new();
-    nabu_mcp::serve_with_io(fixture_home.clone(), Cursor::new(input), &mut output)?;
+    nabu_mcp::serve_with_io(probe_home.to_path_buf(), Cursor::new(input), &mut output)?;
     let mut initialize_ok = false;
     let mut search_history_advertised = false;
     let mut fixture_query_ok = false;
@@ -463,23 +491,19 @@ fn mcp_fixture_validation(home: &Path) -> nabu_core::Result<Value> {
     }
 
     Ok(json!({
-        "fixture_home": fixture_home,
+        "probe_home": probe_home.display().to_string(),
         "initialize_ok": initialize_ok,
         "search_history_advertised": search_history_advertised,
         "fixture_query_ok": fixture_query_ok
     }))
 }
 
-fn mcp_fixture_home(home: &Path) -> PathBuf {
-    let fixture_home = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .join("fixtures")
-        .join("acceptance-home");
-    if fixture_home.join("index").join("harness.db").is_file() {
-        fixture_home.canonicalize().unwrap_or(fixture_home)
-    } else {
-        home.to_path_buf()
-    }
+fn unique_probe_home() -> PathBuf {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos())
+        .unwrap_or(0);
+    std::env::temp_dir().join(format!("nabu-mcp-health-{}-{}", std::process::id(), nanos))
 }
 
 fn mcp_client_probe(command: &str, args: &[&str]) -> nabu_core::Result<Value> {
@@ -630,11 +654,11 @@ pub(crate) fn add_codex_mcp_block(content: &str) -> String {
     output
 }
 
-pub(crate) fn add_claude_mcp(mut config: Value) -> Value {
-    ensure_object(&mut config);
+pub(crate) fn add_claude_mcp(mut config: Value) -> nabu_core::Result<Value> {
+    require_object(&config, "Claude config root")?;
     let object = config.as_object_mut().expect("config object");
     let mcp_servers = object.entry("mcpServers").or_insert_with(|| json!({}));
-    ensure_object(mcp_servers);
+    require_object(mcp_servers, "mcpServers")?;
     let servers = mcp_servers.as_object_mut().expect("mcpServers object");
     // No orphans: drop the pre-rename server while installing the current one.
     servers.remove("tupsharrum");
@@ -646,7 +670,7 @@ pub(crate) fn add_claude_mcp(mut config: Value) -> Value {
             "args": ["mcp", "serve", "--transport", "stdio"]
         }),
     );
-    config
+    Ok(config)
 }
 
 fn remove_claude_mcp(mut config: Value) -> Value {
@@ -664,16 +688,32 @@ fn remove_claude_mcp(mut config: Value) -> Value {
     config
 }
 
+/// Extract a TOML table header token (`[...]`) from the start of a trimmed
+/// line, ignoring any trailing whitespace or `#` comment after the closing
+/// bracket. Returns `None` when the line does not open a table. This lets header
+/// matching tolerate `[mcp_servers.nabu] # note` instead of demanding the whole
+/// line equal the bare header.
+fn toml_table_header(trimmed_line: &str) -> Option<&str> {
+    if !trimmed_line.starts_with('[') {
+        return None;
+    }
+    let close = trimmed_line.find(']')?;
+    Some(&trimmed_line[..=close])
+}
+
 fn remove_toml_table(content: &str, table_header: &str) -> String {
     let mut output = String::with_capacity(content.len());
     let mut skipping = false;
     for line in content.lines() {
-        let trimmed = line.trim();
-        if trimmed == table_header {
+        let header = toml_table_header(line.trim());
+        if header == Some(table_header) {
+            // Matches the target header even with a trailing comment; keep
+            // skipping across a duplicated target table so uninstall/reinstall
+            // never leaves a second copy behind.
             skipping = true;
             continue;
         }
-        if skipping && trimmed.starts_with('[') && trimmed.ends_with(']') {
+        if skipping && header.is_some() {
             skipping = false;
         }
         if !skipping {
@@ -692,7 +732,7 @@ fn remove_toml_table(content: &str, table_header: &str) -> String {
 fn rewrite_opencode_mcp_text(content: &str, action: McpConfigAction) -> nabu_core::Result<String> {
     if content.trim().is_empty() {
         let value = match action {
-            McpConfigAction::Install => add_opencode_mcp(json!({})),
+            McpConfigAction::Install => add_opencode_mcp(json!({}))?,
             McpConfigAction::Uninstall => json!({}),
         };
         return Ok(serde_json::to_string_pretty(&value)?);
@@ -706,17 +746,17 @@ fn rewrite_opencode_mcp_text(content: &str, action: McpConfigAction) -> nabu_cor
 
     let before: Value = serde_json::from_str(content)?;
     let after = match action {
-        McpConfigAction::Install => add_opencode_mcp(before),
+        McpConfigAction::Install => add_opencode_mcp(before)?,
         McpConfigAction::Uninstall => remove_opencode_mcp(before),
     };
     Ok(serde_json::to_string_pretty(&after)?)
 }
 
-pub(crate) fn add_opencode_mcp(mut config: Value) -> Value {
-    ensure_object(&mut config);
+pub(crate) fn add_opencode_mcp(mut config: Value) -> nabu_core::Result<Value> {
+    require_object(&config, "OpenCode config root")?;
     let object = config.as_object_mut().expect("config object");
     let mcp = object.entry("mcp").or_insert_with(|| json!({}));
-    ensure_object(mcp);
+    require_object(mcp, "mcp")?;
     let mcp_obj = mcp.as_object_mut().expect("mcp object");
     // No orphans: drop the pre-rename server while installing the current one, so
     // an upgrade (or re-install) leaves no entry pointing at a removed binary.
@@ -729,7 +769,7 @@ pub(crate) fn add_opencode_mcp(mut config: Value) -> Value {
             "enabled": true
         }),
     );
-    config
+    Ok(config)
 }
 
 fn remove_opencode_mcp(mut config: Value) -> Value {
@@ -744,9 +784,17 @@ fn remove_opencode_mcp(mut config: Value) -> Value {
     config
 }
 
-fn ensure_object(value: &mut Value) {
-    if !value.is_object() {
-        *value = json!({});
+/// Require `value` to be a JSON object. A valid-but-non-object user config
+/// (array, string, number, ...) is refused rather than silently replaced with
+/// `{}`, which would discard the user's file. Callers propagate the error and
+/// skip the write.
+fn require_object(value: &Value, context: &str) -> nabu_core::Result<()> {
+    if value.is_object() {
+        Ok(())
+    } else {
+        Err(Error::Validation(format!(
+            "refusing to overwrite non-object {context} in user config"
+        )))
     }
 }
 

@@ -223,7 +223,7 @@ fn remove_json_object_property(content: &str, property: JsonPropertyRange) -> St
     let line_start = removable_line_start(content, property.property_start);
     let start = if has_trailing_comma {
         line_start
-    } else if let Some(previous_comma) = previous_non_ws_byte(content, property.property_start)
+    } else if let Some(previous_comma) = previous_significant_byte(content, property.property_start)
         .filter(|(_, byte)| *byte == b',')
         .map(|(index, _)| index)
     {
@@ -506,13 +506,77 @@ fn removable_line_start(content: &str, property_start: usize) -> usize {
     }
 }
 
-fn previous_non_ws_byte(content: &str, before: usize) -> Option<(usize, u8)> {
+/// Scan backward from `before`, treating whitespace *and* JSONC comments as
+/// insignificant, and return the first structural byte with its index. In JSONC
+/// the span between a separator comma and the following property key may hold
+/// line or block comments; a naive byte scan would stop on the comment text and
+/// miss the comma, leaving a dangling trailing comma once the property is
+/// removed. This scanner steps over comments so the real separator is found.
+fn previous_significant_byte(content: &str, before: usize) -> Option<(usize, u8)> {
     let bytes = content.as_bytes();
     let mut index = before;
-    while index > 0 {
-        index -= 1;
-        if !matches!(bytes[index], b' ' | b'\n' | b'\r' | b'\t') {
-            return Some((index, bytes[index]));
+    loop {
+        while index > 0 && matches!(bytes[index - 1], b' ' | b'\n' | b'\r' | b'\t') {
+            index -= 1;
+        }
+        if index == 0 {
+            return None;
+        }
+        let candidate = index - 1;
+        // Tail `/` of a block comment `*/`: skip back to its opening `/*`.
+        if candidate >= 1 && bytes[candidate] == b'/' && bytes[candidate - 1] == b'*' {
+            let mut open = candidate - 1;
+            while open >= 1 && !(bytes[open - 1] == b'/' && bytes[open] == b'*') {
+                open -= 1;
+            }
+            index = open.saturating_sub(1);
+            continue;
+        }
+        // A byte that falls inside a line comment on its own line: skip to the
+        // comment's opening `//`.
+        let line_start = content[..=candidate]
+            .rfind('\n')
+            .map(|newline| newline + 1)
+            .unwrap_or(0);
+        if let Some(comment_start) = line_comment_start(content, line_start, candidate + 1) {
+            index = comment_start;
+            continue;
+        }
+        return Some((candidate, bytes[candidate]));
+    }
+}
+
+/// Return the byte offset of a `//` line comment on `[line_start, limit)`,
+/// honoring string and block-comment context so a `//` inside a string or
+/// `/* */` is not mistaken for the comment start.
+fn line_comment_start(content: &str, line_start: usize, limit: usize) -> Option<usize> {
+    let bytes = content.as_bytes();
+    let mut index = line_start;
+    while index < limit {
+        match bytes[index] {
+            b'"' => {
+                index += 1;
+                while index < limit {
+                    match bytes[index] {
+                        b'\\' => index += 2,
+                        b'"' => {
+                            index += 1;
+                            break;
+                        }
+                        _ => index += 1,
+                    }
+                }
+            }
+            b'/' if bytes.get(index + 1).copied() == Some(b'/') => return Some(index),
+            b'/' if bytes.get(index + 1).copied() == Some(b'*') => {
+                index += 2;
+                while index + 1 < bytes.len() && !(bytes[index] == b'*' && bytes[index + 1] == b'/')
+                {
+                    index += 1;
+                }
+                index += 2;
+            }
+            _ => index += 1,
         }
     }
     None
