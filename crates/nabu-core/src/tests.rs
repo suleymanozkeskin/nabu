@@ -1302,6 +1302,113 @@ fn redaction_rules_match_contract_and_preserve_safe_text() {
 }
 
 #[test]
+fn env_assignment_regex_matches_export_prefix_and_midline_and_preserves_url_params() {
+    // `export FOO=` is the dominant real-world form; the old `^`-anchored
+    // regex never matched it because it is preceded by "export ".
+    let export_form = redact_export_text("export DB_PASSWORD=supersecret123");
+    assert_eq!(export_form, "export DB_PASSWORD=[REDACTED:ENV_VALUE]");
+
+    // Mid-line assignment prefixing a command, e.g. `FOO=1 KEY=... cmd`. The
+    // leading non-sensitive `FOO=1` assignment must be left untouched.
+    let midline = redact_export_text("FOO=1 KEY=supersecretvalue1 cmd");
+    assert_eq!(midline, "FOO=1 KEY=[REDACTED:ENV_VALUE] cmd");
+
+    // A non-sensitive query parameter must not be touched: the sensitive-name
+    // filter is the sole precision guard, and "query" does not match
+    // API|TOKEN|SECRET|KEY|PASSWORD.
+    let url = "https://example.com/search?query=nonsecretlongvalue123";
+    assert_eq!(redact_export_text(url), url);
+}
+
+#[test]
+fn jsonl_export_redacts_env_assignment_embedded_inside_json_string() {
+    let temp = tempdir().unwrap();
+    let home = temp.path().join("home");
+    init_home(&home).unwrap();
+    ingest_hook_event(
+        &home,
+        Tool::Claude,
+        json!({
+            "session_id": "env-embed-session",
+            "hook_event_name": "UserPromptSubmit",
+            "message_id": "env-embed-1",
+            "cwd": "/tmp/nabu-fixture",
+            "project_root": "/tmp/nabu-fixture",
+            "prompt": "run: export DB_PASSWORD=supersecret123 then deploy"
+        }),
+    )
+    .unwrap();
+
+    let redacted =
+        export_session_jsonl_with_options(&home, Tool::Claude, "env-embed-session", true).unwrap();
+
+    assert!(!redacted.contains("supersecret123"));
+    assert!(redacted.contains("DB_PASSWORD=[REDACTED:ENV_VALUE]"));
+    for line in redacted.lines().filter(|line| !line.trim().is_empty()) {
+        serde_json::from_str::<Value>(line).expect("redacted jsonl line stays valid JSON");
+    }
+}
+
+#[test]
+fn jsonl_export_redacts_sensitive_json_keys_via_key_based_redaction() {
+    let temp = tempdir().unwrap();
+    let home = temp.path().join("home");
+    init_home(&home).unwrap();
+    ingest_hook_event(
+        &home,
+        Tool::Claude,
+        json!({
+            "session_id": "key-redact-session",
+            "hook_event_name": "UserPromptSubmit",
+            "message_id": "key-redact-1",
+            "cwd": "/tmp/nabu-fixture",
+            "project_root": "/tmp/nabu-fixture",
+            "prompt": "configure the client",
+            "api_key": "hunter2hunter2"
+        }),
+    )
+    .unwrap();
+
+    let full = export_session_jsonl_with_options(&home, Tool::Claude, "key-redact-session", false)
+        .unwrap();
+    assert!(full.contains("hunter2hunter2"));
+
+    let redacted =
+        export_session_jsonl_with_options(&home, Tool::Claude, "key-redact-session", true).unwrap();
+    assert!(!redacted.contains("hunter2hunter2"));
+    assert!(redacted.contains("\"api_key\":\"[REDACTED:ENV_VALUE]\""));
+    for line in redacted.lines().filter(|line| !line.trim().is_empty()) {
+        serde_json::from_str::<Value>(line).expect("redacted jsonl line stays valid JSON");
+    }
+}
+
+#[test]
+fn jsonl_export_falls_back_to_text_redaction_for_malformed_lines() {
+    let temp = tempdir().unwrap();
+    let home = temp.path().join("home");
+    init_home(&home).unwrap();
+    let raw_path = canonical_raw_path(&home, Tool::Claude, "malformed-session");
+    fs::write(
+        &raw_path,
+        "{not valid json export DB_PASSWORD=supersecret123\n{\"ok\":true,\"note\":\"fine\"}\n",
+    )
+    .unwrap();
+
+    let redacted =
+        export_session_jsonl_with_options(&home, Tool::Claude, "malformed-session", true).unwrap();
+
+    assert!(!redacted.contains("supersecret123"));
+    assert!(redacted.contains("DB_PASSWORD=[REDACTED:ENV_VALUE]"));
+    // The well-formed second line round-trips through serde_json (key order
+    // is not preserved without the `preserve_order` feature, so check parsed
+    // content rather than exact text).
+    let second_line = redacted.lines().nth(1).expect("second line present");
+    let parsed: Value = serde_json::from_str(second_line).expect("second line stays valid JSON");
+    assert_eq!(parsed["ok"], json!(true));
+    assert_eq!(parsed["note"], json!("fine"));
+}
+
+#[test]
 fn oversized_payloads_are_spilled_and_indexed_from_blob() {
     let temp = tempdir().unwrap();
     let home = temp.path().join("home");
