@@ -772,6 +772,47 @@ fn verify_file_sha256_rejects_truncated_file() {
 }
 
 #[test]
+fn install_verified_file_renames_verified_temp_and_leaves_no_remnants() {
+    let temp = tempdir().unwrap();
+    let source_path = temp.path().join("source.bin");
+    let content = b"installed-model-file-fixture";
+    fs::write(&source_path, content).unwrap();
+    let expected = sha256_hex_of_file(&source_path).unwrap();
+    let target_dir = temp.path().join("models");
+    let target_path = target_dir.join("model.onnx");
+
+    let bytes = install_verified_file("model.onnx", &source_path, &target_path, &expected).unwrap();
+
+    assert_eq!(bytes, content.len() as u64);
+    assert_eq!(fs::read(&target_path).unwrap(), content);
+    // Install goes through a temp name plus rename: after success only the
+    // final file remains, with no *.tmp remnants in the target directory.
+    let entries: Vec<_> = fs::read_dir(&target_dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    assert_eq!(entries, vec![std::ffi::OsString::from("model.onnx")]);
+}
+
+#[test]
+fn install_verified_file_mismatch_leaves_no_target_or_temp() {
+    let temp = tempdir().unwrap();
+    let source_path = temp.path().join("source.bin");
+    fs::write(&source_path, b"installed-model-file-fixture").unwrap();
+    let wrong_digest = "0".repeat(64);
+    let target_dir = temp.path().join("models");
+    let target_path = target_dir.join("model.onnx");
+
+    let err =
+        install_verified_file("model.onnx", &source_path, &target_path, &wrong_digest).unwrap_err();
+
+    assert!(err.to_string().contains("model.onnx"));
+    // Neither the final path nor a temp remnant may exist after a failed
+    // install; the directory stays empty.
+    assert_eq!(fs::read_dir(&target_dir).unwrap().count(), 0);
+}
+
+#[test]
 fn semantic_model_file_sha256_table_covers_every_remote_file() {
     for (remote, _) in SEMANTIC_MODEL_REMOTE_FILES {
         let digest = model_file_expected_sha256(remote)

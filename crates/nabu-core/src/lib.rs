@@ -58,9 +58,10 @@ pub(crate) use semantic::{
 };
 #[cfg(test)]
 pub(crate) use semantic::{
-    document_embedding_input, model_file_expected_sha256, query_embedding_input,
-    semantic_model_cache_path, sha256_hex_of_file, verify_file_sha256, SEMANTIC_MODEL_FILE_SHA256,
-    SEMANTIC_MODEL_ID, SEMANTIC_MODEL_REMOTE_FILES, SEMANTIC_MODEL_REPO, SEMANTIC_MODEL_REVISION,
+    document_embedding_input, install_verified_file, model_file_expected_sha256,
+    query_embedding_input, semantic_model_cache_path, sha256_hex_of_file, verify_file_sha256,
+    SEMANTIC_MODEL_FILE_SHA256, SEMANTIC_MODEL_ID, SEMANTIC_MODEL_REMOTE_FILES,
+    SEMANTIC_MODEL_REPO, SEMANTIC_MODEL_REVISION,
 };
 pub use semantic::{
     download_embedding_model_with_progress, embedding_model_disclosure, embedding_model_status,

@@ -311,6 +311,55 @@ pub(crate) fn verify_file_sha256(
     Ok(())
 }
 
+/// Installs a verified source file at `target_path` via copy-to-temp,
+/// re-verify, rename. The digest is checked on the temp copy inside the
+/// target directory, so a crash or short write during the copy itself can
+/// never leave a truncated file at the final path: the final name only ever
+/// appears via an atomic rename of a copy that already passed verification.
+/// On any failure the temp file is removed and the final path is untouched.
+/// Returns the installed file's size in bytes.
+#[cfg(any(feature = "semantic", test))]
+pub(crate) fn install_verified_file(
+    label: &str,
+    source_path: &Path,
+    target_path: &Path,
+    expected_sha256_hex: &str,
+) -> Result<u64> {
+    if let Some(parent) = target_path.parent() {
+        create_dir_0700(parent)?;
+    }
+    let mut temp_name = target_path
+        .file_name()
+        .map(|name| name.to_os_string())
+        .unwrap_or_default();
+    temp_name.push(".tmp");
+    let temp_path = target_path.with_file_name(temp_name);
+
+    let install = |temp_path: &Path| -> Result<u64> {
+        fs::copy(source_path, temp_path).map_err(|source| Error::Io {
+            path: temp_path.to_path_buf(),
+            source,
+        })?;
+        verify_file_sha256(label, temp_path, expected_sha256_hex)?;
+        chmod(temp_path, 0o600)?;
+        let bytes = fs::metadata(temp_path)
+            .map_err(|source| Error::Io {
+                path: temp_path.to_path_buf(),
+                source,
+            })?
+            .len();
+        fs::rename(temp_path, target_path).map_err(|source| Error::Io {
+            path: target_path.to_path_buf(),
+            source,
+        })?;
+        Ok(bytes)
+    };
+
+    install(&temp_path).inspect_err(|_| {
+        let _ = fs::remove_file(&temp_path);
+    })
+}
+
 pub fn embedding_model_disclosure(home: &Path, model: &str) -> Result<EmbeddingModelDisclosure> {
     if model != SEMANTIC_MODEL_ID {
         return Err(Error::Validation(format!(
@@ -392,7 +441,7 @@ where
     // download or a digest mismatch on any file leaves no partial install
     // behind — this also catches a truncated mid-copy file, since a short
     // read hashes differently from the pinned digest.
-    let mut verified_sources: Vec<(&'static str, &'static str, PathBuf)> =
+    let mut verified_sources: Vec<(&'static str, &'static str, &'static str, PathBuf)> =
         Vec::with_capacity(total_files);
     for (remote, local) in SEMANTIC_MODEL_REMOTE_FILES {
         progress(EmbeddingDownloadProgress {
@@ -427,30 +476,26 @@ where
         }
 
         downloaded_files += 1;
-        verified_sources.push((remote, local, source_path));
+        verified_sources.push((remote, local, expected_sha256, source_path));
     }
 
-    // Phase 2: every file is verified; install them into the real model
-    // cache and report per-file "stored" progress, matching prior behavior.
+    // Phase 2: every file is verified; install each into the real model
+    // cache via copy-to-temp, re-verify, atomic rename
+    // (`install_verified_file`), so a crash or ENOSPC mid-copy can never
+    // leave a truncated file at a final path that the presence-only
+    // `semantic_model_files_present` check would accept. Files are renamed
+    // into place only after passing verification, so an error here leaves
+    // already-installed files valid and no temp remnants.
     downloaded_files = 0;
-    for (remote, local, source_path) in &verified_sources {
+    for (remote, local, expected_sha256, source_path) in &verified_sources {
         let target_path = cache_path.join(local);
-        if let Some(parent) = target_path.parent() {
-            create_dir_0700(parent)?;
-        }
-        fs::copy(source_path, &target_path).map_err(|source| Error::Io {
-            path: target_path.clone(),
-            source,
-        })?;
-        downloaded_bytes = downloaded_bytes.saturating_add(
-            fs::metadata(&target_path)
-                .map_err(|source| Error::Io {
-                    path: target_path.clone(),
-                    source,
-                })?
-                .len(),
-        );
-        chmod(&target_path, 0o600)?;
+        let installed_bytes =
+            install_verified_file(remote, source_path, &target_path, expected_sha256).inspect_err(
+                |_| {
+                    let _ = fs::remove_dir_all(&transient_cache);
+                },
+            )?;
+        downloaded_bytes = downloaded_bytes.saturating_add(installed_bytes);
         downloaded_files += 1;
         progress(EmbeddingDownloadProgress {
             model_id: SEMANTIC_MODEL_ID.to_string(),
