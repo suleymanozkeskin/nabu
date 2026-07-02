@@ -68,6 +68,9 @@ pub struct ClaudeStatus {
     pub hooks_installed: bool,
     pub claude_installed: bool,
     pub storage_writable: bool,
+    /// `Some` when the settings file exists but is not valid JSON; the file is
+    /// left untouched and `hooks_installed` is reported as `false`.
+    pub parse_error: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -88,25 +91,27 @@ pub struct CodexStatus {
     pub codex_installed: bool,
     pub trust_guidance: String,
     pub storage_writable: bool,
+    /// `Some` when the hooks file exists but is not valid JSON; the file is left
+    /// untouched and `hooks_installed` is reported as `false`.
+    pub parse_error: Option<String>,
 }
 
 pub fn install_claude(home: &Path, dry_run: bool) -> Result<ConfigChangeReport> {
     let settings_path = claude_settings_path()?;
     let before = read_settings_or_empty(&settings_path)?;
-    let command = format!("nabu ingest hook --tool claude --home {}", home.display());
-    let after = add_claude_hooks(before.clone(), &command);
+    let command = format!(
+        "nabu ingest hook --tool claude --home {}",
+        shell_single_quote(home)
+    );
+    let after = add_claude_hooks(before.clone(), &command)?;
     let changed = before != after;
-    let diff = json_diff(&before, &after)?;
+    let diff = claude_hook_change_summary(&before, &after);
 
     if changed && !dry_run {
         if settings_path.exists() {
             backup_config(home, Tool::Claude, "install", &settings_path)?;
         } else if let Some(parent) = settings_path.parent() {
-            fs::create_dir_all(parent).map_err(|source| Error::Io {
-                path: parent.to_path_buf(),
-                source,
-            })?;
-            chmod(parent, 0o700)?;
+            create_dir_all_owned(parent)?;
         }
         write_json_file(&settings_path, &after, 0o600)?;
     }
@@ -132,7 +137,7 @@ pub fn uninstall_claude(home: &Path, dry_run: bool) -> Result<ConfigChangeReport
     let before = read_settings_or_empty(&settings_path)?;
     let after = remove_claude_hooks(before.clone());
     let changed = before != after;
-    let diff = json_diff(&before, &after)?;
+    let diff = claude_hook_change_summary(&before, &after);
 
     if changed && !dry_run {
         backup_config(home, Tool::Claude, "uninstall", &settings_path)?;
@@ -174,11 +179,7 @@ pub fn install_opencode(home: &Path, dry_run: bool) -> Result<ConfigChangeReport
             backup_config(home, Tool::Opencode, "install", &plugin_path)?;
         }
         if let Some(parent) = plugin_path.parent() {
-            fs::create_dir_all(parent).map_err(|source| Error::Io {
-                path: parent.to_path_buf(),
-                source,
-            })?;
-            chmod(parent, 0o700)?;
+            create_dir_all_owned(parent)?;
         }
         write_text_file(&plugin_path, &after, 0o644)?;
     }
@@ -202,20 +203,19 @@ pub fn install_opencode(home: &Path, dry_run: bool) -> Result<ConfigChangeReport
 pub fn install_codex(home: &Path, dry_run: bool) -> Result<ConfigChangeReport> {
     let hooks_path = codex_hooks_path()?;
     let before = read_settings_or_empty(&hooks_path)?;
-    let command = format!("nabu ingest hook --tool codex --home {}", home.display());
-    let after = add_codex_hooks(before.clone(), &command);
+    let command = format!(
+        "nabu ingest hook --tool codex --home {}",
+        shell_single_quote(home)
+    );
+    let after = add_codex_hooks(before.clone(), &command)?;
     let changed = before != after;
-    let diff = json_diff(&before, &after)?;
+    let diff = codex_hook_change_summary(&before, &after);
 
     if changed && !dry_run {
         if hooks_path.exists() {
             backup_config(home, Tool::Codex, "install", &hooks_path)?;
         } else if let Some(parent) = hooks_path.parent() {
-            fs::create_dir_all(parent).map_err(|source| Error::Io {
-                path: parent.to_path_buf(),
-                source,
-            })?;
-            chmod(parent, 0o700)?;
+            create_dir_all_owned(parent)?;
         }
         write_json_file(&hooks_path, &after, 0o600)?;
     }
@@ -241,7 +241,7 @@ pub fn uninstall_codex(home: &Path, dry_run: bool) -> Result<ConfigChangeReport>
     let before = read_settings_or_empty(&hooks_path)?;
     let after = remove_codex_hooks(before.clone());
     let changed = before != after;
-    let diff = json_diff(&before, &after)?;
+    let diff = codex_hook_change_summary(&before, &after);
 
     if changed && !dry_run {
         backup_config(home, Tool::Codex, "uninstall", &hooks_path)?;
@@ -303,12 +303,17 @@ pub fn uninstall_opencode(home: &Path, dry_run: bool) -> Result<ConfigChangeRepo
 
 pub fn claude_status(home: &Path) -> Result<ClaudeStatus> {
     let settings_path = claude_settings_path()?;
-    let settings = read_settings_or_empty(&settings_path)?;
+    let (hooks_installed, parse_error) = match read_settings_or_empty(&settings_path) {
+        Ok(settings) => (settings_contains_harness_claude_hooks(&settings), None),
+        Err(Error::Json(error)) => (false, Some(error.to_string())),
+        Err(other) => return Err(other),
+    };
     Ok(ClaudeStatus {
         settings_path,
-        hooks_installed: settings_contains_harness_claude_hooks(&settings),
+        hooks_installed,
         claude_installed: command_in_path("claude"),
         storage_writable: home.join("raw").join("claude").is_dir(),
+        parse_error,
     })
 }
 
@@ -328,13 +333,18 @@ pub fn opencode_status(home: &Path) -> Result<OpenCodeStatus> {
 
 pub fn codex_status(home: &Path) -> Result<CodexStatus> {
     let hooks_path = codex_hooks_path()?;
-    let settings = read_settings_or_empty(&hooks_path)?;
+    let (hooks_installed, parse_error) = match read_settings_or_empty(&hooks_path) {
+        Ok(settings) => (settings_contains_harness_codex_hooks(&settings), None),
+        Err(Error::Json(error)) => (false, Some(error.to_string())),
+        Err(other) => return Err(other),
+    };
     Ok(CodexStatus {
-        hooks_installed: settings_contains_harness_codex_hooks(&settings),
+        hooks_installed,
         hooks_path,
         codex_installed: command_in_path("codex"),
         trust_guidance: "Codex compatibility mode captures turn-boundary hooks and reconciles transcripts; assistant deltas require streaming mode.".to_string(),
         storage_writable: home.join("raw").join("codex").is_dir(),
+        parse_error,
     })
 }
 
@@ -391,29 +401,39 @@ fn read_settings_or_empty(path: &Path) -> Result<Value> {
     Ok(serde_json::from_str(&content)?)
 }
 
-fn add_claude_hooks(mut settings: Value, command: &str) -> Value {
-    ensure_object(&mut settings);
+// Binary-agnostic substrings: also match pre-rename `tupsharrum ingest ...` hooks
+// so an upgrade uninstall leaves no orphan.
+const CLAUDE_HOOK_MARKER: &str = "ingest hook --tool claude";
+const CODEX_HOOK_MARKER: &str = "ingest hook --tool codex";
+
+fn add_claude_hooks(mut settings: Value, command: &str) -> Result<Value> {
+    require_object(&settings, "settings")?;
     let hooks = settings
         .as_object_mut()
         .expect("settings object")
         .entry("hooks")
         .or_insert_with(|| json!({}));
-    ensure_object(hooks);
+    require_object(hooks, "hooks")?;
     let hooks_object = hooks.as_object_mut().expect("hooks object");
 
     for event in CLAUDE_HOOK_EVENTS {
         let entries = hooks_object
             .entry(event.to_string())
             .or_insert_with(|| Value::Array(Vec::new()));
-        ensure_array(entries);
+        require_event_array(entries, event)?;
         let entries_array = entries.as_array_mut().expect("hook entries");
-        let already_present = entries_array.iter().any(|entry| {
-            entry
-                .pointer("/hooks/0/command")
-                .and_then(Value::as_str)
-                .map(|existing| existing == command)
-                .unwrap_or(false)
+        // Replace-then-add: prune stale nabu hooks (marker match, different
+        // command — e.g. pre-quoting or previous --home installs) so upgrades
+        // converge to exactly one canonical hook instead of stacking duplicates.
+        prune_claude_hook_entries(entries_array, |hook| {
+            hook_command_contains(hook, CLAUDE_HOOK_MARKER) && hook_command(hook) != Some(command)
         });
+        // Claude allows multiple inner hooks per entry; the nabu command is
+        // present if any inner hook of any entry carries it.
+        let already_present = entries_array
+            .iter()
+            .flat_map(claude_inner_hooks)
+            .any(|hook| hook_command(hook) == Some(command));
         if !already_present {
             entries_array.push(json!({
                 "hooks": [
@@ -426,32 +446,34 @@ fn add_claude_hooks(mut settings: Value, command: &str) -> Value {
         }
     }
 
-    settings
+    Ok(settings)
 }
 
-fn add_codex_hooks(mut settings: Value, command: &str) -> Value {
-    ensure_object(&mut settings);
+fn add_codex_hooks(mut settings: Value, command: &str) -> Result<Value> {
+    require_object(&settings, "settings")?;
     let hooks = settings
         .as_object_mut()
         .expect("settings object")
         .entry("hooks")
         .or_insert_with(|| json!({}));
-    ensure_object(hooks);
+    require_object(hooks, "hooks")?;
     let hooks_object = hooks.as_object_mut().expect("hooks object");
 
     for event in CODEX_HOOK_EVENTS {
         let entries = hooks_object
             .entry(event.to_string())
             .or_insert_with(|| Value::Array(Vec::new()));
-        ensure_array(entries);
+        require_event_array(entries, event)?;
         let entries_array = entries.as_array_mut().expect("hook entries");
-        let already_present = entries_array.iter().any(|entry| {
-            entry
-                .get("command")
-                .and_then(Value::as_str)
-                .map(|existing| existing == command)
-                .unwrap_or(false)
+        // Replace-then-add: drop stale nabu entries (marker match, different
+        // command) so upgrades converge to exactly one canonical hook.
+        entries_array.retain(|entry| {
+            !(hook_command_contains(entry, CODEX_HOOK_MARKER)
+                && hook_command(entry) != Some(command))
         });
+        let already_present = entries_array
+            .iter()
+            .any(|entry| hook_command(entry) == Some(command));
         if !already_present {
             entries_array.push(json!({
                 "type": "command",
@@ -460,7 +482,7 @@ fn add_codex_hooks(mut settings: Value, command: &str) -> Value {
         }
     }
 
-    settings
+    Ok(settings)
 }
 
 fn remove_claude_hooks(mut settings: Value) -> Value {
@@ -468,24 +490,24 @@ fn remove_claude_hooks(mut settings: Value) -> Value {
         return settings;
     };
 
+    let mut emptied_events: Vec<String> = Vec::new();
     for event in CLAUDE_HOOK_EVENTS {
-        if let Some(entries) = hooks_object.get_mut(event).and_then(Value::as_array_mut) {
-            entries.retain(|entry| {
-                !entry
-                    .pointer("/hooks/0/command")
-                    .and_then(Value::as_str)
-                    // Binary-agnostic: also removes pre-rename `tupsharrum ingest ...` hooks.
-                    .map(|command| command.contains("ingest hook --tool claude"))
-                    .unwrap_or(false)
-            });
+        let Some(entries) = hooks_object.get_mut(event).and_then(Value::as_array_mut) else {
+            continue;
+        };
+        let before_len = entries.len();
+        prune_claude_hook_entries(entries, |hook| {
+            hook_command_contains(hook, CLAUDE_HOOK_MARKER)
+        });
+        // Track only event keys our filtering emptied, so user-created empty
+        // arrays (or keys we never managed) are preserved.
+        if entries.is_empty() && before_len > 0 {
+            emptied_events.push(event.to_string());
         }
     }
-    hooks_object.retain(|_, value| {
-        value
-            .as_array()
-            .map(|entries| !entries.is_empty())
-            .unwrap_or(true)
-    });
+    for event in emptied_events {
+        hooks_object.remove(&event);
+    }
 
     settings
 }
@@ -495,24 +517,20 @@ fn remove_codex_hooks(mut settings: Value) -> Value {
         return settings;
     };
 
+    let mut emptied_events: Vec<String> = Vec::new();
     for event in CODEX_HOOK_EVENTS {
-        if let Some(entries) = hooks_object.get_mut(event).and_then(Value::as_array_mut) {
-            entries.retain(|entry| {
-                !entry
-                    .get("command")
-                    .and_then(Value::as_str)
-                    // Binary-agnostic: also removes pre-rename `tupsharrum ingest ...` hooks.
-                    .map(|command| command.contains("ingest hook --tool codex"))
-                    .unwrap_or(false)
-            });
+        let Some(entries) = hooks_object.get_mut(event).and_then(Value::as_array_mut) else {
+            continue;
+        };
+        let before_len = entries.len();
+        entries.retain(|entry| !hook_command_contains(entry, CODEX_HOOK_MARKER));
+        if entries.is_empty() && before_len > 0 {
+            emptied_events.push(event.to_string());
         }
     }
-    hooks_object.retain(|_, value| {
-        value
-            .as_array()
-            .map(|entries| !entries.is_empty())
-            .unwrap_or(true)
-    });
+    for event in emptied_events {
+        hooks_object.remove(&event);
+    }
 
     settings
 }
@@ -521,42 +539,147 @@ fn settings_contains_harness_claude_hooks(settings: &Value) -> bool {
     let Some(hooks_object) = settings.get("hooks").and_then(Value::as_object) else {
         return false;
     };
-    CLAUDE_HOOK_EVENTS.iter().all(|event| {
-        hooks_object
-            .get(*event)
-            .and_then(Value::as_array)
-            .map(|entries| {
-                entries.iter().any(|entry| {
-                    entry
-                        .pointer("/hooks/0/command")
-                        .and_then(Value::as_str)
-                        .map(|command| command.contains("nabu ingest hook --tool claude"))
-                        .unwrap_or(false)
-                })
-            })
-            .unwrap_or(false)
-    })
+    CLAUDE_HOOK_EVENTS
+        .iter()
+        .all(|event| claude_event_has_nabu_hook(hooks_object.get(*event)))
 }
 
 fn settings_contains_harness_codex_hooks(settings: &Value) -> bool {
     let Some(hooks_object) = settings.get("hooks").and_then(Value::as_object) else {
         return false;
     };
-    CODEX_HOOK_EVENTS.iter().all(|event| {
-        hooks_object
-            .get(*event)
+    CODEX_HOOK_EVENTS
+        .iter()
+        .all(|event| codex_event_has_nabu_hook(hooks_object.get(*event)))
+}
+
+/// Remove inner hooks matching `is_stale` from each Claude entry, keeping
+/// co-located user hooks; drop an entry only when the pruning emptied its
+/// `hooks` array. Entries without a `hooks` array are not ours — left untouched.
+fn prune_claude_hook_entries(entries: &mut Vec<Value>, is_stale: impl Fn(&Value) -> bool) {
+    entries.retain_mut(|entry| {
+        let Some(inner) = entry.get_mut("hooks").and_then(Value::as_array_mut) else {
+            return true;
+        };
+        let inner_before = inner.len();
+        inner.retain(|hook| !is_stale(hook));
+        !(inner.is_empty() && inner_before > 0)
+    });
+}
+
+/// Inner hooks of a Claude entry (`{matcher?, hooks: [...]}`); empty slice when
+/// the entry has no valid `hooks` array.
+fn claude_inner_hooks(entry: &Value) -> &[Value] {
+    entry
+        .get("hooks")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[])
+}
+
+fn hook_command(hook: &Value) -> Option<&str> {
+    hook.get("command").and_then(Value::as_str)
+}
+
+fn hook_command_contains(hook: &Value, marker: &str) -> bool {
+    hook_command(hook).is_some_and(|command| command.contains(marker))
+}
+
+fn claude_event_has_nabu_hook(event: Option<&Value>) -> bool {
+    event.and_then(Value::as_array).is_some_and(|entries| {
+        entries
+            .iter()
+            .flat_map(claude_inner_hooks)
+            .any(|hook| hook_command_contains(hook, CLAUDE_HOOK_MARKER))
+    })
+}
+
+fn codex_event_has_nabu_hook(event: Option<&Value>) -> bool {
+    event.and_then(Value::as_array).is_some_and(|entries| {
+        entries
+            .iter()
+            .any(|entry| hook_command_contains(entry, CODEX_HOOK_MARKER))
+    })
+}
+
+/// Summarize which Claude hook events gained, lost, or replaced the nabu hook.
+/// Reports only nabu's own commands per touched event key — never unrelated user
+/// config (which may hold secrets).
+fn claude_hook_change_summary(before: &Value, after: &Value) -> String {
+    hook_change_summary(before, after, &CLAUDE_HOOK_EVENTS, |settings, event| {
+        hooks_event(settings, event)
             .and_then(Value::as_array)
             .map(|entries| {
-                entries.iter().any(|entry| {
-                    entry
-                        .get("command")
-                        .and_then(Value::as_str)
-                        .map(|command| command.contains("nabu ingest hook --tool codex"))
-                        .unwrap_or(false)
-                })
+                entries
+                    .iter()
+                    .flat_map(claude_inner_hooks)
+                    .filter(|hook| hook_command_contains(hook, CLAUDE_HOOK_MARKER))
+                    .filter_map(hook_command)
+                    .map(str::to_string)
+                    .collect()
             })
-            .unwrap_or(false)
+            .unwrap_or_default()
     })
+}
+
+fn codex_hook_change_summary(before: &Value, after: &Value) -> String {
+    hook_change_summary(before, after, &CODEX_HOOK_EVENTS, |settings, event| {
+        hooks_event(settings, event)
+            .and_then(Value::as_array)
+            .map(|entries| {
+                entries
+                    .iter()
+                    .filter(|entry| hook_command_contains(entry, CODEX_HOOK_MARKER))
+                    .filter_map(hook_command)
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default()
+    })
+}
+
+fn hooks_event<'a>(settings: &'a Value, event: &str) -> Option<&'a Value> {
+    settings
+        .get("hooks")
+        .and_then(Value::as_object)
+        .and_then(|hooks| hooks.get(event))
+}
+
+fn hook_change_summary(
+    before: &Value,
+    after: &Value,
+    events: &[&str],
+    nabu_commands: impl Fn(&Value, &str) -> Vec<String>,
+) -> String {
+    let mut added = Vec::new();
+    let mut removed = Vec::new();
+    let mut replaced = Vec::new();
+    for event in events {
+        let before_commands = nabu_commands(before, event);
+        let after_commands = nabu_commands(after, event);
+        match (before_commands.is_empty(), after_commands.is_empty()) {
+            (true, false) => added.push(*event),
+            (false, true) => removed.push(*event),
+            // Stale command swapped for the canonical one (e.g. --home change).
+            (false, false) if before_commands != after_commands => replaced.push(*event),
+            _ => {}
+        }
+    }
+    let mut lines = Vec::new();
+    if !added.is_empty() {
+        lines.push(format!("+ nabu hook added to: {}", added.join(", ")));
+    }
+    if !removed.is_empty() {
+        lines.push(format!("- nabu hook removed from: {}", removed.join(", ")));
+    }
+    if !replaced.is_empty() {
+        lines.push(format!("~ nabu hook replaced in: {}", replaced.join(", ")));
+    }
+    if lines.is_empty() {
+        "no nabu hook changes".to_string()
+    } else {
+        lines.join("\n")
+    }
 }
 
 fn command_in_path(command: &str) -> bool {
@@ -566,43 +689,95 @@ fn command_in_path(command: &str) -> bool {
     env::split_paths(&paths).any(|path| path.join(command).is_file())
 }
 
-fn ensure_object(value: &mut Value) {
-    if !value.is_object() {
-        *value = json!({});
+// Refuse valid-but-unexpected JSON rather than coercing it: silently replacing a
+// non-object root, non-object `hooks`, or non-array event entry would discard the
+// user's data on write.
+fn require_object(value: &Value, field: &str) -> Result<()> {
+    if value.is_object() {
+        Ok(())
+    } else {
+        Err(Error::Validation(format!(
+            "expected `{field}` to be a JSON object, found {}",
+            json_type_name(value)
+        )))
     }
 }
 
-fn ensure_array(value: &mut Value) {
-    if !value.is_array() {
-        *value = Value::Array(Vec::new());
+fn require_event_array(value: &Value, event: &str) -> Result<()> {
+    if value.is_array() {
+        Ok(())
+    } else {
+        Err(Error::Validation(format!(
+            "expected hook event `{event}` to be a JSON array, found {}",
+            json_type_name(value)
+        )))
     }
 }
 
-fn json_diff(before: &Value, after: &Value) -> Result<String> {
-    Ok(format!(
-        "--- before\n{}\n--- after\n{}\n",
-        serde_json::to_string_pretty(before)?,
-        serde_json::to_string_pretty(after)?
-    ))
+fn json_type_name(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "boolean",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
+}
+
+/// Single-quote a path for safe embedding in a shell command line. A home path
+/// containing spaces (or any shell metacharacter) would otherwise word-split and
+/// break every hook invocation.
+fn shell_single_quote(path: &Path) -> String {
+    format!("'{}'", path.to_string_lossy().replace('\'', r"'\''"))
+}
+
+/// `create_dir_all` a directory nabu owns, tightening its mode to 0o700 only when
+/// this call actually created it — never re-permission a pre-existing user dir.
+fn create_dir_all_owned(dir: &Path) -> Result<()> {
+    let created = !dir.exists();
+    fs::create_dir_all(dir).map_err(|source| Error::Io {
+        path: dir.to_path_buf(),
+        source,
+    })?;
+    if created {
+        chmod(dir, 0o700)?;
+    }
+    Ok(())
 }
 
 fn write_json_file(path: &Path, value: &Value, mode: u32) -> Result<()> {
     let final_mode = file_mode_or(path, mode)?;
     let content = serde_json::to_vec_pretty(value)?;
-    fs::write(path, content).map_err(|source| Error::Io {
-        path: path.to_path_buf(),
-        source,
-    })?;
-    chmod(path, final_mode)
+    write_atomic(path, &content, final_mode)
 }
 
 fn write_text_file(path: &Path, content: &str, mode: u32) -> Result<()> {
     let final_mode = file_mode_or(path, mode)?;
-    fs::write(path, content).map_err(|source| Error::Io {
-        path: path.to_path_buf(),
+    write_atomic(path, content.as_bytes(), final_mode)
+}
+
+/// Write via a temp file in the target's directory, set its mode, then rename over
+/// the target: a crash mid-write can never leave the live agent config truncated.
+fn write_atomic(path: &Path, content: &[u8], mode: u32) -> Result<()> {
+    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("config");
+    let tmp_path = dir.join(format!(".{file_name}.nabu-tmp.{}", std::process::id()));
+    fs::write(&tmp_path, content).map_err(|source| Error::Io {
+        path: tmp_path.clone(),
         source,
     })?;
-    chmod(path, final_mode)
+    chmod(&tmp_path, mode)?;
+    fs::rename(&tmp_path, path).map_err(|source| {
+        let _ = fs::remove_file(&tmp_path);
+        Error::Io {
+            path: path.to_path_buf(),
+            source,
+        }
+    })
 }
 
 fn text_diff(before: &str, after: &str) -> String {
@@ -808,8 +983,14 @@ mod tests {
     #[test]
     fn committed_hook_fragments_match_installer_output() {
         let home = Path::new("/tmp/nabu-reference-home");
-        let codex_command = format!("nabu ingest hook --tool codex --home {}", home.display());
-        let claude_command = format!("nabu ingest hook --tool claude --home {}", home.display());
+        let codex_command = format!(
+            "nabu ingest hook --tool codex --home {}",
+            shell_single_quote(home)
+        );
+        let claude_command = format!(
+            "nabu ingest hook --tool claude --home {}",
+            shell_single_quote(home)
+        );
         let rendered_codex: Value = serde_json::from_str(
             &CODEX_HOOKS_REFERENCE.replace("__NABU_HOME__", &home.display().to_string()),
         )
@@ -820,9 +1001,12 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(add_codex_hooks(json!({}), &codex_command), rendered_codex);
         assert_eq!(
-            add_claude_hooks(json!({}), &claude_command),
+            add_codex_hooks(json!({}), &codex_command).unwrap(),
+            rendered_codex
+        );
+        assert_eq!(
+            add_claude_hooks(json!({}), &claude_command).unwrap(),
             rendered_claude
         );
         assert_eq!(
@@ -970,6 +1154,336 @@ mod tests {
         );
 
         drop(env_guard);
+    }
+
+    // A claude entry carrying the nabu hook alongside a co-located user hook.
+    fn claude_entry_with_user_and_nabu(nabu_command: &str) -> Value {
+        json!({
+            "hooks": [
+                { "type": "command", "command": "echo user-first" },
+                { "type": "command", "command": nabu_command }
+            ]
+        })
+    }
+
+    #[test]
+    fn install_claude_shell_quotes_home_with_space() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let temp = tempdir().unwrap();
+        let harness_home = temp.path().join("home with space/raven");
+        let claude_config = temp.path().join("claude");
+        fs::create_dir_all(&harness_home).unwrap();
+        fs::create_dir_all(&claude_config).unwrap();
+        let _env = EnvGuard::set([("CLAUDE_CONFIG_DIR", claude_config.as_os_str())]);
+
+        install_claude(&harness_home, false).unwrap();
+
+        let settings: Value =
+            serde_json::from_str(&fs::read_to_string(claude_config.join("settings.json")).unwrap())
+                .unwrap();
+        let command = settings
+            .pointer("/hooks/SessionStart/0/hooks/0/command")
+            .and_then(Value::as_str)
+            .unwrap();
+        let expected = format!(
+            "nabu ingest hook --tool claude --home {}",
+            shell_single_quote(&harness_home)
+        );
+        assert_eq!(command, expected);
+        // The quoted argument must shell-split back to exactly the home path.
+        assert!(command.ends_with(&format!("--home '{}'", harness_home.display())));
+        assert!(command.contains("home with space"));
+    }
+
+    #[test]
+    fn add_claude_hooks_refuses_unexpected_json_shapes() {
+        // Non-object root.
+        assert!(matches!(
+            add_claude_hooks(json!([]), "cmd"),
+            Err(Error::Validation(_))
+        ));
+        // `hooks` holds a non-object.
+        assert!(matches!(
+            add_claude_hooks(json!({ "hooks": "nope" }), "cmd"),
+            Err(Error::Validation(_))
+        ));
+        // An event key holds a non-array.
+        assert!(matches!(
+            add_claude_hooks(json!({ "hooks": { "Stop": 42 } }), "cmd"),
+            Err(Error::Validation(_))
+        ));
+    }
+
+    #[test]
+    fn install_claude_refuses_unexpected_json_without_writing() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        for raw in [
+            "[]",
+            "null",
+            r#"{"hooks":"not-an-object"}"#,
+            r#"{"hooks":{"Stop":"not-an-array"}}"#,
+        ] {
+            let temp = tempdir().unwrap();
+            let claude_config = temp.path().join("claude");
+            fs::create_dir_all(&claude_config).unwrap();
+            let settings_path = claude_config.join("settings.json");
+            fs::write(&settings_path, raw).unwrap();
+            let _env = EnvGuard::set([("CLAUDE_CONFIG_DIR", claude_config.as_os_str())]);
+
+            let result = install_claude(temp.path(), false);
+            assert!(
+                matches!(result, Err(Error::Validation(_))),
+                "expected validation error for {raw}"
+            );
+            assert_eq!(fs::read_to_string(&settings_path).unwrap(), raw);
+        }
+    }
+
+    #[test]
+    fn uninstall_claude_preserves_colocated_user_hook() {
+        let command = "nabu ingest hook --tool claude --home /home";
+        let before = json!({
+            "hooks": {
+                "Stop": [ claude_entry_with_user_and_nabu(command) ]
+            }
+        });
+        // Dedupe sees the nabu hook at inner index 1: re-adding leaves one entry.
+        assert!(add_claude_hooks(before.clone(), command)
+            .unwrap()
+            .pointer("/hooks/Stop")
+            .and_then(Value::as_array)
+            .map(|entries| entries.len() == 1)
+            .unwrap());
+        // Detection finds the nabu hook even at a non-zero inner index.
+        assert!(claude_event_has_nabu_hook(before.pointer("/hooks/Stop")));
+
+        let after = remove_claude_hooks(before);
+        // Nabu hook removed, co-located user hook retained, entry not dropped.
+        let inner = after
+            .pointer("/hooks/Stop/0/hooks")
+            .and_then(Value::as_array);
+        assert_eq!(inner.map(Vec::len), Some(1));
+        assert_eq!(
+            after.pointer("/hooks/Stop/0/hooks/0/command"),
+            Some(&json!("echo user-first"))
+        );
+        assert!(!settings_contains_harness_claude_hooks(&after));
+    }
+
+    #[test]
+    fn uninstall_claude_prunes_only_events_it_emptied() {
+        let command = "nabu ingest hook --tool claude --home /home";
+        let installed = add_claude_hooks(json!({}), command).unwrap();
+        // A user-created empty array on an unmanaged key.
+        let mut settings = installed;
+        settings["hooks"]["Notification"] = json!([]);
+
+        let after = remove_claude_hooks(settings);
+        let hooks = after.get("hooks").and_then(Value::as_object).unwrap();
+        // Every managed event key nabu owned is gone.
+        for event in CLAUDE_HOOK_EVENTS {
+            assert!(!hooks.contains_key(event), "{event} should be pruned");
+        }
+        // The user's unmanaged empty array survives.
+        assert_eq!(hooks.get("Notification"), Some(&json!([])));
+    }
+
+    #[test]
+    fn uninstall_claude_no_nabu_hooks_reports_unchanged() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let temp = tempdir().unwrap();
+        let claude_config = temp.path().join("claude");
+        fs::create_dir_all(&claude_config).unwrap();
+        let settings_path = claude_config.join("settings.json");
+        let original = r#"{"theme":"dark","hooks":{"Notification":[]}}"#;
+        fs::write(&settings_path, original).unwrap();
+        let _env = EnvGuard::set([("CLAUDE_CONFIG_DIR", claude_config.as_os_str())]);
+
+        let report = uninstall_claude(temp.path(), false).unwrap();
+        assert!(!report.changed);
+        assert_eq!(fs::read_to_string(&settings_path).unwrap(), original);
+    }
+
+    // Exactly one nabu hook per claude event, carrying `expected_command`.
+    fn assert_single_claude_nabu_hook(settings: &Value, expected_command: &str) {
+        for event in CLAUDE_HOOK_EVENTS {
+            let nabu_commands: Vec<&str> = settings
+                .pointer(&format!("/hooks/{event}"))
+                .and_then(Value::as_array)
+                .unwrap()
+                .iter()
+                .flat_map(claude_inner_hooks)
+                .filter(|hook| hook_command_contains(hook, CLAUDE_HOOK_MARKER))
+                .filter_map(hook_command)
+                .collect();
+            assert_eq!(nabu_commands, vec![expected_command], "{event}");
+        }
+    }
+
+    #[test]
+    fn reinstall_replaces_stale_unquoted_hook_without_stacking() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let temp = tempdir().unwrap();
+        let harness_home = temp.path().join("raven");
+        let claude_config = temp.path().join("claude");
+        fs::create_dir_all(&harness_home).unwrap();
+        fs::create_dir_all(&claude_config).unwrap();
+        let _env = EnvGuard::set([("CLAUDE_CONFIG_DIR", claude_config.as_os_str())]);
+
+        // Simulate a pre-quoting install: same home, unquoted command.
+        let old_command = format!(
+            "nabu ingest hook --tool claude --home {}",
+            harness_home.display()
+        );
+        let old_settings = add_claude_hooks(json!({"theme": "dark"}), &old_command).unwrap();
+        let settings_path = claude_config.join("settings.json");
+        fs::write(
+            &settings_path,
+            serde_json::to_string_pretty(&old_settings).unwrap(),
+        )
+        .unwrap();
+
+        let report = install_claude(&harness_home, false).unwrap();
+        assert!(report.changed);
+        assert!(report.diff.contains("replaced"));
+
+        let after: Value =
+            serde_json::from_str(&fs::read_to_string(&settings_path).unwrap()).unwrap();
+        assert_eq!(after["theme"], "dark");
+        let new_command = format!(
+            "nabu ingest hook --tool claude --home {}",
+            shell_single_quote(&harness_home)
+        );
+        assert_single_claude_nabu_hook(&after, &new_command);
+    }
+
+    #[test]
+    fn reinstall_over_identical_install_is_unchanged() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let temp = tempdir().unwrap();
+        let harness_home = temp.path().join("raven");
+        let claude_config = temp.path().join("claude");
+        fs::create_dir_all(&harness_home).unwrap();
+        fs::create_dir_all(&claude_config).unwrap();
+        let _env = EnvGuard::set([("CLAUDE_CONFIG_DIR", claude_config.as_os_str())]);
+
+        assert!(install_claude(&harness_home, false).unwrap().changed);
+        let settings_path = claude_config.join("settings.json");
+        let first = fs::read_to_string(&settings_path).unwrap();
+
+        let report = install_claude(&harness_home, false).unwrap();
+        assert!(!report.changed);
+        assert_eq!(fs::read_to_string(&settings_path).unwrap(), first);
+    }
+
+    #[test]
+    fn reinstall_after_home_change_converges_to_one_hook() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let temp = tempdir().unwrap();
+        let old_home = temp.path().join("old-home");
+        let new_home = temp.path().join("new-home");
+        let claude_config = temp.path().join("claude");
+        let codex_home = temp.path().join("codex");
+        fs::create_dir_all(&old_home).unwrap();
+        fs::create_dir_all(&new_home).unwrap();
+        fs::create_dir_all(&claude_config).unwrap();
+        fs::create_dir_all(&codex_home).unwrap();
+        let _env = EnvGuard::set([
+            ("CLAUDE_CONFIG_DIR", claude_config.as_os_str()),
+            ("CODEX_HOME", codex_home.as_os_str()),
+        ]);
+
+        install_claude(&old_home, false).unwrap();
+        install_codex(&old_home, false).unwrap();
+        assert!(install_claude(&new_home, false).unwrap().changed);
+        assert!(install_codex(&new_home, false).unwrap().changed);
+
+        let claude: Value =
+            serde_json::from_str(&fs::read_to_string(claude_config.join("settings.json")).unwrap())
+                .unwrap();
+        let expected_claude = format!(
+            "nabu ingest hook --tool claude --home {}",
+            shell_single_quote(&new_home)
+        );
+        assert_single_claude_nabu_hook(&claude, &expected_claude);
+
+        let codex: Value =
+            serde_json::from_str(&fs::read_to_string(codex_home.join("hooks.json")).unwrap())
+                .unwrap();
+        let expected_codex = format!(
+            "nabu ingest hook --tool codex --home {}",
+            shell_single_quote(&new_home)
+        );
+        for event in CODEX_HOOK_EVENTS {
+            let nabu_commands: Vec<&str> = codex
+                .pointer(&format!("/hooks/{event}"))
+                .and_then(Value::as_array)
+                .unwrap()
+                .iter()
+                .filter(|entry| hook_command_contains(entry, CODEX_HOOK_MARKER))
+                .filter_map(hook_command)
+                .collect();
+            assert_eq!(nabu_commands, vec![expected_codex.as_str()], "{event}");
+        }
+    }
+
+    #[test]
+    fn diff_summary_omits_unrelated_user_config() {
+        let command = "nabu ingest hook --tool claude --home /home";
+        let before = json!({ "env": { "API_KEY": "super-secret" } });
+        let after = add_claude_hooks(before.clone(), command).unwrap();
+        let summary = claude_hook_change_summary(&before, &after);
+        assert!(!summary.contains("super-secret"));
+        assert!(!summary.contains("API_KEY"));
+        assert!(summary.contains("nabu hook added to"));
+        assert!(summary.contains("SessionStart"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn install_claude_preserves_preexisting_dir_mode() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let temp = tempdir().unwrap();
+        let claude_config = temp.path().join("claude");
+        fs::create_dir_all(&claude_config).unwrap();
+        set_mode(&claude_config, 0o755);
+        let _env = EnvGuard::set([("CLAUDE_CONFIG_DIR", claude_config.as_os_str())]);
+
+        install_claude(temp.path(), false).unwrap();
+
+        // Pre-existing dir keeps its mode; only the file we wrote is tightened.
+        assert_eq!(file_mode(&claude_config), 0o755);
+        assert_eq!(file_mode(&claude_config.join("settings.json")), 0o600);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn install_claude_tightens_created_dir_mode() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let temp = tempdir().unwrap();
+        let claude_config = temp.path().join("nested/claude");
+        let _env = EnvGuard::set([("CLAUDE_CONFIG_DIR", claude_config.as_os_str())]);
+
+        install_claude(temp.path(), false).unwrap();
+
+        assert_eq!(file_mode(&claude_config), 0o700);
+    }
+
+    #[test]
+    fn write_atomic_leaves_no_temp_file() {
+        let temp = tempdir().unwrap();
+        let target = temp.path().join("settings.json");
+        write_json_file(&target, &json!({ "a": 1 }), 0o600).unwrap();
+        write_json_file(&target, &json!({ "a": 2 }), 0o600).unwrap();
+        let value: Value = serde_json::from_str(&fs::read_to_string(&target).unwrap()).unwrap();
+        assert_eq!(value, json!({ "a": 2 }));
+        // No lingering `.settings.json.nabu-tmp.*` sibling.
+        let leftovers = fs::read_dir(temp.path())
+            .unwrap()
+            .filter_map(std::result::Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().contains(".nabu-tmp."))
+            .count();
+        assert_eq!(leftovers, 0);
     }
 
     struct EnvGuard {
