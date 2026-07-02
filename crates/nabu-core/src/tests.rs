@@ -728,6 +728,72 @@ fn semantic_model_download_is_noop_when_cache_is_complete() {
     assert!(report.on_disk_bytes > 0);
 }
 
+// verify_file_sha256 and the pinned digest table are exercised without the
+// network: no HTTP call is made, only local temp-file hashing.
+
+#[test]
+fn verify_file_sha256_accepts_matching_digest() {
+    let temp = tempdir().unwrap();
+    let path = temp.path().join("model-file.bin");
+    fs::write(&path, b"integrity-check-fixture").unwrap();
+    let expected = sha256_hex_of_file(&path).unwrap();
+
+    assert!(verify_file_sha256("model-file.bin", &path, &expected).is_ok());
+    // Digest comparison is case-insensitive.
+    assert!(verify_file_sha256("model-file.bin", &path, &expected.to_uppercase()).is_ok());
+}
+
+#[test]
+fn verify_file_sha256_rejects_mismatched_digest() {
+    let temp = tempdir().unwrap();
+    let path = temp.path().join("model-file.bin");
+    fs::write(&path, b"integrity-check-fixture").unwrap();
+    let wrong_digest = "0".repeat(64);
+
+    let err = verify_file_sha256("model-file.bin", &path, &wrong_digest).unwrap_err();
+    let message = err.to_string();
+    assert!(message.contains("model-file.bin"));
+    assert!(message.contains(&wrong_digest));
+}
+
+#[test]
+fn verify_file_sha256_rejects_truncated_file() {
+    // A file truncated mid-copy hashes differently from the full file's
+    // pinned digest, so it is caught the same way a corrupted download is.
+    let temp = tempdir().unwrap();
+    let full_path = temp.path().join("full.bin");
+    let truncated_path = temp.path().join("truncated.bin");
+    let content = b"integrity-check-fixture-with-more-bytes-than-a-truncated-copy-would-have";
+    fs::write(&full_path, content).unwrap();
+    fs::write(&truncated_path, &content[..content.len() / 2]).unwrap();
+    let expected = sha256_hex_of_file(&full_path).unwrap();
+
+    assert!(verify_file_sha256("truncated.bin", &truncated_path, &expected).is_err());
+}
+
+#[test]
+fn semantic_model_file_sha256_table_covers_every_remote_file() {
+    for (remote, _) in SEMANTIC_MODEL_REMOTE_FILES {
+        let digest = model_file_expected_sha256(remote)
+            .unwrap_or_else(|| panic!("missing pinned sha256 digest for {remote}"));
+        assert_eq!(digest.len(), 64, "digest for {remote} is not 64 hex chars");
+        assert!(
+            digest.chars().all(|c| c.is_ascii_hexdigit()),
+            "digest for {remote} is not hex"
+        );
+    }
+    assert_eq!(
+        SEMANTIC_MODEL_FILE_SHA256.len(),
+        SEMANTIC_MODEL_REMOTE_FILES.len(),
+        "digest table and remote file list must stay in lockstep"
+    );
+    assert_eq!(
+        SEMANTIC_MODEL_REVISION.len(),
+        40,
+        "revision must be a full git sha"
+    );
+}
+
 #[cfg(feature = "semantic")]
 #[test]
 fn semantic_embedding_batches_by_length_and_streams_progress() {
