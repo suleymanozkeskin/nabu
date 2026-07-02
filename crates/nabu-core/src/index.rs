@@ -4,20 +4,20 @@
 //! and moves to the `semantic` module in the final phase.
 
 use crate::{
-    chmod, compaction_state_for, embed_index_if_available_with_progress,
+    checkpoint_is_current, chmod, compaction_state_for, embed_index_if_available_with_progress,
     ensure_semantic_vector_schema, extract_refs, file_paths_for_payload, hash_line, init_home,
-    insert_vector_unit_rows, message_text_for_document, open_index,
-    raw_index_checkpoint_is_current, resolved_payload_for_envelope, role_for,
-    search_document_for_event, source_file_metadata, string_field, tool_status_for,
-    write_raw_index_checkpoint, CanonicalType, EmbeddingIndexProgress, Error, EventEnvelope,
-    IndexOptions, IndexReport, Result, SearchDocument, Tool,
+    insert_vector_unit_rows, load_checkpoint_from_conn, message_text_for_document, open_index,
+    resolved_payload_for_envelope, role_for, search_document_for_event, source_file_metadata,
+    string_field, tool_status_for, write_raw_index_checkpoint, CanonicalType,
+    EmbeddingIndexProgress, Error, EventEnvelope, IndexOptions, IndexReport, Result,
+    SearchDocument, SourceCheckpoint, SourceFileMetadata, Tool,
 };
 use fs2::FileExt;
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::Value;
 use std::collections::HashSet;
 use std::fs::{self, File, OpenOptions};
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::path::Path;
 
 /// Outcome of [`index_once_single_flight`]: a pass ran (with its merged report)
@@ -155,11 +155,12 @@ where
                 continue;
             }
             let source_meta = source_file_metadata(&path)?;
-            if raw_index_checkpoint_is_current(&tx, &db_path, tool, &path, &source_meta)? {
+            let checkpoint = load_checkpoint_from_conn(&tx, &db_path, tool, "raw_jsonl", &path)?;
+            if checkpoint_is_current(checkpoint.as_ref(), &source_meta) {
                 continue;
             }
 
-            let raw_report = index_raw_file(&tx, tool, &path)?;
+            let raw_report = index_raw_file(&tx, tool, &path, checkpoint.as_ref(), &source_meta)?;
             indexed_events += raw_report.indexed_events;
             touched_sessions.extend(
                 raw_report
@@ -192,17 +193,120 @@ pub(crate) struct RawIndexFileReport {
     pub(crate) touched_sessions: HashSet<String>,
 }
 
-fn index_raw_file(conn: &Connection, tool: Tool, path: &Path) -> Result<RawIndexFileReport> {
+/// Where a tail-resumed pass begins: the byte offset to continue reading from
+/// and the 1-based line number of the last already-indexed line.
+struct ResumeAnchor {
+    byte_offset: u64,
+    line_count: i64,
+}
+
+/// Verify the checkpoint still describes the head of `reader`'s file and, if so,
+/// leave the reader positioned at the tail and return the resume anchor. Returns
+/// `None` whenever the file cannot be safely resumed — rotation (identity
+/// change), truncation (shorter than the checkpoint offset), a line boundary
+/// that no longer lands on the checkpoint offset (head rewritten), or a
+/// last-line-hash mismatch. Every `None` routes the caller to a full re-read, so
+/// the self-heal semantics (truncation/rotation/rewrite detection) are preserved.
+///
+/// The head is read as raw lines only — no JSON parse, no DB writes — so the
+/// per-line indexing cost is paid on the tail alone rather than on every already
+/// indexed line, which is what removes the per-session quadratic blowup.
+fn resume_anchor_for_checkpoint(
+    reader: &mut BufReader<File>,
+    path: &Path,
+    checkpoint: &SourceCheckpoint,
+    source_meta: &SourceFileMetadata,
+) -> Result<Option<ResumeAnchor>> {
+    // Rotation/replacement: a different inode (or canonical path) is a new file.
+    if checkpoint.source_identity.as_deref() != source_meta.identity.as_deref() {
+        return Ok(None);
+    }
+    // Truncation, or nothing yet consumed: no tail to resume from.
+    if checkpoint.byte_offset == 0 || checkpoint.byte_offset > source_meta.size {
+        return Ok(None);
+    }
+    // Without a recorded anchor-line hash the head cannot be verified.
+    let Some(expected_hash) = checkpoint.last_line_hash.as_deref() else {
+        return Ok(None);
+    };
+
+    let mut line = String::new();
+    let mut offset = 0u64;
+    let mut line_count = 0i64;
+    let anchor_line;
+    loop {
+        line.clear();
+        let bytes = reader.read_line(&mut line).map_err(|source| Error::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        if bytes == 0 {
+            // EOF before the checkpoint offset: the head shrank. Re-read fully.
+            return Ok(None);
+        }
+        offset += bytes as u64;
+        line_count += 1;
+        match offset.cmp(&checkpoint.byte_offset) {
+            std::cmp::Ordering::Less => continue,
+            std::cmp::Ordering::Equal => {
+                anchor_line = std::mem::take(&mut line);
+                break;
+            }
+            // A line boundary no longer falls on the checkpoint offset: the head
+            // content diverged from what was indexed. Re-read fully (self-heal).
+            std::cmp::Ordering::Greater => return Ok(None),
+        }
+    }
+    if hash_line(anchor_line.trim_end()) != expected_hash {
+        return Ok(None);
+    }
+    Ok(Some(ResumeAnchor {
+        byte_offset: checkpoint.byte_offset,
+        line_count,
+    }))
+}
+
+fn index_raw_file(
+    conn: &Connection,
+    tool: Tool,
+    path: &Path,
+    checkpoint: Option<&SourceCheckpoint>,
+    source_meta: &SourceFileMetadata,
+) -> Result<RawIndexFileReport> {
     let file = File::open(path).map_err(|source| Error::Io {
         path: path.to_path_buf(),
         source,
     })?;
     let mut reader = BufReader::new(file);
+
+    let anchor = match checkpoint {
+        Some(checkpoint) => {
+            resume_anchor_for_checkpoint(&mut reader, path, checkpoint, source_meta)?
+        }
+        None => None,
+    };
+    // On resume the reader already sits at the anchor offset and the report
+    // must carry the checkpoint's last-line hash forward when the tail is empty.
+    // On a full read (no anchor) the verify probe may have advanced the reader,
+    // so rewind to the start before re-reading.
+    let (mut raw_line, mut raw_offset, mut last_hash) = match &anchor {
+        Some(anchor) => (
+            anchor.line_count,
+            anchor.byte_offset,
+            checkpoint.and_then(|checkpoint| checkpoint.last_line_hash.clone()),
+        ),
+        None => {
+            reader
+                .seek(SeekFrom::Start(0))
+                .map_err(|source| Error::Io {
+                    path: path.to_path_buf(),
+                    source,
+                })?;
+            (0i64, 0u64, None)
+        }
+    };
     let mut line = String::new();
-    let mut raw_line = 0i64;
-    let mut raw_offset = 0u64;
     let mut indexed = 0usize;
-    let mut last_hash = None;
     let mut touched_sessions = HashSet::new();
 
     loop {
@@ -248,6 +352,29 @@ fn insert_indexed_event(
     fallback_raw_offset: i64,
     envelope: &EventEnvelope,
 ) -> Result<bool> {
+    // Duplicate pre-check. `events.dedupe_key` is globally UNIQUE, so a hit means
+    // this line was already indexed. Returning before any writes or document
+    // rendering skips the sessions upsert, payload render, events insert, and
+    // derived-row writes for duplicates — the per-event write/render cost is then
+    // paid once per event rather than once per line on every re-read, which is
+    // what removes the per-session quadratic blowup. (The events insert stays
+    // INSERT OR IGNORE as a defensive backstop.)
+    let already_indexed = conn
+        .query_row(
+            "SELECT 1 FROM events WHERE dedupe_key = ?1",
+            params![&envelope.dedupe_key],
+            |_| Ok(()),
+        )
+        .optional()
+        .map_err(|source| Error::Sqlite {
+            path: path.to_path_buf(),
+            source,
+        })?
+        .is_some();
+    if already_indexed {
+        return Ok(false);
+    }
+
     let payload = resolved_payload_for_envelope(path, envelope)?;
     let search_document = search_document_for_event(envelope.canonical_type, &payload);
     let searchable_text = search_document.render();
@@ -255,6 +382,8 @@ fn insert_indexed_event(
     let raw_offset = envelope.raw_offset.unwrap_or(fallback_raw_offset);
     let payload_json: Option<String> = None;
 
+    // The events row has a FK to sessions(tool, session_id), so the parent
+    // session must exist before the insert; upsert it here.
     conn.execute(
         "INSERT INTO sessions(
            tool,

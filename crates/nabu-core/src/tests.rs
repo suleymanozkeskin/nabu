@@ -2634,6 +2634,157 @@ fn raw_index_checkpoints_skip_unchanged_canonical_files_and_refresh_on_append() 
 }
 
 #[test]
+fn incremental_index_resumes_from_checkpoint_and_reads_only_the_tail() {
+    let temp = tempdir().unwrap();
+    let home = temp.path().join("home");
+    let session_id = "tail-resume-session";
+    init_home(&home).unwrap();
+
+    for (message_id, prompt) in [
+        ("tail-1", "first tail marker"),
+        ("tail-2", "second tail marker"),
+    ] {
+        ingest_hook_event(
+            &home,
+            Tool::Claude,
+            json!({
+                "session_id": session_id,
+                "hook_event_name": "UserPromptSubmit",
+                "message_id": message_id,
+                "prompt": prompt
+            }),
+        )
+        .unwrap();
+    }
+    assert_eq!(index_once(&home).unwrap().indexed_events, 2);
+
+    let db_path = home.join("index").join("harness.db");
+    let raw_path = canonical_raw_path(&home, Tool::Claude, session_id);
+
+    // Corrupt the already-indexed head line (line 1) into invalid JSON in place,
+    // preserving its byte length so the checkpoint's anchor offset (end of line
+    // 2) still lands on a line boundary and line 2's hash still verifies. A full
+    // re-read would parse this corrupted line and fail; a tail-only resume reads
+    // the head as raw bytes for verification only, never parsing it — so a
+    // successful index proves the head was not re-parsed.
+    let contents = fs::read_to_string(&raw_path).unwrap();
+    let first_newline = contents.find('\n').unwrap();
+    let corrupted = "x".repeat(first_newline) + &contents[first_newline..];
+    assert_eq!(
+        corrupted.len(),
+        contents.len(),
+        "corruption must preserve byte length"
+    );
+    fs::write(&raw_path, &corrupted).unwrap();
+
+    // Append a third event in place (same file/inode) → raw_line 3.
+    ingest_hook_event(
+        &home,
+        Tool::Claude,
+        json!({
+            "session_id": session_id,
+            "hook_event_name": "UserPromptSubmit",
+            "message_id": "tail-3",
+            "prompt": "third tail marker"
+        }),
+    )
+    .unwrap();
+
+    // Would return a JSON parse error if the corrupted head line were re-read.
+    let report = index_once(&home).unwrap();
+    assert_eq!(
+        report.indexed_events, 1,
+        "only the appended tail line is parsed and inserted"
+    );
+
+    let conn = open_index(&db_path).unwrap();
+    let total_rows: i64 = conn
+        .query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(
+        total_rows, 3,
+        "two original events plus the appended tail event"
+    );
+    let max_line: i64 = conn
+        .query_row("SELECT MAX(raw_line) FROM events", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(
+        max_line, 3,
+        "the appended event keeps its true 1-based raw_line after a seek"
+    );
+}
+
+#[test]
+fn incremental_index_falls_back_to_full_reindex_after_truncation() {
+    let temp = tempdir().unwrap();
+    let home = temp.path().join("home");
+    let session_id = "truncate-resume-session";
+    init_home(&home).unwrap();
+
+    for (message_id, prompt) in [("trunc-1", "first marker"), ("trunc-2", "second marker")] {
+        ingest_hook_event(
+            &home,
+            Tool::Claude,
+            json!({
+                "session_id": session_id,
+                "hook_event_name": "UserPromptSubmit",
+                "message_id": message_id,
+                "prompt": prompt
+            }),
+        )
+        .unwrap();
+    }
+    index_once(&home).unwrap();
+
+    // Truncate the raw file back to only its first line. The checkpoint now
+    // records a byte_offset past the new EOF; a self-healing pass must discard
+    // it and re-read from byte 0 rather than seek to the stale offset.
+    let raw_path = canonical_raw_path(&home, Tool::Claude, session_id);
+    let contents = fs::read_to_string(&raw_path).unwrap();
+    let first_line = contents.lines().next().unwrap().to_string();
+    let truncated = format!("{first_line}\n");
+    fs::write(&raw_path, &truncated).unwrap();
+
+    let report = index_once(&home).unwrap();
+    // Line 1 is unchanged, so it is a duplicate on the full re-read and inserts
+    // nothing new — the correctness proof is in the checkpoint below, not here.
+    assert_eq!(report.indexed_events, 0);
+
+    // A full re-read starts raw_offset at 0 and accumulates the real bytes, so
+    // the checkpoint reflects the truncated file exactly. A stale-offset seek
+    // would carry the old, larger byte_offset forward instead.
+    let db_path = home.join("index").join("harness.db");
+    let conn = open_index(&db_path).unwrap();
+    let (byte_offset, last_line_hash): (i64, Option<String>) = conn
+        .query_row(
+            "SELECT byte_offset, last_line_hash FROM checkpoints WHERE source_kind = 'raw_jsonl'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        byte_offset as u64,
+        truncated.len() as u64,
+        "checkpoint reflects a full re-read of the truncated file, not the stale offset"
+    );
+    assert_eq!(
+        last_line_hash.as_deref(),
+        Some(hash_line(&first_line).as_str()),
+        "the surviving first line is the checkpoint anchor after self-heal"
+    );
+
+    // The surviving line stays correctly indexed and no phantom rows appear.
+    let rows: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM events WHERE raw_line = 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(rows, 1, "line 1 remains indexed at its true raw_line");
+}
+
+#[test]
 fn fts_schema_migration_rebuilds_without_reindexing_raw_files() {
     let temp = tempdir().unwrap();
     let home = temp.path().join("home");

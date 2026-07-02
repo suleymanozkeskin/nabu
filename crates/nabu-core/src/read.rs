@@ -4,7 +4,7 @@
 use crate::{
     corroborate_text, normalize_date_or_duration, open_index, raw_envelope_for_pointer,
     redact_json_value, redact_text, session_raw_file, Error, EventOptions, EventPointer, FileTouch,
-    Result, SessionOptions, SessionPage, SessionSummary, StoredEvent, Tool, ToolUsage,
+    NotFound, Result, SessionOptions, SessionPage, SessionSummary, StoredEvent, Tool, ToolUsage,
     MAX_CONTEXT_EVENTS_PER_SIDE, MAX_SESSION_LIMIT, SESSION_PROMPT_SNIPPET_CHARS,
     SESSION_TOP_FILES, SESSION_TOP_TOOLS,
 };
@@ -526,11 +526,10 @@ pub fn get_event_by_pointer_with_options(
             source,
         })?
         .ok_or_else(|| {
-            Error::Validation(format!(
-                "event not found for {}:{}",
-                tool.as_str(),
-                session_id
-            ))
+            Error::NotFound(NotFound::Event {
+                tool: tool.as_str().to_string(),
+                session_id: session_id.to_string(),
+            })
         })?;
 
     let (raw_file, raw_line, raw_offset, searchable_text, cwd, project_root) = pointer;

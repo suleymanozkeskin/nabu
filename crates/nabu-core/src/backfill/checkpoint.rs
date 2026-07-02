@@ -246,6 +246,10 @@ pub(crate) fn raw_index_checkpoint_offset(
     )
 }
 
+/// Load-and-compare wrapper over [`checkpoint_is_current`]. Retained for tests
+/// that assert the skip gate directly; the index pass loads the checkpoint once
+/// and calls [`checkpoint_is_current`] so it can reuse it for tail resume.
+#[cfg(test)]
 pub(crate) fn raw_index_checkpoint_is_current(
     conn: &Connection,
     db_path: &Path,
@@ -253,18 +257,27 @@ pub(crate) fn raw_index_checkpoint_is_current(
     source_path: &Path,
     source_meta: &SourceFileMetadata,
 ) -> Result<bool> {
-    let Some(checkpoint) =
-        load_checkpoint_from_conn(conn, db_path, tool, "raw_jsonl", source_path)?
-    else {
-        return Ok(false);
-    };
+    let checkpoint = load_checkpoint_from_conn(conn, db_path, tool, "raw_jsonl", source_path)?;
+    Ok(checkpoint_is_current(checkpoint.as_ref(), source_meta))
+}
 
-    Ok(
-        checkpoint.source_identity.as_deref() == source_meta.identity.as_deref()
-            && checkpoint.byte_offset == source_meta.size
-            && checkpoint.source_size == source_meta.size
-            && checkpoint.source_mtime == source_meta.mtime,
-    )
+/// Whether an already-loaded checkpoint fully covers the current file: same
+/// identity, and the checkpoint consumed every byte the file now has (offset ==
+/// size == recorded size) at the same mtime. This is the fast skip gate — a
+/// `true` result means the file is unchanged since it was fully indexed. The
+/// incremental path uses the same checkpoint to resume from the recorded offset
+/// when this returns `false` only because the file grew (see the index module).
+pub(crate) fn checkpoint_is_current(
+    checkpoint: Option<&SourceCheckpoint>,
+    source_meta: &SourceFileMetadata,
+) -> bool {
+    let Some(checkpoint) = checkpoint else {
+        return false;
+    };
+    checkpoint.source_identity.as_deref() == source_meta.identity.as_deref()
+        && checkpoint.byte_offset == source_meta.size
+        && checkpoint.source_size == source_meta.size
+        && checkpoint.source_mtime == source_meta.mtime
 }
 
 pub(crate) fn write_raw_index_checkpoint(

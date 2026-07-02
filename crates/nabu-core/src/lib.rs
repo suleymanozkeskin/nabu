@@ -73,7 +73,7 @@ pub(crate) use semantic::{
 };
 
 mod error;
-pub use error::{Error, Result};
+pub use error::{Error, NotFound, Result};
 
 mod event;
 pub use event::{
@@ -124,13 +124,14 @@ pub(crate) use json::{i64_pointer, required_string, string_pointer};
 mod backfill;
 #[cfg(test)]
 pub(crate) use backfill::{
-    append_prepared_event, envelope_from_backfill_payload, BackfillParseContext,
+    append_prepared_event, envelope_from_backfill_payload, raw_index_checkpoint_is_current,
+    BackfillParseContext,
 };
 pub(crate) use backfill::{
-    append_prepared_events, message_id_for_payload, normalize_date_or_duration,
-    opencode_hook_session_id, opencode_server_events_from_payload, parse_ingest_file_source,
-    raw_index_checkpoint_is_current, raw_index_checkpoint_offset, source_file_metadata,
-    write_raw_index_checkpoint,
+    append_prepared_events, checkpoint_is_current, load_checkpoint_from_conn,
+    message_id_for_payload, normalize_date_or_duration, opencode_hook_session_id,
+    opencode_server_events_from_payload, parse_ingest_file_source, raw_index_checkpoint_offset,
+    source_file_metadata, write_raw_index_checkpoint, SourceCheckpoint, SourceFileMetadata,
 };
 #[cfg(test)]
 pub(crate) use backfill::{backfill_dry_run, backfill_since};
