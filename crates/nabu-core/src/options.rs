@@ -108,11 +108,14 @@ pub struct PurgeReport {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PurgeTier {
-    /// `raw/` — the authoritative capture. Removing it loses any session the
-    /// native tool store no longer holds. Not rebuildable from within the store.
+    /// `raw/` and `blobs/` — the authoritative capture. `raw/` holds captured
+    /// sessions; `blobs/` holds payloads spilled out of oversized raw lines
+    /// (the raw line keeps only a `payload_ref`), so blob content is not
+    /// rebuildable from `raw/`. Removing either loses content the native tool
+    /// store may no longer hold. Not rebuildable from within the store.
     Authoritative,
-    /// `index/`, `spool/`, `checkpoints/`, `blobs/`, `logs/`, `backups/` —
-    /// derived bookkeeping, rebuildable from `raw/`.
+    /// `index/`, `spool/`, `checkpoints/`, `logs/`, `backups/` — derived
+    /// bookkeeping, rebuildable from `raw/`.
     Derived,
     /// `models/` — the downloaded embedding model (re-downloadable).
     Model,

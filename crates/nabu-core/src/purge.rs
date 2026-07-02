@@ -4,11 +4,12 @@
 use crate::{
     canonical_raw_path, chmod, directory_size, init_home, normalize_date_or_duration, open_index,
     payload_for_raw_pointer, recalculate_all_session_counts, remove_dedupe_sidecar_for_raw_file,
-    search_document_for_event, CanonicalType, Error, EventEnvelope, PurgeAction, PurgeAllArtifact,
-    PurgeAllOptions, PurgeAllReport, PurgeReport, PurgeTier, Result, Tool,
+    search_document_for_event, table_exists, CanonicalType, Error, EventEnvelope, PurgeAction,
+    PurgeAllArtifact, PurgeAllOptions, PurgeAllReport, PurgeReport, PurgeTier, Result, Tool,
 };
 use rusqlite::types::Value as SqlValue;
-use rusqlite::{params, params_from_iter};
+use rusqlite::{params, params_from_iter, Transaction};
+use std::collections::HashSet;
 use std::env;
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Write};
@@ -41,11 +42,19 @@ pub fn purge_session(home: &Path, tool: Tool, session_id: &str) -> Result<PurgeR
     )?;
 
     let raw_files_removed = if raw_file.exists() {
+        // Collect the spilled-blob hashes referenced by this session's lines
+        // before the raw file is gone, so orphaned blobs can be reclaimed.
+        let mut blob_candidates = HashSet::new();
+        collect_blob_hashes_into(&raw_file, &mut blob_candidates)?;
+
         fs::remove_file(&raw_file).map_err(|source| Error::Io {
             path: raw_file.clone(),
             source,
         })?;
         remove_dedupe_sidecar_for_raw_file(&raw_file)?;
+
+        // The raw file is gone, so surviving-reference scanning is now accurate.
+        delete_orphan_blobs(home, &blob_candidates)?;
         1
     } else {
         0
@@ -67,6 +76,9 @@ pub fn purge_before(home: &Path, before: &str) -> Result<PurgeReport> {
     )?;
 
     let mut raw_files_removed = 0usize;
+    // Spilled-blob hashes referenced only by the removed lines, gathered as the
+    // rewrite drops them; reclaimed after every file is rewritten.
+    let mut blob_candidates = HashSet::new();
     for tool in Tool::all() {
         let raw_dir = home.join("raw").join(tool.as_str());
         if !raw_dir.exists() {
@@ -84,11 +96,15 @@ pub fn purge_before(home: &Path, before: &str) -> Result<PurgeReport> {
             if path.extension().and_then(|value| value.to_str()) != Some("jsonl") {
                 continue;
             }
-            if rewrite_raw_file_after(&path, &before)? {
+            if rewrite_raw_file_after(&path, &before, &mut blob_candidates)? {
                 raw_files_removed += 1;
             }
         }
     }
+
+    // Every file now reflects the retained lines; scan the survivors before
+    // deleting any candidate blob so shared content-addressed blobs are kept.
+    delete_orphan_blobs(home, &blob_candidates)?;
 
     Ok(PurgeReport {
         raw_files_removed,
@@ -140,7 +156,10 @@ pub fn purge_all(home: &Path, options: PurgeAllOptions) -> Result<PurgeAllReport
         ("index", PurgeTier::Derived, true),
         ("spool", PurgeTier::Derived, true),
         ("checkpoints", PurgeTier::Derived, true),
-        ("blobs", PurgeTier::Derived, true),
+        // Spilled payloads are authoritative content: the raw line holds only a
+        // payload_ref, so blobs are not rebuildable from raw. Their removal is
+        // irreversible, like raw/.
+        ("blobs", PurgeTier::Authoritative, true),
         ("logs", PurgeTier::Derived, true),
         ("backups", PurgeTier::Derived, true),
         ("models", PurgeTier::Model, !options.keep_model),
@@ -284,7 +303,11 @@ fn remove_path_no_follow(path: &Path, is_symlink: bool) -> Result<()> {
     }
 }
 
-fn rewrite_raw_file_after(path: &Path, before: &str) -> Result<bool> {
+fn rewrite_raw_file_after(
+    path: &Path,
+    before: &str,
+    dropped_blob_hashes: &mut HashSet<String>,
+) -> Result<bool> {
     let input = File::open(path).map_err(|source| Error::Io {
         path: path.to_path_buf(),
         source,
@@ -324,6 +347,8 @@ fn rewrite_raw_file_after(path: &Path, before: &str) -> Result<bool> {
                     source,
                 })?;
                 kept += 1;
+            } else if let Some(hash) = blob_hash_in_line(line.trim_end()) {
+                dropped_blob_hashes.insert(hash);
             }
         }
         output.flush().map_err(|source| Error::Io {
@@ -357,6 +382,157 @@ fn rewrite_raw_file_after(path: &Path, before: &str) -> Result<bool> {
     chmod(path, 0o600)?;
     remove_dedupe_sidecar_for_raw_file(path)?;
     Ok(false)
+}
+
+/// Return the content-addressed blob hash referenced by a single raw line, if
+/// its payload was spilled (`payload_ref` = `sha256:<hash>`).
+fn blob_hash_in_line(line: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(line).ok()?;
+    value
+        .get("payload_ref")?
+        .as_str()?
+        .strip_prefix("sha256:")
+        .map(str::to_string)
+}
+
+/// Accumulate every spilled-blob hash referenced by a raw JSONL file. A missing
+/// file is treated as empty (it may already have been purged).
+fn collect_blob_hashes_into(path: &Path, out: &mut HashSet<String>) -> Result<()> {
+    let file = match File::open(path) {
+        Ok(file) => file,
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(source) => {
+            return Err(Error::Io {
+                path: path.to_path_buf(),
+                source,
+            })
+        }
+    };
+    let reader = BufReader::new(file);
+    for line in reader.lines() {
+        let line = line.map_err(|source| Error::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if let Some(hash) = blob_hash_in_line(trimmed) {
+            out.insert(hash);
+        }
+    }
+    Ok(())
+}
+
+/// The set of blob hashes still referenced by any surviving raw line in the
+/// store. Blobs are content-addressed and may be shared across events and
+/// sessions, so a blob is only orphaned once no remaining line references it.
+fn referenced_blob_hashes(home: &Path) -> Result<HashSet<String>> {
+    let mut refs = HashSet::new();
+    for tool in Tool::all() {
+        let raw_dir = home.join("raw").join(tool.as_str());
+        if !raw_dir.exists() {
+            continue;
+        }
+        for entry in fs::read_dir(&raw_dir).map_err(|source| Error::Io {
+            path: raw_dir.clone(),
+            source,
+        })? {
+            let entry = entry.map_err(|source| Error::Io {
+                path: raw_dir.clone(),
+                source,
+            })?;
+            let path = entry.path();
+            if path.extension().and_then(|value| value.to_str()) != Some("jsonl") {
+                continue;
+            }
+            collect_blob_hashes_into(&path, &mut refs)?;
+        }
+    }
+    Ok(refs)
+}
+
+/// Delete each candidate blob whose hash is no longer referenced by any
+/// surviving raw line. Call only after the purged raw lines are gone so the
+/// surviving-reference scan is accurate; still-referenced blobs are kept.
+fn delete_orphan_blobs(home: &Path, candidates: &HashSet<String>) -> Result<()> {
+    if candidates.is_empty() {
+        return Ok(());
+    }
+    let referenced = referenced_blob_hashes(home)?;
+    let blob_dir = home.join("blobs").join("sha256");
+    for hash in candidates {
+        if referenced.contains(hash) {
+            continue;
+        }
+        let blob_path = blob_dir.join(format!("{hash}.json"));
+        match fs::remove_file(&blob_path) {
+            Ok(()) => {}
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => {}
+            Err(source) => {
+                return Err(Error::Io {
+                    path: blob_path,
+                    source,
+                })
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Remove derived semantic rows orphaned by an events deletion.
+///
+/// Deleting `events` FK-cascades to `vector_units`, but two derived semantic
+/// artifacts do not participate in that cascade and must be reconciled by hand:
+///
+/// - `vector_unit_texts` holds the plaintext of every embedded unit, keyed by a
+///   shared content-addressed `text_hash` with no foreign key. Purged text
+///   stays readable here unless removed, so this is a privacy leak. Only rows
+///   no longer referenced by any surviving `vector_units` row are deleted (the
+///   hash is shared across events).
+/// - `vector_unit_embeddings` is a `vec0` virtual table (cannot take a foreign
+///   key); orphan rows keep `semantic_vector_row_count` nonzero and occupy KNN
+///   slots.
+///
+/// Guarded by a runtime `sqlite_master` table-existence check rather than a
+/// `#[cfg]` so the plaintext cleanup runs even when a binary built WITHOUT the
+/// `semantic` feature purges a database created by a semantic-enabled binary.
+/// The embeddings deletion additionally requires the `vec0` module, which is
+/// only registered under the `semantic` feature; see the note at its guard.
+fn cleanup_orphaned_vector_rows(tx: &Transaction, db_path: &Path) -> Result<()> {
+    if table_exists(tx, db_path, "vector_unit_texts")? {
+        tx.execute(
+            "DELETE FROM vector_unit_texts
+             WHERE text_hash NOT IN (SELECT text_hash FROM vector_units)",
+            [],
+        )
+        .map_err(|source| Error::Sqlite {
+            path: db_path.to_path_buf(),
+            source,
+        })?;
+    }
+
+    // A `vec0` virtual table can only be mutated when its SQLite module is
+    // registered, which happens exclusively under the `semantic` feature. A
+    // non-semantic binary cannot issue this DELETE (`no such module: vec0`), so
+    // it leaves the orphan embeddings — which carry no plaintext — for the next
+    // semantic index/embed pass to reconcile. The plaintext removal above is
+    // never gated, so purge's deletion promise holds in both builds.
+    #[cfg(feature = "semantic")]
+    if table_exists(tx, db_path, "vector_unit_embeddings")? {
+        tx.execute(
+            "DELETE FROM vector_unit_embeddings
+             WHERE unit_id NOT IN (SELECT id FROM vector_units)",
+            [],
+        )
+        .map_err(|source| Error::Sqlite {
+            path: db_path.to_path_buf(),
+            source,
+        })?;
+    }
+
+    Ok(())
 }
 
 fn delete_indexed_events(
@@ -470,6 +646,7 @@ fn delete_indexed_events(
         path: db_path.clone(),
         source,
     })?;
+    cleanup_orphaned_vector_rows(&tx, &db_path)?;
     recalculate_all_session_counts(&tx, &db_path)?;
     tx.commit().map_err(|source| Error::Sqlite {
         path: db_path.clone(),
