@@ -78,8 +78,15 @@ fn redaction_regex_rules() -> &'static [(Regex, &'static str)] {
 fn env_assignment_redaction_regex() -> &'static Regex {
     static REGEX: OnceLock<Regex> = OnceLock::new();
     REGEX.get_or_init(|| {
+        // Anchored on a word boundary (zero-width) rather than line start, so
+        // `export VAR=`, mid-line `VAR=` (e.g. `FOO=1 KEY=x cmd`), and
+        // `VAR=` embedded inside a JSON string value all match. The
+        // sensitive-name filter (must contain API/TOKEN/SECRET/KEY/PASSWORD)
+        // is unchanged and remains the sole precision guard: a non-sensitive
+        // name such as `?query=` is never touched, while a sensitive-looking
+        // name is redacted regardless of surrounding context.
         Regex::new(
-            r##"(?im)^([A-Z0-9_]*(API|TOKEN|SECRET|KEY|PASSWORD)[A-Z0-9_]*\s*=\s*)(['"]?)[^\s'"#]{8,}(['"]?)"##,
+            r##"(?i)\b([A-Z0-9_]*(?:API|TOKEN|SECRET|KEY|PASSWORD)[A-Z0-9_]*\s*=\s*)(['"]?)[^\s'"#]{8,}(['"]?)"##,
         )
         .expect("valid env redaction regex")
     })
