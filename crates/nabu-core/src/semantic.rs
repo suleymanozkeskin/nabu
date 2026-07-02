@@ -16,6 +16,15 @@ use std::collections::HashSet;
 pub(crate) const SEMANTIC_MODEL_ID: &str = "embeddinggemma-300m-q4";
 pub(crate) const SEMANTIC_MODEL_REPO: &str = "onnx-community/embeddinggemma-300m-ONNX";
 pub(crate) const SEMANTIC_VECTOR_DIMENSIONS: usize = 256;
+/// Commit sha of `SEMANTIC_MODEL_REPO` that `SEMANTIC_MODEL_FILE_SHA256` was
+/// pinned against (queried via `GET
+/// https://huggingface.co/api/models/onnx-community/embeddinggemma-300m-ONNX`,
+/// `sha` field, on 2026-07-02). The download path fetches this exact revision
+/// rather than a mutable branch ref, so a force-push or repo takeover upstream
+/// cannot silently change what gets installed; bumping the model requires
+/// updating this constant and the digest table together.
+#[cfg(any(feature = "semantic", test))]
+pub(crate) const SEMANTIC_MODEL_REVISION: &str = "5090578d9565bb06545b4552f76e6bc2c93e4a66";
 pub(crate) const SEMANTIC_MODEL_REMOTE_FILES: &[(&str, &str)] = &[
     ("onnx/model_q4.onnx", "onnx/model_q4.onnx"),
     ("onnx/model_q4.onnx_data", "onnx/model_q4.onnx_data"),
@@ -23,6 +32,43 @@ pub(crate) const SEMANTIC_MODEL_REMOTE_FILES: &[(&str, &str)] = &[
     ("config.json", "config.json"),
     ("special_tokens_map.json", "special_tokens_map.json"),
     ("tokenizer_config.json", "tokenizer_config.json"),
+];
+/// Expected SHA256 digest (lowercase hex) of each file in
+/// `SEMANTIC_MODEL_REMOTE_FILES`, at `SEMANTIC_MODEL_REVISION`. The two
+/// `onnx/*` entries and `tokenizer.json` are Git LFS objects, so their digest
+/// is the LFS pointer's `oid` (already a sha256). `config.json`,
+/// `special_tokens_map.json`, and `tokenizer_config.json` are small non-LFS
+/// blobs tracked by Git's own (sha1) blob oid, so their sha256 was computed
+/// directly by downloading each file at the pinned revision and hashing it.
+/// Every downloaded file is re-hashed against this table before it is moved
+/// into the on-disk model cache; a mismatch aborts the install with no files
+/// written (see `download_embedding_model_with_progress`).
+#[cfg(any(feature = "semantic", test))]
+pub(crate) const SEMANTIC_MODEL_FILE_SHA256: &[(&str, &str)] = &[
+    (
+        "onnx/model_q4.onnx",
+        "ad1dfee81a70f7944b9b9d1cc6e48075b832881cf33fab2f2b248be78f3f0043",
+    ),
+    (
+        "onnx/model_q4.onnx_data",
+        "599962c3143b040de2dd05e5975be3e9091dd067cacc6a8f7186e3203bab9e02",
+    ),
+    (
+        "tokenizer.json",
+        "4dda02faaf32bc91031dc8c88457ac272b00c1016cc679757d1c441b248b9c47",
+    ),
+    (
+        "config.json",
+        "6e1f06404b7163e0325ed2ea3e6781cde50f4a50b31780a95ad0d30e8404d77b",
+    ),
+    (
+        "special_tokens_map.json",
+        "2f7b0adf4fb469770bb1490e3e35df87b1dc578246c5e7e6fc76ecf33213a397",
+    ),
+    (
+        "tokenizer_config.json",
+        "3ca953eea6c3c9fcda9cf3df22949ff18b216f7c74bd6459230f3f1013953f3a",
+    ),
 ];
 #[cfg(any(feature = "semantic", test))]
 const EMBEDDING_GEMMA_QUERY_PREFIX: &str = "task: search result | query: ";
@@ -222,6 +268,98 @@ pub fn prune_embedding_cache(home: &Path) -> Result<StorageFootprint> {
     Ok(storage_footprint(home))
 }
 
+/// Looks up the pinned sha256 digest for a remote model file by its
+/// `SEMANTIC_MODEL_REMOTE_FILES` remote-path key.
+#[cfg(any(feature = "semantic", test))]
+pub(crate) fn model_file_expected_sha256(remote: &str) -> Option<&'static str> {
+    SEMANTIC_MODEL_FILE_SHA256
+        .iter()
+        .find(|(candidate, _)| *candidate == remote)
+        .map(|(_, digest)| *digest)
+}
+
+/// Computes the lowercase-hex sha256 digest of a file's contents.
+#[cfg(any(feature = "semantic", test))]
+pub(crate) fn sha256_hex_of_file(path: &Path) -> Result<String> {
+    let mut file = fs::File::open(path).map_err(|source| Error::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let mut hasher = Sha256::new();
+    std::io::copy(&mut file, &mut hasher).map_err(|source| Error::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    Ok(hex::encode(hasher.finalize()))
+}
+
+/// Verifies that the file at `path` hashes to `expected_sha256_hex`. `label`
+/// identifies the file in error messages (e.g. its remote path). Comparison
+/// is case-insensitive on the hex digest.
+#[cfg(any(feature = "semantic", test))]
+pub(crate) fn verify_file_sha256(
+    label: &str,
+    path: &Path,
+    expected_sha256_hex: &str,
+) -> Result<()> {
+    let actual = sha256_hex_of_file(path)?;
+    if !actual.eq_ignore_ascii_case(expected_sha256_hex) {
+        return Err(Error::SemanticUnavailable(format!(
+            "model file integrity check failed for {label}: expected sha256 {expected_sha256_hex}, got {actual}"
+        )));
+    }
+    Ok(())
+}
+
+/// Installs a verified source file at `target_path` via copy-to-temp,
+/// re-verify, rename. The digest is checked on the temp copy inside the
+/// target directory, so a crash or short write during the copy itself can
+/// never leave a truncated file at the final path: the final name only ever
+/// appears via an atomic rename of a copy that already passed verification.
+/// On any failure the temp file is removed and the final path is untouched.
+/// Returns the installed file's size in bytes.
+#[cfg(any(feature = "semantic", test))]
+pub(crate) fn install_verified_file(
+    label: &str,
+    source_path: &Path,
+    target_path: &Path,
+    expected_sha256_hex: &str,
+) -> Result<u64> {
+    if let Some(parent) = target_path.parent() {
+        create_dir_0700(parent)?;
+    }
+    let mut temp_name = target_path
+        .file_name()
+        .map(|name| name.to_os_string())
+        .unwrap_or_default();
+    temp_name.push(".tmp");
+    let temp_path = target_path.with_file_name(temp_name);
+
+    let install = |temp_path: &Path| -> Result<u64> {
+        fs::copy(source_path, temp_path).map_err(|source| Error::Io {
+            path: temp_path.to_path_buf(),
+            source,
+        })?;
+        verify_file_sha256(label, temp_path, expected_sha256_hex)?;
+        chmod(temp_path, 0o600)?;
+        let bytes = fs::metadata(temp_path)
+            .map_err(|source| Error::Io {
+                path: temp_path.to_path_buf(),
+                source,
+            })?
+            .len();
+        fs::rename(temp_path, target_path).map_err(|source| Error::Io {
+            path: target_path.to_path_buf(),
+            source,
+        })?;
+        Ok(bytes)
+    };
+
+    install(&temp_path).inspect_err(|_| {
+        let _ = fs::remove_file(&temp_path);
+    })
+}
+
 pub fn embedding_model_disclosure(home: &Path, model: &str) -> Result<EmbeddingModelDisclosure> {
     if model != SEMANTIC_MODEL_ID {
         return Err(Error::Validation(format!(
@@ -288,11 +426,23 @@ where
         .with_progress(false)
         .build()
         .map_err(|source| Error::SemanticUnavailable(format!("model download failed: {source}")))?;
-    let repo = api.model(SEMANTIC_MODEL_REPO.to_string());
+    let repo = api.repo(hf_hub::Repo::with_revision(
+        SEMANTIC_MODEL_REPO.to_string(),
+        hf_hub::RepoType::Model,
+        SEMANTIC_MODEL_REVISION.to_string(),
+    ));
     let total_files = SEMANTIC_MODEL_REMOTE_FILES.len();
     let mut downloaded_files = 0usize;
     let mut downloaded_bytes = 0u64;
 
+    // Phase 1: fetch every file into the transient hf-hub cache and verify
+    // its digest there. Nothing is written to the real model cache
+    // (`cache_path`) until every file has passed verification, so a failed
+    // download or a digest mismatch on any file leaves no partial install
+    // behind — this also catches a truncated mid-copy file, since a short
+    // read hashes differently from the pinned digest.
+    let mut verified_sources: Vec<(&'static str, &'static str, &'static str, PathBuf)> =
+        Vec::with_capacity(total_files);
     for (remote, local) in SEMANTIC_MODEL_REMOTE_FILES {
         progress(EmbeddingDownloadProgress {
             model_id: SEMANTIC_MODEL_ID.to_string(),
@@ -302,26 +452,50 @@ where
             phase: "downloading".to_string(),
         });
         let source_path = repo.get(remote).map_err(|source| {
+            let _ = fs::remove_dir_all(&transient_cache);
             Error::SemanticUnavailable(format!("model download failed for {remote}: {source}"))
         })?;
         let source_path = fs::canonicalize(&source_path).unwrap_or(source_path);
-        let target_path = cache_path.join(local);
-        if let Some(parent) = target_path.parent() {
-            create_dir_0700(parent)?;
-        }
-        fs::copy(&source_path, &target_path).map_err(|source| Error::Io {
-            path: target_path.clone(),
-            source,
+
+        progress(EmbeddingDownloadProgress {
+            model_id: SEMANTIC_MODEL_ID.to_string(),
+            file: (*remote).to_string(),
+            downloaded_files,
+            total_files,
+            phase: "verifying".to_string(),
+        });
+        let expected_sha256 = model_file_expected_sha256(remote).ok_or_else(|| {
+            let _ = fs::remove_dir_all(&transient_cache);
+            Error::SemanticUnavailable(format!(
+                "no pinned sha256 digest configured for model file {remote}"
+            ))
         })?;
-        downloaded_bytes = downloaded_bytes.saturating_add(
-            fs::metadata(&target_path)
-                .map_err(|source| Error::Io {
-                    path: target_path.clone(),
-                    source,
-                })?
-                .len(),
-        );
-        chmod(&target_path, 0o600)?;
+        if let Err(err) = verify_file_sha256(remote, &source_path, expected_sha256) {
+            let _ = fs::remove_dir_all(&transient_cache);
+            return Err(err);
+        }
+
+        downloaded_files += 1;
+        verified_sources.push((remote, local, expected_sha256, source_path));
+    }
+
+    // Phase 2: every file is verified; install each into the real model
+    // cache via copy-to-temp, re-verify, atomic rename
+    // (`install_verified_file`), so a crash or ENOSPC mid-copy can never
+    // leave a truncated file at a final path that the presence-only
+    // `semantic_model_files_present` check would accept. Files are renamed
+    // into place only after passing verification, so an error here leaves
+    // already-installed files valid and no temp remnants.
+    downloaded_files = 0;
+    for (remote, local, expected_sha256, source_path) in &verified_sources {
+        let target_path = cache_path.join(local);
+        let installed_bytes =
+            install_verified_file(remote, source_path, &target_path, expected_sha256).inspect_err(
+                |_| {
+                    let _ = fs::remove_dir_all(&transient_cache);
+                },
+            )?;
+        downloaded_bytes = downloaded_bytes.saturating_add(installed_bytes);
         downloaded_files += 1;
         progress(EmbeddingDownloadProgress {
             model_id: SEMANTIC_MODEL_ID.to_string(),
