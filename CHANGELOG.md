@@ -5,6 +5,8 @@ in `docs/release-notes.md`.
 
 ## Unreleased
 
+## 0.1.4
+
 - Stop indexing the assistant-message copy that Claude's `Stop` hook attaches
   to each turn's `session.ended` event. `last_assistant_message` and
   `transcript_path` no longer enter the session.ended document: the message is
