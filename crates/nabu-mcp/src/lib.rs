@@ -696,6 +696,9 @@ fn tool_recall_answer(home: &Path, arguments: &Value) -> Result<Value, ToolError
         "truncated": search_page.truncated,
         "redacted": redact
     });
+    if let Some(advisory) = search_page.advisory.as_deref() {
+        response["advisory"] = json!(advisory);
+    }
     let Some(mut budget) = ResponseBudget::from_base(&response) else {
         return Ok(enforce_size_bound(response, false));
     };

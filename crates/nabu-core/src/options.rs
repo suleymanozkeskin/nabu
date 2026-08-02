@@ -509,6 +509,11 @@ pub struct SearchPage {
     pub include_deltas: bool,
     pub dedupe: bool,
     pub expand_concepts: bool,
+    /// One-sentence retrieval hint, set only when a lexical-only page looks
+    /// weak (no hits, or top hits scattered across sessions) and neither
+    /// semantic search nor concept expansion was in play. Absent otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub advisory: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]

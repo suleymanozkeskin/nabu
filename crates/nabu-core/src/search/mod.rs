@@ -135,6 +135,7 @@ fn finalize_search_page(
     if options.dedupe {
         results = dedupe_ranked_search_results(results)?;
     }
+    let advisory = search_advisory(&results, mode_applied, semantic_available, options);
 
     let total_estimated = if has_more_raw_rows {
         None
@@ -179,6 +180,51 @@ fn finalize_search_page(
         include_deltas: options.include_deltas,
         dedupe: options.dedupe,
         expand_concepts: options.expand_concepts,
+        advisory,
+    })
+}
+
+/// Scatter window for the weak-page advisory: how many top-ranked hits are
+/// inspected, and the minimum among them before scatter is judged at all.
+const SEARCH_ADVISORY_TOP_K: usize = 10;
+const SEARCH_ADVISORY_MIN_TOP: usize = 5;
+
+/// Retrieval hint for weak lexical-only pages. Fires only when the query ran
+/// lexical-only with neither semantic rescue nor concept expansion available,
+/// and the ranked set is empty or its top hits are spread across sessions with
+/// no concentration — the signature of a concept-worded query matching generic
+/// tokens. Hybrid pages and expanded queries never carry it, so the two score
+/// scales (BM25 vs RRF) never need comparing.
+fn search_advisory(
+    results: &[RankedSearchResult],
+    mode_applied: SearchMode,
+    semantic_available: bool,
+    options: &SearchOptions,
+) -> Option<String> {
+    match (mode_applied, semantic_available, options.expand_concepts) {
+        (SearchMode::Lexical, false, false) => {}
+        _ => return None,
+    }
+    if results.is_empty() {
+        return Some(
+            "No lexical matches and semantic search is unavailable. Retry with distinctive \
+             literal tokens (identifiers, filenames, error strings, command fragments) or set \
+             expand_concepts=true."
+                .to_string(),
+        );
+    }
+    let top: Vec<&str> = results
+        .iter()
+        .take(SEARCH_ADVISORY_TOP_K)
+        .map(|ranked| ranked.result.session_id.as_str())
+        .collect();
+    let distinct = top.iter().copied().collect::<HashSet<_>>().len();
+    let scattered = top.len() >= SEARCH_ADVISORY_MIN_TOP && distinct * 3 >= top.len() * 2;
+    scattered.then(|| {
+        "Lexical-only search with top hits scattered across sessions; semantic search is \
+         unavailable. If these look off-target, retry with distinctive literal tokens \
+         (identifiers, filenames, error strings) or set expand_concepts=true."
+            .to_string()
     })
 }
 
@@ -907,6 +953,96 @@ mod page_assembly_tests {
             deduped.len(),
             4,
             "distinct invocation ids and id-less tool events with distinct text must not merge"
+        );
+    }
+
+    fn ranked_in_session(event_id: i64, raw_line: i64, session_id: &str) -> RankedSearchResult {
+        let mut ranked = ranked(event_id, raw_line);
+        ranked.result.session_id = session_id.to_string();
+        ranked
+    }
+
+    fn lexical_assembly(results: Vec<RankedSearchResult>) -> SearchPageAssembly {
+        SearchPageAssembly {
+            results,
+            has_more_raw_rows: false,
+            mode_requested: SearchMode::Auto,
+            mode_applied: SearchMode::Lexical,
+            semantic_available: false,
+            limit: 10,
+            offset: 0,
+            max_snippet_chars: 200,
+        }
+    }
+
+    #[test]
+    fn advisory_fires_on_empty_lexical_only_page() {
+        let page =
+            finalize_search_page(&SearchOptions::default(), lexical_assembly(Vec::new())).unwrap();
+        let advisory = page
+            .advisory
+            .expect("empty lexical-only page must carry the advisory");
+        assert!(advisory.contains("expand_concepts=true"), "{advisory}");
+    }
+
+    #[test]
+    fn advisory_fires_when_top_hits_scatter_across_sessions() {
+        let results = (0..6)
+            .map(|index| ranked_in_session(index, index, &format!("session-{index}")))
+            .collect();
+        let page =
+            finalize_search_page(&SearchOptions::default(), lexical_assembly(results)).unwrap();
+        assert!(
+            page.advisory.is_some(),
+            "six hits in six sessions is a scattered page"
+        );
+    }
+
+    fn scattered_results() -> Vec<RankedSearchResult> {
+        (0..6)
+            .map(|index| ranked_in_session(index, index, &format!("session-{index}")))
+            .collect()
+    }
+
+    #[test]
+    fn advisory_stays_absent_for_concentrated_expanded_or_hybrid_pages() {
+        let concentrated = (0..6)
+            .map(|index| {
+                ranked_in_session(
+                    index,
+                    index,
+                    if index < 5 { "session-a" } else { "session-b" },
+                )
+            })
+            .collect();
+        let page = finalize_search_page(&SearchOptions::default(), lexical_assembly(concentrated))
+            .unwrap();
+        assert_eq!(
+            page.advisory, None,
+            "session-concentrated hits are not weak"
+        );
+
+        let expanded = finalize_search_page(
+            &SearchOptions {
+                expand_concepts: true,
+                ..SearchOptions::default()
+            },
+            lexical_assembly(scattered_results()),
+        )
+        .unwrap();
+        assert_eq!(
+            expanded.advisory, None,
+            "expanded queries never carry the advisory"
+        );
+
+        let hybrid = finalize_search_page(
+            &SearchOptions::default(),
+            hybrid_assembly(scattered_results(), false),
+        )
+        .unwrap();
+        assert_eq!(
+            hybrid.advisory, None,
+            "hybrid pages never carry the advisory"
         );
     }
 
