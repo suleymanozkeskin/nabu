@@ -4631,6 +4631,175 @@ fn search_dedupe_keeps_distinct_events_separate() {
 }
 
 #[test]
+fn search_dedupe_collapses_tool_call_result_triplet_into_one_slot() {
+    // One shell invocation captured as three events sharing a codex `call_id`:
+    // the function_call, its function_call_output, and the exec_command_end
+    // twin. The exec twin carries its own `event_id`, which wins the frozen
+    // source_event_id probe race, so all three survive capture identity — as
+    // in real codex streams. Their rendered texts differ, so the text key
+    // cannot collapse them; the shared invocation id must.
+    let temp = tempdir().unwrap();
+    let home = temp.path().join("home");
+    let source = temp.path().join("codex-sessions");
+    init_home(&home).unwrap();
+    fs::create_dir_all(&source).unwrap();
+
+    let session_id = "019b0000-0000-7000-8000-000000000099";
+    fs::write(
+        source.join(format!("rollout-2026-06-18T00-00-00-{session_id}.jsonl")),
+        format!(
+            "{{\"timestamp\":\"2026-06-18T00:00:00Z\",\"type\":\"session_meta\",\"payload\":{{\"id\":\"{session_id}\",\"cwd\":\"/tmp/native-codex\"}}}}\n\
+             {{\"timestamp\":\"2026-06-18T00:00:01Z\",\"type\":\"response_item\",\"payload\":{{\"type\":\"function_call\",\"name\":\"shell\",\"arguments\":\"{{\\\"command\\\":[\\\"bash\\\",\\\"-lc\\\",\\\"echo invocation collapse fixture marker\\\"]}}\",\"call_id\":\"call-7\"}}}}\n\
+             {{\"timestamp\":\"2026-06-18T00:00:02Z\",\"type\":\"response_item\",\"payload\":{{\"type\":\"function_call_output\",\"call_id\":\"call-7\",\"output\":\"invocation collapse fixture marker done\"}}}}\n\
+             {{\"timestamp\":\"2026-06-18T00:00:02Z\",\"type\":\"event_msg\",\"payload\":{{\"type\":\"exec_command_end\",\"event_id\":\"evt-exec-1\",\"call_id\":\"call-7\",\"stdout\":\"invocation collapse fixture marker finished\"}}}}\n"
+        ),
+    )
+    .unwrap();
+    backfill_since(&home, Some(Tool::Codex), &source, None).unwrap();
+    index_once(&home).unwrap();
+
+    let deduped = search_history_page(
+        &home,
+        "invocation collapse fixture marker",
+        SearchOptions::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        deduped.results.len(),
+        1,
+        "call/result/result of one invocation must occupy one ranked slot"
+    );
+    assert_eq!(
+        deduped.results[0].also_at.len(),
+        2,
+        "the collapsed twins' raw_lines must stay cited via also_at"
+    );
+
+    let not_deduped = search_history_page(
+        &home,
+        "invocation collapse fixture marker",
+        SearchOptions {
+            dedupe: false,
+            ..SearchOptions::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        not_deduped.results.len(),
+        3,
+        "dedupe=false must restore all three events of the invocation"
+    );
+}
+
+#[test]
+fn search_dedupe_collapses_claude_pre_post_tool_use_pair() {
+    // Claude hook events link a call to its result via snake_case
+    // `tool_use_id` and carry no source_event_id at all, so only the
+    // invocation key can collapse the pair.
+    let temp = tempdir().unwrap();
+    let home = temp.path().join("home");
+    init_home(&home).unwrap();
+    ingest_hook_event(
+        &home,
+        Tool::Claude,
+        json!({
+            "session_id": "invocation-pair-session",
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Bash",
+            "tool_use_id": "toolu_01collapse",
+            "command": "echo hook invocation pair marker"
+        }),
+    )
+    .unwrap();
+    ingest_hook_event(
+        &home,
+        Tool::Claude,
+        json!({
+            "session_id": "invocation-pair-session",
+            "hook_event_name": "PostToolUse",
+            "tool_name": "Bash",
+            "tool_use_id": "toolu_01collapse",
+            "output": "hook invocation pair marker done"
+        }),
+    )
+    .unwrap();
+    index_once(&home).unwrap();
+
+    let deduped = search_history_page(
+        &home,
+        "hook invocation pair marker",
+        SearchOptions::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        deduped.results.len(),
+        1,
+        "PreToolUse/PostToolUse sharing tool_use_id must occupy one ranked slot"
+    );
+    assert_eq!(deduped.results[0].also_at.len(), 1);
+}
+
+#[test]
+fn session_ended_from_stop_hook_does_not_index_last_assistant_message() {
+    // Claude's Stop hook fires per turn and repeats the turn's final assistant
+    // message in `last_assistant_message`. The session.ended document must not
+    // index that text — it is already indexed as the assistant.message event.
+    let temp = tempdir().unwrap();
+    let home = temp.path().join("home");
+    init_home(&home).unwrap();
+    ingest_hook_event(
+        &home,
+        Tool::Claude,
+        json!({
+            "session_id": "stop-fallback-session",
+            "hook_event_name": "MessageDisplay",
+            "message_id": "stop-fallback-1",
+            "final": true,
+            "delta": "stop fallback assistant prose marker"
+        }),
+    )
+    .unwrap();
+    ingest_hook_event(
+        &home,
+        Tool::Claude,
+        json!({
+            "session_id": "stop-fallback-session",
+            "hook_event_name": "Stop",
+            "cwd": "/tmp/nabu-fixture",
+            "last_assistant_message": "stop fallback assistant prose marker",
+            "transcript_path": "/tmp/transcripts/stop-fallback-session.jsonl",
+            "permission_mode": "acceptEdits"
+        }),
+    )
+    .unwrap();
+    index_once(&home).unwrap();
+
+    let page = search_history_page(
+        &home,
+        "stop fallback assistant prose marker",
+        SearchOptions::default(),
+    )
+    .unwrap();
+    assert!(
+        !page.results.is_empty(),
+        "the prose must stay reachable through its assistant.message event"
+    );
+    for result in &page.results {
+        assert_eq!(
+            result.canonical_type, "assistant.message",
+            "session.ended must not index the Stop hook's assistant message copy"
+        );
+    }
+
+    let transcript_hits =
+        search_history_page(&home, "transcripts", SearchOptions::default()).unwrap();
+    assert!(
+        transcript_hits.results.is_empty(),
+        "transcript_path must not leak into the session.ended document"
+    );
+}
+
+#[test]
 fn doctor_fast_and_deep_report_their_integrity_scope() {
     let temp = tempdir().unwrap();
     let home = temp.path().join("home");
@@ -5723,6 +5892,35 @@ fn valid_envelope_json() -> Value {
         "raw_offset": null,
         "payload": {}
     })
+}
+
+#[test]
+fn session_ended_fallback_excludes_assistant_message_and_transcript_path() {
+    // A Claude Stop payload has none of the session.ended preferred keys, so
+    // the document falls back to the nonvolatile string dump. That dump must
+    // skip the turn's assistant message and the transcript path while keeping
+    // the payload's other strings.
+    let payload = json!({
+        "hook_event_name": "Stop",
+        "session_id": "session-stop",
+        "cwd": "/workspace",
+        "last_assistant_message": "full turn prose duplicated from assistant.message",
+        "transcript_path": "/transcripts/session-stop.jsonl",
+        "permission_mode": "acceptEdits"
+    });
+    let rendered = search_document_for_event(CanonicalType::SessionEnded, &payload).render();
+    assert!(
+        !rendered.contains("full turn prose"),
+        "assistant message leaked into session.ended: {rendered}"
+    );
+    assert!(
+        !rendered.contains("session-stop.jsonl"),
+        "transcript path leaked into session.ended: {rendered}"
+    );
+    assert!(
+        rendered.contains("acceptEdits"),
+        "fallback must still capture the payload's other strings: {rendered}"
+    );
 }
 
 #[test]

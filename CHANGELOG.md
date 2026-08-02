@@ -5,6 +5,25 @@ in `docs/release-notes.md`.
 
 ## Unreleased
 
+- Stop indexing the assistant-message copy that Claude's `Stop` hook attaches
+  to each turn's `session.ended` event. `last_assistant_message` and
+  `transcript_path` no longer enter the session.ended document: the message is
+  already indexed as the adjacent `assistant.message` event, so the copy
+  doubled index and embedding size for those rows and made `get_session`
+  windows spanning a turn end return the same content twice. Raw capture is
+  unchanged; the full payload stays readable via `get_event`/`include_payload`.
+- Collapse a tool call and its result(s) into one search slot. Search-time
+  dedupe now groups `tool.call`/`tool.result` events that share a
+  harness-assigned invocation id (codex `call_id`, claude `tool_use_id`),
+  recorded at index time in a new `events.tool_invocation_id` column, so one
+  invocation no longer fills several ranked slots as call/result twins.
+  Collapsed events stay cited in `also_at`; `dedupe=false` still restores
+  every row. Rows indexed before the column existed keep per-event slots.
+- State the query strategy in the MCP tool descriptions: `search_history` and
+  `recall_answer` now say that terms are OR-joined — distinctive literal
+  tokens sharpen ranking without erasing recall — and point concept-worded
+  queries at `expand_concepts=true`.
+
 ## 0.1.3
 
 Hardening release: closes defects found in a full-codebase audit. No new

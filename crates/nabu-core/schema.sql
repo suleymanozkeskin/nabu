@@ -50,6 +50,12 @@ CREATE TABLE IF NOT EXISTS events (
   ),
   source_event_type TEXT NOT NULL,
   source_event_id TEXT,
+  -- Harness-assigned tool-invocation id (codex call_id, claude tool_use_id)
+  -- shared by a tool.call and its tool.result twin(s). Derived at index time,
+  -- deliberately separate from source_event_id, which is frozen capture
+  -- identity. NULL for non-tool events and rows indexed before the column
+  -- existed.
+  tool_invocation_id TEXT,
   canonical_type TEXT NOT NULL CHECK (
     canonical_type IN (
       'session.started',
