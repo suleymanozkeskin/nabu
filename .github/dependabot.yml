@@ -34,3 +34,9 @@ updates:
         update-types:
           - minor
           - patch
+    ignore:
+      # The @ref of this action selects the Rust toolchain version itself, and
+      # it is pinned to the workspace rust-version (MSRV). Dependabot treats the
+      # ref as an action release and bumps it to Rust versions that may not
+      # exist. Bump it together with rust-version in Cargo.toml, not here.
+      - dependency-name: dtolnay/rust-toolchain
