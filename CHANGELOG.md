@@ -5,6 +5,14 @@ in `docs/release-notes.md`.
 
 ## Unreleased
 
+- Add a retrieval advisory to weak lexical-only search pages. When a query
+  runs lexical-only (semantic unavailable, `expand_concepts` off) and returns
+  nothing or top hits scattered across sessions, the search response carries
+  a one-sentence `advisory` field suggesting distinctive literal tokens or
+  `expand_concepts=true`. Absent otherwise; hybrid and expanded pages never
+  carry it. Surfaces in `search_history`, `recall_answer`, and the CLI
+  search output.
+
 ## 0.1.4
 
 - Stop indexing the assistant-message copy that Claude's `Stop` hook attaches

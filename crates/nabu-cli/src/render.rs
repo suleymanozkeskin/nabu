@@ -483,6 +483,9 @@ pub(crate) fn print_search_page(page: SearchPage, format: OutputFormat) -> nabu_
                 ),
                 page.max_snippet_chars_applied
             );
+            if let Some(advisory) = page.advisory.as_deref() {
+                println!("advisory: {advisory}");
+            }
             for result in page.results {
                 println!(
                     "- {}`{}` `{}` `{}` score={:.3} `{}` {}:{}{}\n  {}",
@@ -515,6 +518,9 @@ pub(crate) fn print_search_page(page: SearchPage, format: OutputFormat) -> nabu_
                 ),
                 page.max_snippet_chars_applied
             );
+            if let Some(advisory) = page.advisory.as_deref() {
+                println!("advisory: {advisory}");
+            }
             for result in page.results {
                 println!(
                     "{}{} {} {}:{} score={:.3}{} {}",
