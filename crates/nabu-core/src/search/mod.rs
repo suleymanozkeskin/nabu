@@ -9,8 +9,8 @@ use crate::{
     expand_query_terms, native_jsonl_line_command, normalize_date_or_duration, open_index,
     open_raw_offset_reader, raw_envelope_for_line_scan, read_raw_envelope_at_offset,
     resolved_payload_for_envelope, semantic_search_available, sha256_hex, vector_search_results,
-    Error, RankedSearchResult, Result, SearchContinuation, SearchMode, SearchOptions, SearchPage,
-    SearchResult, Tool, MAX_SEARCH_LIMIT, MAX_SEARCH_SNIPPET_CHARS,
+    CanonicalType, Error, RankedSearchResult, Result, SearchContinuation, SearchMode,
+    SearchOptions, SearchPage, SearchResult, Tool, MAX_SEARCH_LIMIT, MAX_SEARCH_SNIPPET_CHARS,
 };
 pub(crate) use corroborate::corroborate_text;
 use rusqlite::params_from_iter;
@@ -254,7 +254,8 @@ fn lexical_search_ranked_results(
            e.raw_offset,
            e.compaction_state,
            e.cwd,
-           e.project_root
+           e.project_root,
+           e.tool_invocation_id
          FROM events_fts
          JOIN events e ON e.id = events_fts.rowid
          WHERE events_fts MATCH ?",
@@ -346,6 +347,7 @@ fn lexical_search_ranked_results(
             let raw_line: i64 = row.get(9)?;
             Ok(RankedSearchResult {
                 event_id: row.get(0)?,
+                tool_invocation_id: row.get(14)?,
                 result: SearchResult {
                     tool: Tool::from_str(&tool_text).map_err(|_| rusqlite::Error::InvalidQuery)?,
                     session_id: row.get(2)?,
@@ -562,10 +564,10 @@ fn truncate_chars(mut value: String, max_chars: usize) -> String {
 fn dedupe_ranked_search_results(
     results: Vec<RankedSearchResult>,
 ) -> Result<Vec<RankedSearchResult>> {
-    let mut seen: HashMap<(String, String, String), usize> = HashMap::new();
+    let mut seen: HashMap<RetrievalTwinKey, usize> = HashMap::new();
     let mut deduped: Vec<RankedSearchResult> = Vec::new();
     for result in results {
-        let key = retrieval_twin_key(&result.result);
+        let key = retrieval_twin_key(&result);
         if let Some(existing) = seen.get(&key).copied() {
             deduped[existing]
                 .result
@@ -597,12 +599,43 @@ pub(crate) fn retrieval_key_for_text(searchable_text: &str) -> String {
     sha256_hex(normalized.as_bytes())
 }
 
-fn retrieval_twin_key(result: &SearchResult) -> (String, String, String) {
-    (
-        result.session_id.clone(),
-        result.canonical_type.clone(),
-        result.retrieval_key.clone(),
-    )
+/// Retrieval-layer dedupe identity for a ranked hit. `canonical_type` is part
+/// of the text key, so a `tool.call` and its `tool.result` can never collapse
+/// by content — they collapse only through the invocation key, which requires
+/// the harness-assigned invocation id both events share. The highest-ranked
+/// event of an invocation keeps the slot; the others become `also_at` lines.
+/// Rows indexed before `tool_invocation_id` existed have NULL there and keep
+/// the text-key behavior.
+#[derive(Debug, PartialEq, Eq, Hash)]
+enum RetrievalTwinKey {
+    ToolInvocation {
+        session_id: String,
+        tool_invocation_id: String,
+    },
+    Text {
+        session_id: String,
+        canonical_type: String,
+        retrieval_key: String,
+    },
+}
+
+fn retrieval_twin_key(ranked: &RankedSearchResult) -> RetrievalTwinKey {
+    let result = &ranked.result;
+    let is_tool_event = result.canonical_type == CanonicalType::ToolCall.as_str()
+        || result.canonical_type == CanonicalType::ToolResult.as_str();
+    match ranked.tool_invocation_id.as_deref() {
+        Some(tool_invocation_id) if is_tool_event && !tool_invocation_id.is_empty() => {
+            RetrievalTwinKey::ToolInvocation {
+                session_id: result.session_id.clone(),
+                tool_invocation_id: tool_invocation_id.to_string(),
+            }
+        }
+        _ => RetrievalTwinKey::Text {
+            session_id: result.session_id.clone(),
+            canonical_type: result.canonical_type.clone(),
+            retrieval_key: result.retrieval_key.clone(),
+        },
+    }
 }
 
 // Resolve the literal query into the term list used for FTS matching and
@@ -799,6 +832,7 @@ mod page_assembly_tests {
     fn ranked(event_id: i64, raw_line: i64) -> RankedSearchResult {
         RankedSearchResult {
             event_id,
+            tool_invocation_id: None,
             result: SearchResult {
                 tool: Tool::Claude,
                 session_id: "session".to_string(),
@@ -822,6 +856,58 @@ mod page_assembly_tests {
                 project_root: None,
             },
         }
+    }
+
+    fn ranked_tool_event(
+        event_id: i64,
+        raw_line: i64,
+        canonical_type: &str,
+        tool_invocation_id: Option<&str>,
+    ) -> RankedSearchResult {
+        let mut ranked = ranked(event_id, raw_line);
+        ranked.tool_invocation_id = tool_invocation_id.map(str::to_string);
+        ranked.result.canonical_type = canonical_type.to_string();
+        ranked
+    }
+
+    #[test]
+    fn dedupe_collapses_call_and_results_of_one_invocation() {
+        let results = vec![
+            ranked_tool_event(1, 1, "tool.call", Some("call-7")),
+            ranked_tool_event(2, 2, "tool.result", Some("call-7")),
+            ranked_tool_event(3, 3, "tool.result", Some("call-7")),
+        ];
+        let deduped = dedupe_ranked_search_results(results).unwrap();
+        assert_eq!(
+            deduped.len(),
+            1,
+            "call and results sharing an invocation id must occupy one slot"
+        );
+        assert_eq!(
+            deduped[0].result.raw_line, 1,
+            "the highest-ranked event of the invocation keeps the slot"
+        );
+        assert_eq!(
+            deduped[0].result.also_at,
+            vec![2, 3],
+            "collapsed twins must stay cited via also_at"
+        );
+    }
+
+    #[test]
+    fn dedupe_keeps_distinct_invocations_and_id_less_tool_events_separate() {
+        let results = vec![
+            ranked_tool_event(1, 1, "tool.call", Some("call-7")),
+            ranked_tool_event(2, 2, "tool.call", Some("call-8")),
+            ranked_tool_event(3, 3, "tool.result", None),
+            ranked_tool_event(4, 4, "tool.result", None),
+        ];
+        let deduped = dedupe_ranked_search_results(results).unwrap();
+        assert_eq!(
+            deduped.len(),
+            4,
+            "distinct invocation ids and id-less tool events with distinct text must not merge"
+        );
     }
 
     // A hybrid-shaped assembly: `mode_applied` is Hybrid, matching what

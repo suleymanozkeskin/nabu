@@ -8,8 +8,8 @@ use crate::{
     ensure_semantic_vector_schema, extract_refs, file_paths_for_payload, hash_line, init_home,
     insert_vector_unit_rows, load_checkpoint_from_conn, message_text_for_document, open_index,
     resolved_payload_for_envelope, role_for, search_document_for_event, source_file_metadata,
-    string_field, tool_status_for, write_raw_index_checkpoint, CanonicalType,
-    EmbeddingIndexProgress, Error, EventEnvelope, IndexOptions, IndexReport, Result,
+    string_field, tool_invocation_id_for_payload, tool_status_for, write_raw_index_checkpoint,
+    CanonicalType, EmbeddingIndexProgress, Error, EventEnvelope, IndexOptions, IndexReport, Result,
     SearchDocument, SourceCheckpoint, SourceFileMetadata, Tool,
 };
 use fs2::FileExt;
@@ -377,6 +377,7 @@ fn insert_indexed_event(
 
     let payload = resolved_payload_for_envelope(path, envelope)?;
     let search_document = search_document_for_event(envelope.canonical_type, &payload);
+    let tool_invocation_id = tool_invocation_id_for_payload(envelope.canonical_type, &payload);
     let searchable_text = search_document.render();
     let raw_file = path.display().to_string();
     let raw_offset = envelope.raw_offset.unwrap_or(fallback_raw_offset);
@@ -440,6 +441,7 @@ fn insert_indexed_event(
               source,
               source_event_type,
               source_event_id,
+              tool_invocation_id,
               canonical_type,
               sequence,
               raw_file,
@@ -451,7 +453,7 @@ fn insert_indexed_event(
               compaction_state
             )
             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
-                    ?16, ?17, ?18, ?19, ?20, ?21, ?22)",
+                    ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)",
             params![
                 envelope.tool.as_str(),
                 &envelope.session_id,
@@ -466,6 +468,7 @@ fn insert_indexed_event(
                 envelope.source.as_str(),
                 &envelope.source_event_type,
                 envelope.source_event_id.as_deref(),
+                tool_invocation_id.as_deref(),
                 envelope.canonical_type.as_str(),
                 envelope.sequence,
                 &raw_file,

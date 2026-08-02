@@ -190,7 +190,8 @@ mod document;
 pub(crate) use document::{
     canonical_type_for_payload, compaction_state_for, file_paths_for_payload, hook_event_name,
     identity_payload, message_text_for_document, normalize_identity_text, role_for,
-    search_document_for_event, string_field, tool_status_for, SearchDocument,
+    search_document_for_event, string_field, tool_invocation_id_for_payload, tool_status_for,
+    SearchDocument,
 };
 // Used only by the cfg(semantic) vector pipeline and a default-build unit test.
 #[cfg(any(feature = "semantic", test))]

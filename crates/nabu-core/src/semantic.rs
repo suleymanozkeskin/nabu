@@ -860,7 +860,8 @@ fn vector_search_results_for_k(
            e.raw_offset,
            e.compaction_state,
            e.cwd,
-           e.project_root
+           e.project_root,
+           e.tool_invocation_id
          FROM vector_unit_embeddings ve
          JOIN vector_units vu ON vu.id = ve.unit_id
          JOIN events e ON e.id = vu.event_id
@@ -954,6 +955,7 @@ fn vector_search_results_for_k(
             let raw_line: i64 = row.get(8)?;
             Ok(RankedSearchResult {
                 event_id: row.get(0)?,
+                tool_invocation_id: row.get(13)?,
                 result: SearchResult {
                     tool: Tool::from_str(&tool_text).map_err(|_| rusqlite::Error::InvalidQuery)?,
                     session_id: row.get(2)?,

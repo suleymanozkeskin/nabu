@@ -344,7 +344,7 @@ fn tool_descriptions() -> Value {
     json!([
         {
             "name": "search_history",
-            "description": "Search indexed local agent history citation-first: returns score, snippet, tool, session_id, raw_line, and payload=null by default. Searches every tool (codex, claude, opencode) in one call by default; pass tool=\"all\" for the explicit cross-tool form or a specific tool name to narrow — do not fan out one query per tool. Each hit carries its own tool plus raw_file/raw_line/raw_offset/session_id. Drill into hits with get_session around_raw_line/before/after, get_event, or include_payload=true for full payloads. Page with offset; include_deltas restores deltas; dedupe=false restores adjacent twin rows. Set corroborate=true to add local read-only git existence checks for mentioned commits, branches, and files; PR refs are reported unresolved/needs_network and never fetched. Use this for controllable, interactive drill-down; if you instead want ranked hits plus their surrounding context assembled in one cited call, use recall_answer.",
+            "description": "Search indexed local agent history citation-first: returns score, snippet, tool, session_id, raw_line, and payload=null by default. Query terms are OR-joined, so distinctive literal tokens (identifiers, filenames, error strings, command fragments) sharpen ranking without erasing recall — prefer them over concept wording; for a concept-worded query set expand_concepts=true to widen lexical recall with curated synonyms. Searches every tool (codex, claude, opencode) in one call by default; pass tool=\"all\" for the explicit cross-tool form or a specific tool name to narrow — do not fan out one query per tool. Each hit carries its own tool plus raw_file/raw_line/raw_offset/session_id. Drill into hits with get_session around_raw_line/before/after, get_event, or include_payload=true for full payloads. Page with offset; include_deltas restores deltas; dedupe=false restores adjacent twin rows. Set corroborate=true to add local read-only git existence checks for mentioned commits, branches, and files; PR refs are reported unresolved/needs_network and never fetched. Use this for controllable, interactive drill-down; if you instead want ranked hits plus their surrounding context assembled in one cited call, use recall_answer.",
             "inputSchema": tool_schema("search_history")
         },
         {
@@ -1044,7 +1044,7 @@ fn tool_schema(name: &str) -> Value {
         "search_history" => json!({
             "type": "object",
             "properties": {
-                "query": { "type": "string", "minLength": 1 },
+                "query": { "type": "string", "minLength": 1, "description": "Search terms, OR-joined. Prefer distinctive literal tokens from the work itself — identifiers, filenames, error strings, command fragments — over concept wording; extra terms sharpen ranking without erasing recall. If only concept wording is available, set expand_concepts=true." },
                 "tool": { "type": "string", "enum": ["codex", "claude", "opencode", "all"], "description": "Restrict to one tool, or \"all\" for a single cross-tool search over codex, claude, and opencode. Omitting tool is equivalent to \"all\". Each hit still carries its own tool plus raw_file/raw_line/raw_offset/session_id coordinates." },
                 "session_id": { "type": "string" },
                 "cwd": { "type": "string" },
@@ -1130,7 +1130,7 @@ fn tool_schema(name: &str) -> Value {
         "recall_answer" => json!({
             "type": "object",
             "properties": {
-                "query": { "type": "string", "minLength": 1 },
+                "query": { "type": "string", "minLength": 1, "description": "Search terms, OR-joined. Prefer distinctive literal tokens from the work itself — identifiers, filenames, error strings, command fragments — over concept wording; extra terms sharpen ranking without erasing recall. If only concept wording is available, set expand_concepts=true." },
                 "tool": { "type": "string", "enum": ["codex", "claude", "opencode", "all"], "description": "Restrict to one tool, or \"all\" to gather cited context across codex, claude, and opencode in one call. Omitting tool is equivalent to \"all\"; each hit still carries its own tool and coordinates." },
                 "session_id": { "type": "string" },
                 "cwd": { "type": "string" },

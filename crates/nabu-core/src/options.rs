@@ -462,6 +462,10 @@ pub fn native_jsonl_line_command(raw_file: &str, raw_line: i64) -> Option<String
 #[derive(Debug)]
 pub(crate) struct RankedSearchResult {
     pub(crate) event_id: i64,
+    /// Harness-assigned invocation id (codex `call_id`, claude `tool_use_id`)
+    /// shared by a tool call and its result(s); dedupe uses it to collapse
+    /// them into one ranked slot. Never serialized.
+    pub(crate) tool_invocation_id: Option<String>,
     pub(crate) result: SearchResult,
 }
 

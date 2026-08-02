@@ -108,6 +108,7 @@ pub(crate) fn initialize_database(path: &Path) -> Result<()> {
             source,
         })?;
     ensure_checkpoint_schema(&conn, path)?;
+    ensure_events_schema(&conn, path)?;
     ensure_events_fts_schema(&mut conn, path)?;
     ensure_supporting_indexes(&conn, path)?;
     ensure_event_refs_schema(&mut conn, path)?;
@@ -147,10 +148,15 @@ pub(crate) fn open_index(path: &Path) -> Result<Connection> {
         source,
     })?;
     ensure_checkpoint_schema(&conn, path)?;
+    ensure_events_schema(&conn, path)?;
     ensure_events_fts_schema(&mut conn, path)?;
     ensure_supporting_indexes(&conn, path)?;
     ensure_event_refs_schema(&mut conn, path)?;
     Ok(conn)
+}
+
+fn ensure_events_schema(conn: &Connection, path: &Path) -> Result<()> {
+    ensure_table_column(conn, path, "events", "tool_invocation_id", "TEXT")
 }
 
 fn register_semantic_extension_if_enabled() {

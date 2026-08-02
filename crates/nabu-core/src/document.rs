@@ -69,6 +69,32 @@ pub(crate) fn hook_event_name(payload: &Value) -> Result<&str> {
         })
 }
 
+// Harness-assigned tool-invocation id shared by a tool.call and its
+// tool.result twin(s): codex `call_id` (hook, rollout, and event_msg shapes),
+// claude `tool_use_id` / legacy `toolUseID`. Deliberately separate from
+// `source_event_id_for_payload` — that feeds frozen capture identity, and for
+// codex event_msg twins its earlier probes (event_id/turn_id) win over
+// call_id, so it cannot serve as the invocation link.
+pub(crate) fn tool_invocation_id_for_payload(
+    canonical_type: CanonicalType,
+    payload: &Value,
+) -> Option<String> {
+    match canonical_type {
+        CanonicalType::ToolCall | CanonicalType::ToolResult => [
+            "/call_id",
+            "/payload/call_id",
+            "/params/call_id",
+            "/tool_use_id",
+            "/payload/tool_use_id",
+            "/toolUseID",
+            "/attachment/toolUseID",
+        ]
+        .iter()
+        .find_map(|pointer| string_pointer(payload, pointer).filter(|value| !value.is_empty())),
+        _ => None,
+    }
+}
+
 pub(crate) fn canonical_type_for_payload(
     tool: Tool,
     source_event_type: &str,
@@ -305,9 +331,24 @@ pub(crate) fn search_document_for_event(
     }
 
     if document.render().trim().is_empty() {
-        document.metadata_text = nonvolatile_text(payload);
+        document.metadata_text = fallback_metadata_text(canonical_type, payload);
     }
     document
+}
+
+// Claude's `Stop` hook fires per turn and carries the turn's full assistant
+// message (`last_assistant_message`) plus a transcript path. That text is
+// already indexed as the adjacent `assistant.message` event, so the
+// session.ended fallback dump must not duplicate it. The exclusion lives here
+// and not in `is_volatile_identity_key` because that list also feeds capture
+// identity hashing — extending it would re-key every historical Stop event.
+fn fallback_metadata_text(canonical_type: CanonicalType, payload: &Value) -> String {
+    match canonical_type {
+        CanonicalType::SessionEnded => {
+            nonvolatile_text_excluding(payload, &["last_assistant_message", "transcript_path"])
+        }
+        _ => nonvolatile_text(payload),
+    }
 }
 
 pub(crate) fn message_text_for_document(
@@ -461,8 +502,12 @@ fn scalar_text_for_keys(payload: &Value, keys: &[&str]) -> String {
 }
 
 fn nonvolatile_text(payload: &Value) -> String {
+    nonvolatile_text_excluding(payload, &[])
+}
+
+fn nonvolatile_text_excluding(payload: &Value, excluded_keys: &[&str]) -> String {
     let mut values = Vec::new();
-    collect_nonvolatile_strings(payload, &mut values);
+    collect_nonvolatile_strings(payload, excluded_keys, &mut values);
     join_owned(values)
 }
 
@@ -525,18 +570,18 @@ fn collect_scalar_key_values(value: &Value, key_hint: &str, output: &mut Vec<Str
     }
 }
 
-fn collect_nonvolatile_strings(value: &Value, output: &mut Vec<String>) {
+fn collect_nonvolatile_strings(value: &Value, excluded_keys: &[&str], output: &mut Vec<String>) {
     match value {
         Value::String(text) => push_clean(output, text),
         Value::Array(values) => {
             for value in values {
-                collect_nonvolatile_strings(value, output);
+                collect_nonvolatile_strings(value, excluded_keys, output);
             }
         }
         Value::Object(map) => {
             for (key, value) in map {
-                if !is_volatile_identity_key(key) {
-                    collect_nonvolatile_strings(value, output);
+                if !is_volatile_identity_key(key) && !excluded_keys.contains(&key.as_str()) {
+                    collect_nonvolatile_strings(value, excluded_keys, output);
                 }
             }
         }
