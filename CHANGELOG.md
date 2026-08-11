@@ -5,45 +5,25 @@ in `docs/release-notes.md`.
 
 ## Unreleased
 
-- Register nabu history tools inside pi: the installed extension now both
-  live-captures and registers `nabu_search_history`, `nabu_list_sessions`,
-  `nabu_get_session`, `nabu_list_memories`, `nabu_get_memory`, and
-  `nabu_get_event` via `pi.registerTool()`, backed by the nabu CLI
-  (`NABU_BIN`/`NABU_HOME` honored, 30 s timeout, 256 KiB output cap, errors as
-  text). `nabu install pi` is an idempotent upgrade to the latest capture+tools
-  template. New `nabu sessions [--json]` CLI command lists captured sessions
-  with triage metadata; `nabu show --redact` masks secret-looking values.
+## 0.1.6
 
-- Live-capture pi sessions via a pi extension: `nabu install pi` writes
-  `~/.pi/agent/extensions/nabu.ts` (or `$PI_AGENT_DIR/extensions/nabu.ts`),
-  which subscribes to `session_start`, `message_end`, and `session_compact`
-  and shells out to `nabu ingest hook --tool pi` with the same canonical
-  mapping and source event ids as backfill (live + backfill dedupe to zero
-  duplicates). Fail-open capture; `uninstall pi` removes only a nabu-marked
-  file (backed up first) and refuses foreign files; `install pi` is an
-  idempotent upgrade of the marked file. `pi_status`/doctor now check the
-  marker, not mere file presence. Unknown pi hook names ingest as no-ops.
-
-- Backfill pi sessions: `nabu backfill --tool pi` imports every pi session
-  file under `~/.pi/agent/sessions` (or `$PI_AGENT_DIR/sessions`) with full
-  tree fidelity — all entries in file order, branches included, `parentId`/
-  entry `id` preserved on each payload, the full original entry under
-  `payload.pi_entry`. Messages expand per the canonical mapping (toolCall
-  blocks → `tool.call`, `bashExecution` → call/result pair), compactions
-  become one `compaction.after` (retainedTail kept in payload), metadata
-  entries map to `session.resumed`, `custom` entries are skipped, malformed
-  lines become `error` events without failing the file. Source event ids are
-  stable per logical event, so re-backfill after live capture dedupes to zero
-  appends.
-
-- Admit `pi` (`@earendil-works/pi-coding-agent`) as a tool identity across
-  the store, CLI, MCP schemas, and doctor: `Tool::Pi`, `raw/pi/`, `--tool pi`
-  on search/backfill/memory/install surfaces, and `pi` in every SQLite tool
-  CHECK. Existing indexes migrate on first open (schema v3) by rebuilding the
-  tool-constrained tables with row ids preserved and the full schema.sql
-  index set recreated. `install pi` and `uninstall pi` are no-op stubs,
-  `mcp install pi` errors (pi has no MCP client), and backfill/capture for pi
-  land in follow-up releases.
+- Add full pi (`@earendil-works/pi-coding-agent`) support as a fourth harness
+  tool: `Tool::Pi`, `raw/pi/`, `--tool pi` everywhere, and `pi` in every SQLite
+  tool CHECK (schema v3 rebuild on open, row ids preserved).
+- Backfill pi sessions from `~/.pi/agent/sessions` (or `$PI_AGENT_DIR/sessions`)
+  with full tree fidelity — every entry in file order, branches included,
+  stable source event ids so re-backfill is a no-op.
+- Live-capture via `nabu install pi`, which writes
+  `~/.pi/agent/extensions/nabu.ts` (capture on `session_start` /
+  `message_end` / `session_compact`, fail-open Node spawn to
+  `nabu ingest hook --tool pi`). Uninstall removes only nabu-marked files.
+- In-agent history tools on pi via `pi.registerTool()` (no MCP client in pi):
+  `nabu_search_history`, `nabu_list_sessions`, `nabu_get_session`,
+  `nabu_list_memories`, `nabu_get_memory`, `nabu_get_event`, backed by the CLI
+  with a 30 s timeout and 256 KiB cap. `nabu mcp install pi` remains
+  unsupported.
+- New `nabu sessions [--tool] [--limit] [--json]` command; `nabu show --redact`
+  for secret-pattern masking on session pages.
 
 ## 0.1.5
 
