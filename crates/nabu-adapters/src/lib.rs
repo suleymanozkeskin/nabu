@@ -382,15 +382,22 @@ pub fn pi_extension_path() -> Result<PathBuf> {
 
 /// Install the pi capture extension: writes the template to
 /// `~/.pi/agent/extensions/nabu.ts` (or `$PI_AGENT_DIR/extensions/nabu.ts`).
-/// A marked nabu file is backed up and replaced (idempotent upgrade); a
-/// foreign file at the target path is refused, never overwritten.
+///
+/// - Marked nabu files are backed up and replaced (idempotent upgrade).
+/// - Unmarked files that do **not** export a factory (`export default`) are
+///   treated as inert stubs (e.g. leftover test debris): backed up and replaced.
+/// - Unmarked files that look like a real extension are refused.
 pub fn install_pi(home: &Path, dry_run: bool) -> Result<ConfigChangeReport> {
     let extension_path = pi_extension_path()?;
     let after = PI_EXTENSION_TEMPLATE;
     let before = read_text_or_empty(&extension_path)?;
-    if extension_path.is_file() && !pi_file_is_marked(&extension_path) {
+    let replacing_stub = extension_path.is_file()
+        && !pi_file_is_marked(&extension_path)
+        && pi_file_is_replaceable_stub(&before);
+    if extension_path.is_file() && !pi_file_is_marked(&extension_path) && !replacing_stub {
         return Err(Error::Validation(format!(
-            "refusing to overwrite non-nabu extension at {}",
+            "refusing to overwrite non-nabu extension at {}\n\
+             Remove or rename that file, then re-run `nabu install pi`.",
             extension_path.display()
         )));
     }
@@ -413,7 +420,13 @@ pub fn install_pi(home: &Path, dry_run: bool) -> Result<ConfigChangeReport> {
         dry_run,
         summary: if changed {
             if dry_run {
-                "would install the pi capture extension".to_string()
+                if replacing_stub {
+                    "would replace inert stub and install the pi capture extension".to_string()
+                } else {
+                    "would install the pi capture extension".to_string()
+                }
+            } else if replacing_stub {
+                "replaced inert stub and installed the pi capture extension".to_string()
             } else {
                 "installed the pi capture extension".to_string()
             }
@@ -424,15 +437,23 @@ pub fn install_pi(home: &Path, dry_run: bool) -> Result<ConfigChangeReport> {
     })
 }
 
-/// Uninstall the pi capture extension: removes only a nabu-marked file (with
-/// a backup); a foreign file at the target path is refused. The extensions/
-/// directory itself is left in place even when empty.
+/// Uninstall the pi capture extension: removes a nabu-marked file or an inert
+/// stub (no `export default`) after backup; a real foreign extension is refused.
+/// The extensions/ directory itself is left in place even when empty.
 pub fn uninstall_pi(home: &Path, dry_run: bool) -> Result<ConfigChangeReport> {
     let extension_path = pi_extension_path()?;
     let exists = extension_path.is_file();
-    if exists && !pi_file_is_marked(&extension_path) {
+    let content = if exists {
+        read_text_or_empty(&extension_path)?
+    } else {
+        String::new()
+    };
+    let removable =
+        exists && (pi_file_is_marked(&extension_path) || pi_file_is_replaceable_stub(&content));
+    if exists && !removable {
         return Err(Error::Validation(format!(
-            "refusing to remove non-nabu extension at {}",
+            "refusing to remove non-nabu extension at {}\n\
+             Remove or rename that file manually if it is yours.",
             extension_path.display()
         )));
     }
@@ -468,6 +489,16 @@ fn pi_file_is_marked(path: &Path) -> bool {
     read_text_or_empty(path)
         .map(|content| content.contains(PI_EXTENSION_MARKER))
         .unwrap_or(false)
+}
+
+/// True when content is not a usable pi extension factory. Pi requires
+/// `export default` (or `export default function`); comment-only / empty /
+/// garbage files (including leaked test stubs like `// foreign`) are safe to
+/// replace after backup so they do not permanently brick `pi` startup or block
+/// `nabu install pi`.
+fn pi_file_is_replaceable_stub(content: &str) -> bool {
+    let lowered = content.to_ascii_lowercase();
+    !lowered.contains("export default")
 }
 
 /// Create the pi extensions directory with mode 0o755 (pi loads extensions
@@ -1750,6 +1781,27 @@ mod tests {
     }
 
     #[test]
+    fn install_pi_replaces_inert_stub_without_export_default() {
+        let temp = tempdir().unwrap();
+        let pi_agent_dir = temp.path().join("pi-agent");
+        let _env = EnvGuard::set([("PI_AGENT_DIR", pi_agent_dir.as_os_str())]);
+        let home = temp.path().join("home");
+        fs::create_dir_all(home.join("raw").join("pi")).unwrap();
+        let extension_path = pi_extension_path().unwrap();
+        fs::create_dir_all(extension_path.parent().unwrap()).unwrap();
+        // Same shape as the leaked test stub that bricked real ~/.pi installs.
+        fs::write(&extension_path, "// foreign").unwrap();
+
+        let report = install_pi(&home, false).unwrap();
+        assert!(report.changed);
+        assert!(report.summary.contains("replaced inert stub"));
+        let content = fs::read_to_string(&extension_path).unwrap();
+        assert!(content.contains("NABU_PI_EXTENSION"));
+        assert!(content.contains("export default"));
+        drop(_env);
+    }
+
+    #[test]
     fn uninstall_pi_removes_only_marked_files() {
         let temp = tempdir().unwrap();
         let pi_agent_dir = temp.path().join("pi-agent");
@@ -1768,14 +1820,24 @@ mod tests {
         // The extensions/ directory itself stays.
         assert!(pi_extension_path().unwrap().parent().unwrap().is_dir());
 
-        // Foreign file is refused on uninstall.
+        // Real foreign extension (exports a factory) is refused on uninstall.
         let extension_path = pi_extension_path().unwrap();
-        fs::write(&extension_path, "// not nabu").unwrap();
+        fs::write(
+            &extension_path,
+            "// not nabu\nexport default function () {}",
+        )
+        .unwrap();
         let result = uninstall_pi(&home, false);
         assert!(
             matches!(result, Err(Error::Validation(message)) if message.contains("refusing to remove"))
         );
         assert!(extension_path.exists());
+
+        // Inert stub without export default is removable.
+        fs::write(&extension_path, "// foreign").unwrap();
+        let stub = uninstall_pi(&home, false).unwrap();
+        assert!(stub.changed);
+        assert!(!extension_path.exists());
         drop(_env);
     }
 

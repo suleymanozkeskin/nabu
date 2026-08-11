@@ -5,6 +5,11 @@ in `docs/release-notes.md`.
 
 ## Unreleased
 
+- `nabu install pi` replaces inert non-factory stubs at the extension path
+  (e.g. leftover `// foreign` debris) after backup, instead of permanently
+  blocking install and breaking `pi` startup. Real unmarked extensions that
+  export a factory are still refused.
+
 - Raise the SQLite busy timeout and retry `open_index` when the index is locked
   (e.g. a hook-spawned background `index --once` still writing). Wizard backfill
   no longer treats a locked scan as "already up to date".
