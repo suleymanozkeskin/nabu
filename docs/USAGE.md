@@ -446,6 +446,27 @@ Unchanged files dedupe to zero appends. Captures are searchable and readable
 after the next `nabu index --once` (or immediately, since `index --once` runs
 the sync itself).
 
+### `nabu sessions` — list captured sessions
+
+```shell
+nabu sessions [--tool codex|claude|opencode|pi] [--limit N] [--json]
+```
+
+| Flag | Description | Default |
+| --- | --- | --- |
+| `--tool <TOOL>` | Restrict to one tool. | all |
+| `--limit <N>` | Maximum sessions. | `20` |
+| `--json` | Emit structured JSON. | off |
+
+```shell
+nabu sessions
+nabu sessions --tool pi --json
+```
+
+One line per session (tool, session id, event count, timestamps, raw file) in
+human format; `--json` emits the same `SessionSummary` objects the MCP
+`list_sessions` tool returns. Memory pseudo-sessions are excluded.
+
 ### `nabu tail` — read a session's raw JSONL
 
 ```shell
@@ -548,8 +569,22 @@ Extension environment:
 - `NABU_HOME` — override the store (default `~/.nabu`)
 - `PI_AGENT_DIR` — override the pi agent config root (default `~/.pi/agent`)
 
-There is no `nabu mcp install pi`: pi has no MCP client. In-agent history
-lookup arrives via the extension's registered tools in a later release.
+There is no `nabu mcp install pi`: pi has no MCP client. Instead the
+extension registers in-agent history tools via `pi.registerTool()`:
+
+| Tool | What it does |
+| --- | --- |
+| `nabu_search_history` | Citation-first search across all tools (memory hits carry `canonical_type=memory.file`; treat memory as stale context) |
+| `nabu_list_sessions` | Recent sessions with triage metadata |
+| `nabu_get_session` | Page of events from one session (`after_raw_line` pages forward) |
+| `nabu_list_memories` | Captured memory files, newest first |
+| `nabu_get_memory` | One memory file at full content (`redact` masks secrets; claude requires `project`) |
+| `nabu_get_event` | One event by `raw_line` citation from a search hit |
+
+Each tool shells out to the nabu CLI (`NABU_BIN` override, `NABU_HOME` honored),
+returns JSON text with citations, caps output at 256 KiB, and times out after
+30 s — errors come back as text, never thrown into pi. `nabu install pi` is
+idempotent and always writes the latest extension (capture + tools).
 
 ### `nabu purge` — delete history by session, date, or everything
 

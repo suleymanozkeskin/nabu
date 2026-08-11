@@ -1668,15 +1668,59 @@ mod tests {
         assert!(extension_path.is_file());
         let content = fs::read_to_string(&extension_path).unwrap();
         assert!(content.contains("NABU_PI_EXTENSION"));
+        assert!(content.contains("version: 2"));
+        assert!(content.contains("capture+tools"));
         assert!(content.contains("session_start"));
         assert!(content.contains("message_end"));
         assert!(content.contains("session_compact"));
         assert!(content.contains("node:child_process"));
         assert!(!content.contains("Bun.spawn"));
+        for tool in [
+            "nabu_search_history",
+            "nabu_list_sessions",
+            "nabu_get_session",
+            "nabu_list_memories",
+            "nabu_get_memory",
+            "nabu_get_event",
+        ] {
+            assert!(content.contains(tool), "missing {tool}");
+        }
 
         // Idempotent re-install.
         let second = install_pi(&home, false).unwrap();
         assert!(!second.changed);
+        drop(_env);
+    }
+
+    #[test]
+    fn install_pi_upgrades_v1_marked_file_to_v2() {
+        let temp = tempdir().unwrap();
+        let pi_agent_dir = temp.path().join("pi-agent");
+        let _env = EnvGuard::set([("PI_AGENT_DIR", pi_agent_dir.as_os_str())]);
+        let home = temp.path().join("home");
+        fs::create_dir_all(home.join("raw").join("pi")).unwrap();
+
+        // A v1-style marked file (capture only) gets backed up and replaced.
+        let extension_path = pi_extension_path().unwrap();
+        fs::create_dir_all(extension_path.parent().unwrap()).unwrap();
+        let v1 = "/**\n * nabu-pi-extension\n * marker: NABU_PI_EXTENSION\n * version: 1\n * role: capture\n */\nexport default () => {};";
+        fs::write(&extension_path, v1).unwrap();
+
+        let report = install_pi(&home, false).unwrap();
+        assert!(report.changed);
+        let content = fs::read_to_string(&extension_path).unwrap();
+        assert!(content.contains("version: 2"));
+        assert!(content.contains("nabu_search_history"));
+        // The old file was backed up next to it (manifest in home/backups).
+        let backups: Vec<_> = fs::read_dir(extension_path.parent().unwrap())
+            .unwrap()
+            .filter_map(std::result::Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.contains("nabu.ts.nabu-backup"))
+            .collect();
+        assert_eq!(backups.len(), 1, "expected one backup, got {backups:?}");
+        let manifest = fs::read_to_string(home.join("backups").join("manifest.jsonl")).unwrap();
+        assert!(manifest.contains("\"tool\":\"pi\""));
         drop(_env);
     }
 

@@ -9,7 +9,7 @@
 ![MSRV](https://img.shields.io/badge/MSRV-1.88-blue.svg)
 
 **The scribe for your coding agents.** Durable, local, cross-tool history of
-everything Codex, Claude Code, and OpenCode do — searchable long after the
+everything Codex, Claude Code, OpenCode, and pi do — searchable long after the
 context window, the process, or the tool is gone.
 
 *Nabû* is the Babylonian god of scribes and writing, written **𒀭𒀝 (dAG)** in
@@ -30,8 +30,8 @@ result.
 - **Full fidelity of what each tool exposes.** Raw JSONL is the source of truth;
   the index is derived and rebuildable. nabu preserves upstream payloads before
   best-effort normalization.
-- **Cross-agent.** One normalized event model over Codex, Claude Code, and
-  OpenCode.
+- **Cross-agent.** One normalized event model over Codex, Claude Code, OpenCode,
+  and pi.
 - **Agent-first.** A read-only MCP server (`search_history`, `get_session`, …) so a
   new session can recover what an old one learned.
 

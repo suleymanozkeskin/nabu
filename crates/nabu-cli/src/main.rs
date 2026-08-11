@@ -32,14 +32,14 @@ use nabu_core::{
     embedding_model_disclosure, embedding_model_status, export_session_jsonl_with_options,
     export_session_markdown_with_options, get_memory, index_once_single_flight,
     index_once_with_options_and_progress, ingest_file, ingest_hook_events, init_home,
-    list_memories, malformed_native_payload, prune_embedding_cache, purge_all, purge_before,
-    purge_session, redact_export_text, resolve_home, search_history_page, sync_memory, Error,
-    IndexOptions, PurgeAllOptions, SearchMode, SearchOptions, SessionOptions, SingleFlightOutcome,
-    Source, Tool,
+    list_memories, list_sessions, malformed_native_payload, prune_embedding_cache, purge_all,
+    purge_before, purge_session, redact_export_text, resolve_home, search_history_page,
+    sync_memory, Error, IndexOptions, PurgeAllOptions, SearchMode, SearchOptions, SessionOptions,
+    SingleFlightOutcome, Source, Tool,
 };
 #[cfg(test)]
 use nabu_core::{index_once, ingest_hook_event};
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::fs::File;
 use std::io::{BufRead, BufReader, IsTerminal, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -178,8 +178,18 @@ enum Command {
         include_deltas: bool,
         #[arg(long)]
         corroborate: bool,
+        #[arg(long)]
+        redact: bool,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         format: OutputFormat,
+    },
+    Sessions {
+        #[arg(long, value_enum)]
+        tool: Option<Tool>,
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+        #[arg(long)]
+        json: bool,
     },
     Memory {
         #[command(subcommand)]
@@ -241,6 +251,7 @@ impl Command {
             Command::Search { format, .. } | Command::Show { format, .. } => {
                 *format == OutputFormat::Json
             }
+            Command::Sessions { json, .. } => *json,
             Command::Memory { command } => match command {
                 MemoryCommand::List { json, .. } => *json,
                 MemoryCommand::Show { format, .. } => *format == OutputFormat::Json,
@@ -888,6 +899,7 @@ fn run(cli: Cli) -> nabu_core::Result<()> {
             canonical_type,
             include_deltas,
             corroborate,
+            redact,
             format,
         } => {
             let page = nabu_core::get_session_page(
@@ -902,11 +914,36 @@ fn run(cli: Cli) -> nabu_core::Result<()> {
                     after,
                     include_deltas,
                     canonical_type,
-                    redact: false,
+                    redact,
                     corroborate,
                 },
             )?;
             print_session_page(page, format)?;
+        }
+        Command::Sessions { tool, limit, json } => {
+            let sessions = list_sessions(&home, tool, None, None, limit)?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&json!({ "sessions": sessions }))?
+                );
+            } else if sessions.is_empty() {
+                println!("no captured sessions");
+            } else {
+                for session in sessions {
+                    let started = session.started_at.as_deref().unwrap_or("unknown");
+                    let updated = session.updated_at.as_deref().unwrap_or("unknown");
+                    println!(
+                        "{}:{}  events={}  started={}  updated={}  raw={}",
+                        session.tool,
+                        session.session_id,
+                        session.event_count,
+                        started,
+                        updated,
+                        session.raw_file
+                    );
+                }
+            }
         }
         Command::Tail {
             tool,
