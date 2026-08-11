@@ -5,6 +5,16 @@ in `docs/release-notes.md`.
 
 ## Unreleased
 
+- Live-capture pi sessions via a pi extension: `nabu install pi` writes
+  `~/.pi/agent/extensions/nabu.ts` (or `$PI_AGENT_DIR/extensions/nabu.ts`),
+  which subscribes to `session_start`, `message_end`, and `session_compact`
+  and shells out to `nabu ingest hook --tool pi` with the same canonical
+  mapping and source event ids as backfill (live + backfill dedupe to zero
+  duplicates). Fail-open capture; `uninstall pi` removes only a nabu-marked
+  file (backed up first) and refuses foreign files; `install pi` is an
+  idempotent upgrade of the marked file. `pi_status`/doctor now check the
+  marker, not mere file presence. Unknown pi hook names ingest as no-ops.
+
 - Backfill pi sessions: `nabu backfill --tool pi` imports every pi session
   file under `~/.pi/agent/sessions` (or `$PI_AGENT_DIR/sessions`) with full
   tree fidelity — all entries in file order, branches included, `parentId`/

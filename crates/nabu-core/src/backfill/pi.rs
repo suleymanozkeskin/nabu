@@ -8,10 +8,13 @@
 //! event ids are stable per logical event so re-backfill after live capture
 //! dedupes to zero appends (see the README mapping table in plans/).
 
+use crate::pi_map::{
+    compaction_envelope, expand_pi_message, json_map, pi_payload, session_start_envelope,
+};
 use crate::{
     sanitize_session_id, CanonicalType, Error, EventEnvelope, Result, Source, Tool, SCHEMA_VERSION,
 };
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value};
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
@@ -129,42 +132,16 @@ pub(crate) fn parse_pi_session_jsonl(source_path: &Path) -> Result<ParsedBackfil
                 };
                 session_id = Some(id.to_string());
                 cwd = entry.get("cwd").and_then(Value::as_str).map(str::to_string);
-                events.push(EventEnvelope {
-                    schema_version: SCHEMA_VERSION,
-                    captured_at: entry_timestamp(&entry),
-                    tool: Tool::Pi,
-                    tool_version: None,
-                    session_id: id.to_string(),
-                    filename_session_id: sanitize_session_id(id),
-                    turn_id: None,
-                    message_id: None,
-                    project_root: cwd.clone(),
-                    cwd: cwd.clone(),
-                    source: Source::Backfill,
-                    source_event_type: "session".to_string(),
-                    canonical_type: CanonicalType::SessionStarted,
-                    source_event_id: Some(format!("session-header:{id}")),
-                    dedupe_key: String::new(),
-                    sequence: None,
-                    raw_file: None,
-                    raw_offset: None,
-                    payload: pi_payload(
-                        &entry,
-                        "session",
-                        json_map(&[
-                            ("cwd", entry.get("cwd").cloned().unwrap_or(Value::Null)),
-                            (
-                                "session_version",
-                                entry.get("version").cloned().unwrap_or(Value::Null),
-                            ),
-                            (
-                                "parent_session",
-                                entry.get("parentSession").cloned().unwrap_or(Value::Null),
-                            ),
-                        ]),
-                    ),
-                    payload_ref: None,
-                });
+                events.push(session_start_envelope(
+                    id,
+                    cwd.as_deref(),
+                    cwd.as_deref(),
+                    entry.get("version"),
+                    entry.get("parentSession"),
+                    &entry,
+                    Source::Backfill,
+                    entry_timestamp(&entry),
+                ));
             }
             "" => {
                 events.push(error_envelope(
@@ -184,37 +161,40 @@ pub(crate) fn parse_pi_session_jsonl(source_path: &Path) -> Result<ParsedBackfil
                     ));
                     continue;
                 };
-                events.extend(expand_message(&session_id, &cwd, &entry));
+                let entry_id = entry_id(&entry);
+                events.extend(expand_pi_message(
+                    &session_id,
+                    cwd.as_deref(),
+                    cwd.as_deref(),
+                    &entry,
+                    entry.get("message").unwrap_or(&Value::Object(Map::new())),
+                    entry_id.as_deref(),
+                    entry.get("parentId").and_then(Value::as_str),
+                    Source::Backfill,
+                    entry_timestamp(&entry),
+                ));
             }
             "compaction" => {
-                events.push(single_event_envelope(
+                let Some(session_id) = session_id.clone() else {
+                    events.push(error_envelope(
+                        source_path,
+                        &None,
+                        entry_id(&entry),
+                        json_map(&[("pi_type", Value::String("compaction".to_string()))]),
+                    ));
+                    continue;
+                };
+                events.push(compaction_envelope(
                     &session_id,
-                    &cwd,
+                    cwd.as_deref(),
+                    cwd.as_deref(),
+                    entry_id(&entry).as_deref(),
+                    entry.get("summary"),
+                    entry.get("tokensBefore"),
+                    entry.get("retainedTail"),
                     &entry,
-                    "compaction",
-                    CanonicalType::CompactionAfter,
-                    entry_id(&entry),
-                    json_map(&[
-                        (
-                            "summary",
-                            entry.get("summary").cloned().unwrap_or(Value::Null),
-                        ),
-                        (
-                            "tokens_before",
-                            entry.get("tokensBefore").cloned().unwrap_or(Value::Null),
-                        ),
-                        (
-                            "first_kept_entry_id",
-                            entry
-                                .get("firstKeptEntryId")
-                                .cloned()
-                                .unwrap_or(Value::Null),
-                        ),
-                        (
-                            "retained_tail",
-                            entry.get("retainedTail").cloned().unwrap_or(Value::Null),
-                        ),
-                    ]),
+                    Source::Backfill,
+                    entry_timestamp(&entry),
                 ));
             }
             "branch_summary" => {
@@ -352,7 +332,10 @@ pub(crate) fn parse_pi_session_jsonl(source_path: &Path) -> Result<ParsedBackfil
                             "custom_type",
                             entry.get("customType").cloned().unwrap_or(Value::Null),
                         ),
-                        ("text", content_to_searchable(entry.get("content"))),
+                        (
+                            "text",
+                            crate::pi_map::content_to_searchable(entry.get("content")),
+                        ),
                     ]),
                 ));
             }
@@ -382,288 +365,6 @@ pub(crate) fn parse_pi_session_jsonl(source_path: &Path) -> Result<ParsedBackfil
 /// user → one user.message; assistant → assistant.message plus one tool.call
 /// per toolCall content block; toolResult → tool.result; bashExecution → a
 /// tool.call/tool.result pair.
-fn expand_message(session_id: &str, cwd: &Option<String>, entry: &Value) -> Vec<EventEnvelope> {
-    let Some(message) = entry.get("message") else {
-        return vec![];
-    };
-    let role = message
-        .get("role")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    let entry_id = entry_id(entry);
-    match role {
-        "user" => vec![message_envelope(
-            session_id,
-            cwd,
-            entry,
-            "message.user",
-            CanonicalType::UserMessage,
-            entry_id.as_deref(),
-            json_map(&[("text", content_to_searchable(message.get("content")))]),
-        )],
-        "assistant" => {
-            let text = assistant_searchable_text(message.get("content"));
-            let mut events = vec![message_envelope(
-                session_id,
-                cwd,
-                entry,
-                "message.assistant",
-                CanonicalType::AssistantMessage,
-                entry_id.as_deref(),
-                json_map(&[("text", Value::String(text))]),
-            )];
-            if let Some(blocks) = message.get("content").and_then(Value::as_array) {
-                for block in blocks {
-                    if block.get("type").and_then(Value::as_str) != Some("toolCall") {
-                        continue;
-                    }
-                    let mut extra = Map::new();
-                    extra.insert(
-                        "tool_name".to_string(),
-                        block.get("name").cloned().unwrap_or(Value::Null),
-                    );
-                    extra.insert(
-                        "tool_call_id".to_string(),
-                        block.get("id").cloned().unwrap_or(Value::Null),
-                    );
-                    extra.insert(
-                        "arguments".to_string(),
-                        block.get("arguments").cloned().unwrap_or(Value::Null),
-                    );
-                    if let Some(entry_id) = entry_id.as_deref() {
-                        extra.insert(
-                            "parent_message_entry_id".to_string(),
-                            Value::String(entry_id.to_string()),
-                        );
-                    }
-                    events.push(message_envelope(
-                        session_id,
-                        cwd,
-                        entry,
-                        "message.assistant.toolCall",
-                        CanonicalType::ToolCall,
-                        block
-                            .get("id")
-                            .and_then(Value::as_str)
-                            .or(entry_id.as_deref()),
-                        extra,
-                    ));
-                }
-            }
-            events
-        }
-        "toolResult" => {
-            let tool_call_id = message
-                .get("toolCallId")
-                .and_then(Value::as_str)
-                .map(str::to_string);
-            vec![message_envelope(
-                session_id,
-                cwd,
-                entry,
-                "message.toolResult",
-                CanonicalType::ToolResult,
-                tool_call_id.as_deref().or(entry_id.as_deref()),
-                json_map(&[
-                    (
-                        "tool_name",
-                        message.get("toolName").cloned().unwrap_or(Value::Null),
-                    ),
-                    (
-                        "tool_call_id",
-                        tool_call_id
-                            .as_deref()
-                            .map(str::to_string)
-                            .map(Value::String)
-                            .unwrap_or(Value::Null),
-                    ),
-                    ("output", content_to_searchable(message.get("content"))),
-                    (
-                        "is_error",
-                        message
-                            .get("isError")
-                            .cloned()
-                            .unwrap_or(Value::Bool(false)),
-                    ),
-                    (
-                        "status",
-                        Value::String(
-                            if message
-                                .get("isError")
-                                .and_then(Value::as_bool)
-                                .unwrap_or(false)
-                            {
-                                "error".to_string()
-                            } else {
-                                "success".to_string()
-                            },
-                        ),
-                    ),
-                ]),
-            )]
-        }
-        "bashExecution" => {
-            let mut events = Vec::with_capacity(2);
-            let command = message
-                .get("command")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            let call_source_event_id = entry_id.as_deref().map(|id| format!("bash-call:{id}"));
-            let result_source_event_id = entry_id.as_deref().map(|id| format!("bash-result:{id}"));
-            let exit_code = message.get("exitCode").cloned().unwrap_or(Value::Null);
-            let is_error = message
-                .get("exitCode")
-                .and_then(Value::as_i64)
-                .is_some_and(|code| code != 0);
-            let mut call_extra = Map::new();
-            call_extra.insert("tool_name".to_string(), Value::String("bash".to_string()));
-            call_extra.insert("arguments".to_string(), json!({ "command": command }));
-            call_extra.insert("command".to_string(), Value::String(command.to_string()));
-            events.push(message_envelope(
-                session_id,
-                cwd,
-                entry,
-                "message.bashExecution",
-                CanonicalType::ToolCall,
-                call_source_event_id.as_deref(),
-                call_extra,
-            ));
-            let mut result_extra = Map::new();
-            result_extra.insert("tool_name".to_string(), Value::String("bash".to_string()));
-            result_extra.insert(
-                "output".to_string(),
-                content_to_searchable(message.get("output")),
-            );
-            result_extra.insert("exit_code".to_string(), exit_code);
-            result_extra.insert("is_error".to_string(), Value::Bool(is_error));
-            result_extra.insert(
-                "status".to_string(),
-                Value::String(if is_error {
-                    "error".to_string()
-                } else {
-                    "success".to_string()
-                }),
-            );
-            events.push(message_envelope(
-                session_id,
-                cwd,
-                entry,
-                "message.bashExecution",
-                CanonicalType::ToolResult,
-                result_source_event_id.as_deref(),
-                result_extra,
-            ));
-            events
-        }
-        // A custom role inside a message is treated as user text.
-        "custom" => vec![message_envelope(
-            session_id,
-            cwd,
-            entry,
-            "message.user",
-            CanonicalType::UserMessage,
-            entry_id.as_deref(),
-            json_map(&[("text", content_to_searchable(message.get("content")))]),
-        )],
-        other => vec![error_envelope_from_parts(
-            session_id,
-            cwd,
-            entry,
-            format!("unknown message role: {other}"),
-            entry_id.as_deref(),
-        )],
-    }
-}
-
-/// Searchable text for an assistant message: text + thinking blocks joined,
-/// images replaced by a `[image]` placeholder, toolCall blocks skipped (they
-/// expand to their own events).
-fn assistant_searchable_text(content: Option<&Value>) -> String {
-    let Some(Value::Array(blocks)) = content else {
-        return String::new();
-    };
-    let mut parts = Vec::new();
-    for block in blocks {
-        match block.get("type").and_then(Value::as_str) {
-            Some("text") => {
-                if let Some(text) = block.get("text").and_then(Value::as_str) {
-                    parts.push(text.to_string());
-                }
-            }
-            Some("thinking") => {
-                if let Some(text) = block.get("thinking").and_then(Value::as_str) {
-                    parts.push(text.to_string());
-                }
-            }
-            Some("image") => parts.push("[image]".to_string()),
-            _ => {}
-        }
-    }
-    join_parts(parts)
-}
-
-/// Join non-empty strings with newlines.
-fn join_parts(parts: Vec<String>) -> String {
-    let mut seen = std::collections::BTreeSet::new();
-    let mut output = Vec::new();
-    for part in parts {
-        let part = part.trim();
-        if !part.is_empty() && seen.insert(part.to_string()) {
-            output.push(part.to_string());
-        }
-    }
-    output.join("\n")
-}
-
-/// Render a content field to searchable text: strings pass through; block
-/// arrays render text/thinking, replace images with `[image]`, and skip
-/// toolCall blocks.
-fn content_to_searchable(content: Option<&Value>) -> Value {
-    match content {
-        Some(Value::String(text)) => Value::String(text.trim().to_string()),
-        Some(Value::Array(blocks)) => {
-            let mut parts = Vec::new();
-            for block in blocks {
-                match block.get("type").and_then(Value::as_str) {
-                    Some("text") => {
-                        if let Some(text) = block.get("text").and_then(Value::as_str) {
-                            parts.push(text.to_string());
-                        }
-                    }
-                    Some("thinking") => {
-                        if let Some(text) = block.get("thinking").and_then(Value::as_str) {
-                            parts.push(text.to_string());
-                        }
-                    }
-                    Some("image") => parts.push("[image]".to_string()),
-                    _ => {}
-                }
-            }
-            Value::String(join_parts(parts))
-        }
-        _ => Value::String(String::new()),
-    }
-}
-
-/// Build the locked payload shape: `entry_id`/`parent_id`/`pi_type` plus
-/// type-specific flattened fields plus the full original entry under
-/// `pi_entry`.
-fn pi_payload(entry: &Value, pi_type: &str, mut flattened: Map<String, Value>) -> Value {
-    flattened.insert(
-        "entry_id".to_string(),
-        entry_id(entry).map(Value::String).unwrap_or(Value::Null),
-    );
-    flattened.insert(
-        "parent_id".to_string(),
-        entry.get("parentId").cloned().unwrap_or(Value::Null),
-    );
-    flattened.insert("pi_type".to_string(), Value::String(pi_type.to_string()));
-    flattened.insert("pi_entry".to_string(), entry.clone());
-    Value::Object(flattened)
-}
-
-/// Envelope for entries that produce exactly one event (compaction, resumed
-/// metadata, custom_message).
 fn single_event_envelope(
     session_id: &Option<String>,
     cwd: &Option<String>,
@@ -674,55 +375,34 @@ fn single_event_envelope(
     flattened: Map<String, Value>,
 ) -> EventEnvelope {
     let session_id = session_id.clone().unwrap_or_else(|| "missing".to_string());
-    message_envelope(
-        &session_id,
-        cwd,
-        entry,
-        pi_type,
-        canonical_type,
-        source_event_id.as_deref(),
-        flattened,
-    )
-}
-
-/// One envelope for a message-family event.
-fn message_envelope(
-    session_id: &str,
-    cwd: &Option<String>,
-    entry: &Value,
-    source_event_type: &str,
-    canonical_type: CanonicalType,
-    source_event_id: Option<&str>,
-    flattened: Map<String, Value>,
-) -> EventEnvelope {
+    let entry_id = entry_id(entry);
+    let parent_id = entry.get("parentId").and_then(Value::as_str);
     EventEnvelope {
         schema_version: SCHEMA_VERSION,
         captured_at: entry_timestamp(entry),
         tool: Tool::Pi,
         tool_version: None,
-        session_id: session_id.to_string(),
-        filename_session_id: sanitize_session_id(session_id),
+        session_id: session_id.clone(),
+        filename_session_id: sanitize_session_id(&session_id),
         turn_id: None,
-        message_id: entry_id(entry),
+        message_id: None,
         project_root: cwd.clone(),
         cwd: cwd.clone(),
         source: Source::Backfill,
-        source_event_type: source_event_type.to_string(),
+        source_event_type: pi_type.to_string(),
         canonical_type,
-        source_event_id: source_event_id.map(str::to_string),
+        source_event_id,
         dedupe_key: String::new(),
         sequence: None,
         raw_file: None,
         raw_offset: None,
         // pi_type is the same discriminator as source_event_type (the locked
-        // mapping table column), so every payload carries its real entry kind:
-        // `message.user`, `compaction`, `model_change`, `custom_message`, ...
-        payload: pi_payload(entry, source_event_type, flattened),
+        // mapping-table column), so every payload carries its real entry kind.
+        payload: pi_payload(entry_id.as_deref(), parent_id, entry, pi_type, flattened),
         payload_ref: None,
     }
 }
 
-/// An `error` envelope for malformed input; never fails the file.
 fn error_envelope(
     source_path: &Path,
     session_id: &Option<String>,
@@ -768,31 +448,6 @@ fn error_envelope(
 }
 
 /// Error envelope built from an entry when no session header exists yet.
-fn error_envelope_from_parts(
-    session_id: &str,
-    cwd: &Option<String>,
-    entry: &Value,
-    message: String,
-    source_event_id: Option<&str>,
-) -> EventEnvelope {
-    let mut flattened = Map::new();
-    flattened.insert("message".to_string(), Value::String(message));
-    flattened.insert(
-        "entry_id".to_string(),
-        entry_id(entry).map(Value::String).unwrap_or(Value::Null),
-    );
-    flattened.insert("pi_type".to_string(), Value::String("message".to_string()));
-    message_envelope(
-        session_id,
-        cwd,
-        entry,
-        "pi.unknown",
-        CanonicalType::Error,
-        source_event_id,
-        flattened,
-    )
-}
-
 fn entry_id(entry: &Value) -> Option<String> {
     entry
         .get("id")
@@ -822,14 +477,6 @@ fn source_path_fallback(source_path: &Path) -> String {
     hasher.update(source_path.display().to_string().as_bytes());
     let hash = hex::encode(hasher.finalize());
     format!("pi-source-{}", &hash[..16])
-}
-
-fn json_map(pairs: &[(&str, Value)]) -> Map<String, Value> {
-    let mut map = Map::new();
-    for (key, value) in pairs {
-        map.insert(key.to_string(), value.clone());
-    }
-    map
 }
 
 #[cfg(test)]

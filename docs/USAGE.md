@@ -521,6 +521,36 @@ nabu install claude
 nabu uninstall codex
 ```
 
+#### pi: live capture extension
+
+`nabu install pi` writes the nabu capture extension to
+`~/.pi/agent/extensions/nabu.ts` (or `$PI_AGENT_DIR/extensions/nabu.ts`).
+While you run pi, the extension shells out to `nabu ingest hook --tool pi` on
+`session_start`, `message_end`, and `session_compact` only, appending the same
+canonical events the backfill imports — with matching source event ids, so a
+later `nabu backfill --tool pi` of the same session appends nothing. It is
+fail-open: any capture error is logged to stderr and never breaks pi.
+
+```shell
+nabu install pi      # write/upgrade the extension file (idempotent)
+nabu uninstall pi    # remove only a nabu-marked extension (backed up first)
+nabu doctor          # pi block shows extension_installed and the path
+```
+
+Re-run `nabu install pi` to upgrade the extension (each install writes the
+latest template). `uninstall` refuses a foreign file at the target path;
+`install` refuses to overwrite one. The extension runs with full user
+permissions (pi security model). Restart pi / start a new session to load it.
+
+Extension environment:
+
+- `NABU_BIN` — override the `nabu` binary path (default `nabu`)
+- `NABU_HOME` — override the store (default `~/.nabu`)
+- `PI_AGENT_DIR` — override the pi agent config root (default `~/.pi/agent`)
+
+There is no `nabu mcp install pi`: pi has no MCP client. In-agent history
+lookup arrives via the extension's registered tools in a later release.
+
 ### `nabu purge` — delete history by session, date, or everything
 
 ```shell

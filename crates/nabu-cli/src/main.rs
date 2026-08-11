@@ -27,17 +27,18 @@ use nabu_adapters::{
     install_claude, install_codex, install_opencode, install_pi, uninstall_claude, uninstall_codex,
     uninstall_opencode, uninstall_pi, ConfigChangeReport,
 };
-#[cfg(test)]
-use nabu_core::index_once;
 use nabu_core::{
     canonical_raw_path, doctor_with_options, download_embedding_model_with_progress,
     embedding_model_disclosure, embedding_model_status, export_session_jsonl_with_options,
     export_session_markdown_with_options, get_memory, index_once_single_flight,
-    index_once_with_options_and_progress, ingest_file, ingest_hook_event, init_home, list_memories,
-    malformed_native_payload, prune_embedding_cache, purge_all, purge_before, purge_session,
-    redact_export_text, resolve_home, search_history_page, sync_memory, Error, IndexOptions,
-    PurgeAllOptions, SearchMode, SearchOptions, SessionOptions, SingleFlightOutcome, Source, Tool,
+    index_once_with_options_and_progress, ingest_file, ingest_hook_events, init_home,
+    list_memories, malformed_native_payload, prune_embedding_cache, purge_all, purge_before,
+    purge_session, redact_export_text, resolve_home, search_history_page, sync_memory, Error,
+    IndexOptions, PurgeAllOptions, SearchMode, SearchOptions, SessionOptions, SingleFlightOutcome,
+    Source, Tool,
 };
+#[cfg(test)]
+use nabu_core::{index_once, ingest_hook_event};
 use serde_json::Value;
 use std::fs::File;
 use std::io::{BufRead, BufReader, IsTerminal, Read, Seek, SeekFrom, Write};
@@ -599,9 +600,13 @@ fn run(cli: Cli) -> nabu_core::Result<()> {
                     source,
                 })?;
             let payload = hook_stdin_payload(&input);
-            match ingest_hook_event(&home, tool, payload) {
-                Ok(report) => {
-                    if report.appended {
+            match ingest_hook_events(&home, tool, payload) {
+                Ok(reports) if reports.is_empty() => {
+                    println!("no events");
+                }
+                Ok(reports) => {
+                    let appended = reports.iter().filter(|report| report.appended).count();
+                    if appended > 0 {
                         // Capture must stay non-blocking: trigger an incremental
                         // index of the just-appended delta in a detached child
                         // and return immediately. Indexing latency never lands on
@@ -609,17 +614,24 @@ fn run(cli: Cli) -> nabu_core::Result<()> {
                         // child collapses concurrent per-event triggers into one
                         // in-flight pass.
                         spawn_background_index(&home);
-                        println!(
-                            "appended {} at offset {}",
-                            report.raw_file.display(),
-                            report.raw_offset
-                        );
+                    }
+                    if reports.len() == 1 {
+                        let report = &reports[0];
+                        if report.appended {
+                            println!(
+                                "appended {} at offset {}",
+                                report.raw_file.display(),
+                                report.raw_offset
+                            );
+                        } else {
+                            println!(
+                                "skipped duplicate {} at offset {}",
+                                report.raw_file.display(),
+                                report.raw_offset
+                            );
+                        }
                     } else {
-                        println!(
-                            "skipped duplicate {} at offset {}",
-                            report.raw_file.display(),
-                            report.raw_offset
-                        );
+                        println!("appended {} events ({appended} new)", reports.len());
                     }
                 }
                 Err(error @ Error::Io { .. }) => {

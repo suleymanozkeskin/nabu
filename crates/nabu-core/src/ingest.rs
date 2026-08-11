@@ -3,12 +3,12 @@
 
 use crate::{
     append_prepared_events, canonical_raw_path, canonical_type_for_payload, chmod,
-    create_config_if_missing, create_dir_0700, dedupe_key, harness_home_for_raw_file,
-    hook_event_name, i64_pointer, initialize_database, lock_path_for_raw_file,
-    message_id_for_payload, opencode_hook_session_id, opencode_server_events_from_payload,
-    parse_ingest_file_source, required_string, sanitize_session_id, string_pointer, AppendReport,
-    DedupeParts, Error, EventEnvelope, FileIngestReport, InitReport, Result, Source, Tool,
-    MAX_INLINE_ENVELOPE_BYTES, SCHEMA_VERSION,
+    create_config_if_missing, create_dir_0700, dedupe_key, expand_pi_hook_payload,
+    harness_home_for_raw_file, hook_event_name, i64_pointer, initialize_database,
+    lock_path_for_raw_file, message_id_for_payload, opencode_hook_session_id,
+    opencode_server_events_from_payload, parse_ingest_file_source, required_string,
+    sanitize_session_id, string_pointer, AppendReport, DedupeParts, Error, EventEnvelope,
+    FileIngestReport, InitReport, Result, Source, Tool, MAX_INLINE_ENVELOPE_BYTES, SCHEMA_VERSION,
 };
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
@@ -57,6 +57,27 @@ pub fn init_home(home: &Path) -> Result<InitReport> {
 }
 
 pub fn ingest_hook_event(home: &Path, tool: Tool, payload: Value) -> Result<AppendReport> {
+    let reports = ingest_hook_events(home, tool, payload)?;
+    reports.into_iter().last().ok_or_else(|| {
+        Error::Validation("ingest produced no events (unknown hook payload)".to_string())
+    })
+}
+
+/// Ingest one live hook payload, appending one or more envelopes. Pi
+/// `message_end` expands into several events (assistant.message plus one
+/// tool.call per toolCall block, bashExecution into a call/result pair), so
+/// the pi path returns a report per appended envelope; other tools keep the
+/// single-envelope behavior. Unknown pi hook names append nothing and return
+/// an empty vec (fail-open ingest).
+pub fn ingest_hook_events(home: &Path, tool: Tool, payload: Value) -> Result<Vec<AppendReport>> {
+    if tool == Tool::Pi {
+        let envelopes = expand_pi_hook_payload(&payload)?;
+        if envelopes.is_empty() {
+            return Ok(Vec::new());
+        }
+        return append_prepared_events(home, envelopes);
+    }
+
     let source_event_type = hook_event_name(&payload)?.to_string();
     // OpenCode plugin events do not carry a top-level `session_id`; resolve from
     // the tool's own event shapes. Claude/Codex hooks emit `session_id` directly.
@@ -140,7 +161,7 @@ pub fn ingest_hook_event(home: &Path, tool: Tool, payload: Value) -> Result<Appe
     });
 
     match (append_result, unlock_result) {
-        (Ok(report), Ok(())) => Ok(report),
+        (Ok(report), Ok(())) => Ok(vec![report]),
         (Err(error), _) => Err(error),
         (Ok(_), Err(error)) => Err(error),
     }
