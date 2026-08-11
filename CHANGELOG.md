@@ -5,6 +5,18 @@ in `docs/release-notes.md`.
 
 ## Unreleased
 
+- Backfill pi sessions: `nabu backfill --tool pi` imports every pi session
+  file under `~/.pi/agent/sessions` (or `$PI_AGENT_DIR/sessions`) with full
+  tree fidelity — all entries in file order, branches included, `parentId`/
+  entry `id` preserved on each payload, the full original entry under
+  `payload.pi_entry`. Messages expand per the canonical mapping (toolCall
+  blocks → `tool.call`, `bashExecution` → call/result pair), compactions
+  become one `compaction.after` (retainedTail kept in payload), metadata
+  entries map to `session.resumed`, `custom` entries are skipped, malformed
+  lines become `error` events without failing the file. Source event ids are
+  stable per logical event, so re-backfill after live capture dedupes to zero
+  appends.
+
 - Admit `pi` (`@earendil-works/pi-coding-agent`) as a tool identity across
   the store, CLI, MCP schemas, and doctor: `Tool::Pi`, `raw/pi/`, `--tool pi`
   on search/backfill/memory/install surfaces, and `pi` in every SQLite tool

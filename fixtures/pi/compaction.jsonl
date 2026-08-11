@@ -1,0 +1,3 @@
+{"type":"session","version":3,"id":"019ff094-342e-7f5c-a607-fd1a4bc04d32","timestamp":"2026-07-01T10:00:00.000Z","cwd":"/tmp/nabu-pi-fixture"}
+{"type":"message","id":"a1b2c3d4","parentId":null,"timestamp":"2026-07-01T10:00:01.000Z","message":{"role":"user","content":"long conversation","timestamp":1782900001000}}
+{"type":"compaction","id":"f6g7h8i9","parentId":"a1b2c3d4","timestamp":"2026-07-01T10:10:00.000Z","summary":"User discussed X, Y, Z","tokensBefore":50000,"retainedTail":[{"role":"user","content":"latest request"}]}

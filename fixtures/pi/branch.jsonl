@@ -1,0 +1,6 @@
+{"type":"session","version":3,"id":"019ff094-342e-7f5c-a607-fd1a4bc04d32","timestamp":"2026-07-01T10:00:00.000Z","cwd":"/tmp/nabu-pi-fixture"}
+{"type":"message","id":"a1b2c3d4","parentId":null,"timestamp":"2026-07-01T10:00:01.000Z","message":{"role":"user","content":"root prompt","timestamp":1782900001000}}
+{"type":"message","id":"b2c3d4e5","parentId":"a1b2c3d4","timestamp":"2026-07-01T10:00:02.000Z","message":{"role":"assistant","content":[{"type":"text","text":"options:"}],"provider":"xai","model":"grok-4.5","stopReason":"stop","timestamp":1782900002000}}
+{"type":"message","id":"c3d4e5f6","parentId":"b2c3d4e5","timestamp":"2026-07-01T10:00:03.000Z","message":{"role":"user","content":"approach A","timestamp":1782900003000}}
+{"type":"message","id":"f6g7h8i9","parentId":"b2c3d4e5","timestamp":"2026-07-01T10:00:04.000Z","message":{"role":"user","content":"approach B","timestamp":1782900004000}}
+{"type":"branch_summary","id":"g7h8i9j0","parentId":"a1b2c3d4","timestamp":"2026-07-01T10:05:00.000Z","fromId":"c3d4e5f6","summary":"Branch explored approach A"}
