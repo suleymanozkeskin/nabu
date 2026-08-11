@@ -12,6 +12,8 @@ pub enum Tool {
     Codex,
     Claude,
     Opencode,
+    /// The pi coding agent (`@earendil-works/pi-coding-agent`).
+    Pi,
 }
 
 impl Tool {
@@ -20,11 +22,12 @@ impl Tool {
             Tool::Codex => "codex",
             Tool::Claude => "claude",
             Tool::Opencode => "opencode",
+            Tool::Pi => "pi",
         }
     }
 
-    pub const fn all() -> [Tool; 3] {
-        [Tool::Codex, Tool::Claude, Tool::Opencode]
+    pub const fn all() -> [Tool; 4] {
+        [Tool::Codex, Tool::Claude, Tool::Opencode, Tool::Pi]
     }
 }
 
@@ -42,6 +45,7 @@ impl FromStr for Tool {
             "codex" => Ok(Tool::Codex),
             "claude" => Ok(Tool::Claude),
             "opencode" => Ok(Tool::Opencode),
+            "pi" => Ok(Tool::Pi),
             _ => Err(Error::Validation(format!("unsupported tool: {value}"))),
         }
     }

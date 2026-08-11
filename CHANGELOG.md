@@ -5,6 +5,15 @@ in `docs/release-notes.md`.
 
 ## Unreleased
 
+- Admit `pi` (`@earendil-works/pi-coding-agent`) as a tool identity across
+  the store, CLI, MCP schemas, and doctor: `Tool::Pi`, `raw/pi/`, `--tool pi`
+  on search/backfill/memory/install surfaces, and `pi` in every SQLite tool
+  CHECK. Existing indexes migrate on first open (schema v3) by rebuilding the
+  tool-constrained tables with row ids preserved and the full schema.sql
+  index set recreated. `install pi` and `uninstall pi` are no-op stubs,
+  `mcp install pi` errors (pi has no MCP client), and backfill/capture for pi
+  land in follow-up releases.
+
 ## 0.1.5
 
 - Serve each tool's own memory folders as first-class, searchable history.

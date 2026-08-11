@@ -10,7 +10,7 @@ use crate::mcp_config::{
     claude_mcp_entry_installed, codex_mcp_entry_installed, opencode_mcp_entry_installed,
 };
 use crate::{DoctorTool, OutputFormat};
-use nabu_adapters::{claude_status, codex_status, opencode_status, ConfigChangeReport};
+use nabu_adapters::{claude_status, codex_status, opencode_status, pi_status, ConfigChangeReport};
 use nabu_core::{
     doctor_with_options, index_freshness, latest_event, Corroboration, Error, IndexFreshness,
     PurgeAction, PurgeAllReport, PurgeTier, SearchPage, SessionPage, SummaryKind, Tool,
@@ -67,6 +67,18 @@ pub(crate) fn doctor_json_data(
             "opencode_installed": opencode.opencode_installed,
             "storage_writable": opencode.storage_writable,
             "latest_captured_event": latest_event(home, Tool::Opencode)?
+        });
+    }
+    if matches!(tool, DoctorTool::Pi | DoctorTool::All) {
+        let pi = pi_status(home)?;
+        value["tools"]["pi"] = json!({
+            "status": tool_status_label(pi.pi_installed, pi.extension_installed),
+            "extension_path": pi.extension_path,
+            "extension_installed": pi.extension_installed,
+            "mcp_entry_installed": false,
+            "pi_installed": pi.pi_installed,
+            "storage_writable": pi.storage_writable,
+            "latest_captured_event": latest_event(home, Tool::Pi)?
         });
     }
     Ok(value)
@@ -297,6 +309,14 @@ pub(crate) fn print_tool_doctor_human(home: &Path, tool: DoctorTool) -> nabu_cor
             println!("opencode.server_url={server_url}");
         }
         print_freshness_human(&freshness, "opencode");
+    }
+    if matches!(tool, DoctorTool::Pi | DoctorTool::All) {
+        let status = pi_status(home)?;
+        println!("pi.installed={}", status.pi_installed);
+        println!("pi.extension_installed={}", status.extension_installed);
+        println!("pi.storage_writable={}", status.storage_writable);
+        println!("pi.extension_path={}", status.extension_path.display());
+        print_freshness_human(&freshness, "pi");
     }
     Ok(())
 }

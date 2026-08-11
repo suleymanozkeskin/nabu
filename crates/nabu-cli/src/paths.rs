@@ -45,6 +45,9 @@ impl ToolLayout for Tool {
                 .join(".local")
                 .join("share")
                 .join("opencode")]),
+            // Pi session transcripts live under ~/.pi/agent/sessions; pi has
+            // no MCP config (no MCP client), so mcp_config_path errors.
+            Tool::Pi => pi_transcript_roots(),
         }
     }
 
@@ -68,6 +71,10 @@ impl ToolLayout for Tool {
                         .join("opencode.json"))
                 }
             }
+            // pi has no MCP client; there is no config to write.
+            Tool::Pi => Err(Error::Validation(
+                "pi has no MCP client; use the nabu pi extension (agent tools) instead".to_string(),
+            )),
         }
     }
 }
@@ -85,6 +92,21 @@ fn codex_home_dir() -> nabu_core::Result<PathBuf> {
         return Ok(PathBuf::from(codex_home));
     }
     Ok(home_dir()?.join(".codex"))
+}
+
+/// Pi's agent root: `$PI_AGENT_DIR` (the dir containing `sessions/`), else
+/// `~/.pi/agent`.
+fn pi_agent_dir() -> nabu_core::Result<PathBuf> {
+    if let Some(agent_dir) = std::env::var_os("PI_AGENT_DIR") {
+        return Ok(PathBuf::from(agent_dir));
+    }
+    Ok(home_dir()?.join(".pi").join("agent"))
+}
+
+/// Pi session transcripts: `$PI_AGENT_DIR/sessions`, else
+/// `~/.pi/agent/sessions`.
+fn pi_transcript_roots() -> nabu_core::Result<Vec<PathBuf>> {
+    Ok(vec![pi_agent_dir()?.join("sessions")])
 }
 
 #[cfg(test)]

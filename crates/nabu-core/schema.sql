@@ -10,7 +10,7 @@ CREATE TABLE IF NOT EXISTS metadata (
 );
 
 CREATE TABLE IF NOT EXISTS sessions (
-  tool TEXT NOT NULL CHECK (tool IN ('codex', 'claude', 'opencode')),
+  tool TEXT NOT NULL CHECK (tool IN ('codex', 'claude', 'opencode', 'pi')),
   session_id TEXT NOT NULL,
   filename_session_id TEXT NOT NULL,
   project_root TEXT,
@@ -27,7 +27,7 @@ CREATE TABLE IF NOT EXISTS sessions (
 
 CREATE TABLE IF NOT EXISTS events (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  tool TEXT NOT NULL CHECK (tool IN ('codex', 'claude', 'opencode')),
+  tool TEXT NOT NULL CHECK (tool IN ('codex', 'claude', 'opencode', 'pi')),
   session_id TEXT NOT NULL,
   dedupe_key TEXT NOT NULL UNIQUE,
   schema_version INTEGER NOT NULL,
@@ -94,7 +94,7 @@ CREATE TABLE IF NOT EXISTS events (
 CREATE TABLE IF NOT EXISTS messages (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   event_id INTEGER NOT NULL UNIQUE,
-  tool TEXT NOT NULL CHECK (tool IN ('codex', 'claude', 'opencode')),
+  tool TEXT NOT NULL CHECK (tool IN ('codex', 'claude', 'opencode', 'pi')),
   session_id TEXT NOT NULL,
   role TEXT NOT NULL CHECK (role IN ('user', 'assistant', 'system', 'tool')),
   text TEXT NOT NULL,
@@ -106,7 +106,7 @@ CREATE TABLE IF NOT EXISTS messages (
 CREATE TABLE IF NOT EXISTS tool_events (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   event_id INTEGER NOT NULL UNIQUE,
-  tool TEXT NOT NULL CHECK (tool IN ('codex', 'claude', 'opencode')),
+  tool TEXT NOT NULL CHECK (tool IN ('codex', 'claude', 'opencode', 'pi')),
   session_id TEXT NOT NULL,
   tool_name TEXT,
   command TEXT,
@@ -142,7 +142,7 @@ CREATE TABLE IF NOT EXISTS event_refs (
 CREATE TABLE IF NOT EXISTS compactions (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   event_id INTEGER NOT NULL UNIQUE,
-  tool TEXT NOT NULL CHECK (tool IN ('codex', 'claude', 'opencode')),
+  tool TEXT NOT NULL CHECK (tool IN ('codex', 'claude', 'opencode', 'pi')),
   session_id TEXT NOT NULL,
   trigger TEXT,
   raw_file TEXT NOT NULL,
@@ -159,7 +159,7 @@ CREATE TABLE IF NOT EXISTS compactions (
 CREATE TABLE IF NOT EXISTS memories (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   event_id INTEGER NOT NULL UNIQUE,
-  tool TEXT NOT NULL CHECK (tool IN ('codex', 'claude', 'opencode')),
+  tool TEXT NOT NULL CHECK (tool IN ('codex', 'claude', 'opencode', 'pi')),
   session_id TEXT NOT NULL,
   project TEXT,
   name TEXT NOT NULL,
@@ -176,7 +176,7 @@ CREATE INDEX IF NOT EXISTS idx_memories_native_path ON memories(native_path);
 
 CREATE TABLE IF NOT EXISTS checkpoints (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  source_tool TEXT NOT NULL CHECK (source_tool IN ('codex', 'claude', 'opencode')),
+  source_tool TEXT NOT NULL CHECK (source_tool IN ('codex', 'claude', 'opencode', 'pi')),
   source_kind TEXT NOT NULL CHECK (source_kind IN ('transcript', 'event_stream', 'api_export', 'raw_jsonl')),
   source_path TEXT NOT NULL,
   source_identity TEXT,
@@ -221,7 +221,7 @@ CREATE INDEX IF NOT EXISTS idx_event_refs_kind_value ON event_refs(ref_kind, ref
 -- CREATE TABLE IF NOT EXISTS vector_units (
 --   id INTEGER PRIMARY KEY AUTOINCREMENT,
 --   event_id INTEGER NOT NULL,
---   tool TEXT NOT NULL CHECK (tool IN ('codex', 'claude', 'opencode')),
+--   tool TEXT NOT NULL CHECK (tool IN ('codex', 'claude', 'opencode', 'pi')),
 --   session_id TEXT NOT NULL,
 --   unit_kind TEXT NOT NULL CHECK (unit_kind IN ('user_text', 'assistant_text', 'tool_intent', 'metadata_text')),
 --   unit_index INTEGER NOT NULL DEFAULT 0,

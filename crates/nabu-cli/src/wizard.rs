@@ -16,8 +16,9 @@ use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 
 use nabu_adapters::{
-    claude_status, codex_status, install_claude, install_codex, install_opencode, opencode_status,
-    uninstall_claude, uninstall_codex, uninstall_opencode, ConfigChangeReport,
+    claude_status, codex_status, install_claude, install_codex, install_opencode, install_pi,
+    opencode_status, pi_status, uninstall_claude, uninstall_codex, uninstall_opencode,
+    uninstall_pi, ConfigChangeReport,
 };
 use nabu_core::{
     doctor_with_progress, embedding_model_status, index_once_with_options, init_home,
@@ -503,6 +504,7 @@ fn agent_tool(tool: Tool) -> AgentTool {
         Tool::Codex => AgentTool::Codex,
         Tool::Claude => AgentTool::Claude,
         Tool::Opencode => AgentTool::Opencode,
+        Tool::Pi => AgentTool::Pi,
     }
 }
 
@@ -511,6 +513,7 @@ impl WizardActions for LiveActions {
         let codex = codex_status(home)?;
         let claude = claude_status(home)?;
         let opencode = opencode_status(home)?;
+        let pi = pi_status(home)?;
         Ok(vec![
             ToolState {
                 tool: Tool::Codex,
@@ -530,6 +533,12 @@ impl WizardActions for LiveActions {
                 configured: opencode.plugin_installed,
                 mcp_configured: opencode_mcp_entry_installed(),
             },
+            ToolState {
+                tool: Tool::Pi,
+                present: pi.pi_installed || pi.extension_installed,
+                configured: pi.extension_installed,
+                mcp_configured: false,
+            },
         ])
     }
 
@@ -542,6 +551,7 @@ impl WizardActions for LiveActions {
             Tool::Codex => install_codex(home, dry_run),
             Tool::Claude => install_claude(home, dry_run),
             Tool::Opencode => install_opencode(home, dry_run),
+            Tool::Pi => install_pi(home, dry_run),
         }
     }
 
@@ -550,6 +560,7 @@ impl WizardActions for LiveActions {
             Tool::Codex => uninstall_codex(home, dry_run),
             Tool::Claude => uninstall_claude(home, dry_run),
             Tool::Opencode => uninstall_opencode(home, dry_run),
+            Tool::Pi => uninstall_pi(home, dry_run),
         }
     }
 
@@ -1158,6 +1169,7 @@ fn backfill_tool_of(tool: Tool) -> BackfillTool {
         Tool::Codex => BackfillTool::Codex,
         Tool::Claude => BackfillTool::Claude,
         Tool::Opencode => BackfillTool::Opencode,
+        Tool::Pi => BackfillTool::Pi,
     }
 }
 
@@ -1225,6 +1237,7 @@ fn backfill_tool_scope_label(tool: BackfillTool) -> &'static str {
         BackfillTool::Codex => "Codex",
         BackfillTool::Claude => "Claude Code",
         BackfillTool::Opencode => "OpenCode",
+        BackfillTool::Pi => "Pi",
     }
 }
 
@@ -1617,6 +1630,7 @@ fn tool_label(tool: Tool) -> &'static str {
         Tool::Codex => "Codex",
         Tool::Claude => "Claude Code",
         Tool::Opencode => "OpenCode",
+        Tool::Pi => "Pi",
     }
 }
 
@@ -2074,10 +2088,12 @@ mod tests {
                 "install:codex",
                 "install:claude",
                 "install:opencode",
+                "install:pi",
                 "backfill:all",
                 "mcp_install:codex",
                 "mcp_install:claude",
                 "mcp_install:opencode",
+                "mcp_install:pi",
             ]
         );
     }
@@ -2205,7 +2221,7 @@ mod tests {
                 .iter()
                 .filter(|c| c.ends_with(":dry=false") && c.starts_with("mcp_install:"))
                 .count(),
-            3
+            4
         );
     }
 
@@ -2242,8 +2258,8 @@ mod tests {
     #[test]
     fn manage_install_routes_through_install_function() {
         let mut prompter = ScriptedPrompter::new()
-            // Manage; select codex (0); Install/repair (0); Back (3); Quit.
-            .selects([TOP_MANAGE, 0, 0, 3, TOP_QUIT])
+            // Manage; select codex (0); Install/repair (0); Back (4); Quit.
+            .selects([TOP_MANAGE, 0, 0, 4, TOP_QUIT])
             .confirms([true]);
         let mut actions = SpyActions::all_present_unconfigured();
         run(&mut prompter, &mut actions, Path::new(HOME)).unwrap();
@@ -2253,8 +2269,8 @@ mod tests {
     #[test]
     fn manage_uninstall_routes_through_uninstall_function() {
         let mut prompter = ScriptedPrompter::new()
-            // Manage; select claude (1); Uninstall (1); Back (3); Quit.
-            .selects([TOP_MANAGE, 1, 1, 3, TOP_QUIT])
+            // Manage; select claude (1); Uninstall (1); Back (4); Quit.
+            .selects([TOP_MANAGE, 1, 1, 4, TOP_QUIT])
             .confirms([true]);
         let mut actions = SpyActions::all_present_configured();
         run(&mut prompter, &mut actions, Path::new(HOME)).unwrap();

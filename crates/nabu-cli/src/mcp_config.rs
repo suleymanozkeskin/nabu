@@ -10,7 +10,7 @@
 use crate::backup::{backup_cli_config, read_text_or_empty, text_diff, write_text_config};
 use crate::paths::ToolLayout;
 use crate::{jsonc_edit, AgentTool, McpConfigAction};
-use nabu_adapters::ConfigChangeReport;
+use nabu_adapters::{pi_status, ConfigChangeReport};
 use nabu_core::{index_once_with_options, ingest_hook_event, init_home, Error, IndexOptions, Tool};
 use serde_json::{json, Value};
 use std::io::Cursor;
@@ -37,6 +37,8 @@ fn selected_agent_tools(tool: AgentTool) -> &'static [AgentTool] {
         AgentTool::Codex => &[AgentTool::Codex],
         AgentTool::Claude => &[AgentTool::Claude],
         AgentTool::Opencode => &[AgentTool::Opencode],
+        // pi has no MCP client; MCP apply never touches it.
+        AgentTool::Pi => &[AgentTool::Pi],
         AgentTool::All => &[AgentTool::Codex, AgentTool::Claude, AgentTool::Opencode],
     }
 }
@@ -51,6 +53,9 @@ pub(crate) fn mcp_apply_one(
         AgentTool::Codex => mcp_apply_codex(home, action, dry_run),
         AgentTool::Claude => mcp_apply_claude(home, action, dry_run),
         AgentTool::Opencode => mcp_apply_opencode(home, action, dry_run),
+        AgentTool::Pi => Err(Error::Validation(
+            "pi has no MCP client; use the nabu pi extension (agent tools) instead".to_string(),
+        )),
         AgentTool::All => Err(Error::Validation(
             "internal error: all must be expanded before mcp_apply_one".to_string(),
         )),
@@ -320,7 +325,7 @@ pub(crate) fn mcp_apply_opencode(
     })
 }
 
-pub(crate) fn mcp_validate_all(_home: &Path, tool: AgentTool) -> nabu_core::Result<Value> {
+pub(crate) fn mcp_validate_all(home: &Path, tool: AgentTool) -> nabu_core::Result<Value> {
     let mut value = json!({});
     let fixture = mcp_server_health_probe()?;
     for &tool in selected_agent_tools(tool) {
@@ -362,6 +367,22 @@ pub(crate) fn mcp_validate_all(_home: &Path, tool: AgentTool) -> nabu_core::Resu
                     "client_list": client,
                     "fixture_server": fixture.clone(),
                     "search_history_advertised": fixture["search_history_advertised"]
+                });
+            }
+            // pi has no MCP client; validation reports the extension path.
+            AgentTool::Pi => {
+                let pi = pi_status(home)?;
+                value["pi"] = json!({
+                    "status": if pi.extension_installed {
+                        "extension_installed"
+                    } else {
+                        "no_mcp_client_extension_optional"
+                    },
+                    "client_installed": pi.pi_installed,
+                    "mcp_entry_installed": false,
+                    "extension_installed": pi.extension_installed,
+                    "extension_path": pi.extension_path,
+                    "message": "pi has no MCP client; use `nabu install pi` for the capture/tools extension"
                 });
             }
             AgentTool::All => {}

@@ -330,6 +330,8 @@ pub(crate) fn source_kind_for(tool: Tool, source_path: &Path) -> &'static str {
                 "raw_jsonl"
             }
         }
+        // Pi session files are raw JSONL (parser lands with PR2).
+        Tool::Pi => "raw_jsonl",
     }
 }
 

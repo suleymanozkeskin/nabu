@@ -96,6 +96,17 @@ pub struct CodexStatus {
     pub parse_error: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PiStatus {
+    pub pi_installed: bool,
+    /// True once the nabu extension file exists at `extension_path` (PR3 writes
+    /// it and adds a marker-content check).
+    pub extension_installed: bool,
+    pub extension_path: PathBuf,
+    pub storage_writable: bool,
+    pub error: Option<String>,
+}
+
 pub fn install_claude(home: &Path, dry_run: bool) -> Result<ConfigChangeReport> {
     let settings_path = claude_settings_path()?;
     let before = read_settings_or_empty(&settings_path)?;
@@ -345,6 +356,65 @@ pub fn codex_status(home: &Path) -> Result<CodexStatus> {
         trust_guidance: "Codex compatibility mode captures turn-boundary hooks and reconciles transcripts; assistant deltas require streaming mode.".to_string(),
         storage_writable: home.join("raw").join("codex").is_dir(),
         parse_error,
+    })
+}
+
+/// The pi extension file nabu installs: `$PI_AGENT_DIR/extensions/nabu.ts`,
+/// else `~/.pi/agent/extensions/nabu.ts`.
+pub fn pi_extension_path() -> Result<PathBuf> {
+    if let Some(agent_dir) = env::var_os("PI_AGENT_DIR") {
+        return Ok(PathBuf::from(agent_dir).join("extensions").join("nabu.ts"));
+    }
+    let Some(home) = env::var_os("HOME") else {
+        return Err(Error::HomeUnavailable);
+    };
+    Ok(PathBuf::from(home)
+        .join(".pi")
+        .join("agent")
+        .join("extensions")
+        .join("nabu.ts"))
+}
+
+/// Install the pi capture extension. PR1 foundation: performs no writes and
+/// reports `changed: false`; the extension file lands with PR3.
+pub fn install_pi(home: &Path, dry_run: bool) -> Result<ConfigChangeReport> {
+    let _ = home;
+    let extension_path = pi_extension_path()?;
+    Ok(ConfigChangeReport {
+        tool: Tool::Pi,
+        target_path: extension_path,
+        changed: false,
+        dry_run,
+        summary: "pi extension install is not enabled yet".to_string(),
+        diff: String::new(),
+    })
+}
+
+/// Uninstall the pi capture extension. PR1 foundation: no-op, reports
+/// `changed: false`; real removal lands with PR3.
+pub fn uninstall_pi(home: &Path, dry_run: bool) -> Result<ConfigChangeReport> {
+    let _ = home;
+    let extension_path = pi_extension_path()?;
+    Ok(ConfigChangeReport {
+        tool: Tool::Pi,
+        target_path: extension_path,
+        changed: false,
+        dry_run,
+        summary: "pi extension uninstall is not enabled yet".to_string(),
+        diff: String::new(),
+    })
+}
+
+/// Report pi's install state: binary on PATH, extension file presence, and
+/// whether nabu's raw/pi storage exists.
+pub fn pi_status(home: &Path) -> Result<PiStatus> {
+    let extension_path = pi_extension_path()?;
+    Ok(PiStatus {
+        pi_installed: command_in_path("pi"),
+        extension_installed: extension_path.is_file(),
+        extension_path,
+        storage_writable: home.join("raw").join("pi").is_dir(),
+        error: None,
     })
 }
 

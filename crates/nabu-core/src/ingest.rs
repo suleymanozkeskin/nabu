@@ -28,6 +28,7 @@ pub fn init_home(home: &Path) -> Result<InitReport> {
         home.join("raw").join("codex"),
         home.join("raw").join("claude"),
         home.join("raw").join("opencode"),
+        home.join("raw").join("pi"),
         home.join("spool"),
         home.join("spool").join("dedupe"),
         home.join("index"),

@@ -39,7 +39,7 @@ settable via `NABU_HOME`). It is omitted from each flag table below.
 example `7d`, `24h`), a `YYYY-MM-DD` date (interpreted as UTC midnight), or an
 RFC3339 timestamp.
 
-The `<TOOL>` argument and `--tool` option are `codex`, `claude`, or `opencode`.
+The `<TOOL>` argument and `--tool` option are `codex`, `claude`, `opencode`, or `pi`.
 Where an enum also accepts `all` it is noted in the relevant table.
 
 ### `nabu init` — create the storage layout
@@ -133,7 +133,7 @@ nabu ingest hook --tool codex|claude|opencode
 
 | Flag | Description | Default |
 | --- | --- | --- |
-| `--tool <TOOL>` | Source tool: `codex`, `claude`, or `opencode`. Required. | — |
+| `--tool <TOOL>` | Source tool: `codex`, `claude`, `opencode`, or `pi`. Required. | — |
 
 ```shell
 echo "$HOOK_JSON" | nabu ingest hook --tool claude
@@ -147,7 +147,7 @@ nabu ingest file --tool codex|claude|opencode --source <SOURCE> --path PATH
 
 | Flag | Description | Default |
 | --- | --- | --- |
-| `--tool <TOOL>` | Source tool: `codex`, `claude`, or `opencode`. Required. | — |
+| `--tool <TOOL>` | Source tool: `codex`, `claude`, `opencode`, or `pi`. Required. | — |
 | `--source <SOURCE>` | Record format: `backfill`, `exec_json`, `app_server`, `event_stream`, `transcript_tail`. Required. | — |
 | `--path <PATH>` | File to read. Required. | — |
 
@@ -209,7 +209,7 @@ nabu backfill --tool codex|claude|opencode|all [--since DATE_OR_DURATION] [--pat
 
 | Flag | Description | Default |
 | --- | --- | --- |
-| `--tool <TOOL>` | `codex`, `claude`, `opencode`, or `all`. Required. | — |
+| `--tool <TOOL>` | `codex`, `claude`, `opencode`, `pi`, or `all`. Required. | — |
 | `--since <SINCE>` | Only import sessions at or after this duration/date/timestamp. | all |
 | `--path <PATH>` | Read from this path instead of the native local roots. | native roots |
 | `--dry-run` | Print per-session coverage; append no raw events and write no checkpoints. | off |
@@ -240,7 +240,7 @@ nabu search QUERY [OPTIONS]
 | Flag | Description | Default |
 | --- | --- | --- |
 | `<QUERY>` | Search text. Required positional argument. | — |
-| `--tool <TOOL>` | Restrict to `codex`, `claude`, or `opencode`. | all |
+| `--tool <TOOL>` | Restrict to `codex`, `claude`, `opencode`, or `pi`. | all |
 | `--session <SESSION>` | Restrict to a session id. | all |
 | `--cwd <CWD>` | Restrict to a working directory. | all |
 | `--since <SINCE>` | Restrict to events at or after this duration/date/timestamp. | all |
@@ -329,7 +329,7 @@ nabu show TOOL SESSION_ID [OPTIONS]
 
 | Flag | Description | Default |
 | --- | --- | --- |
-| `<TOOL>` | `codex`, `claude`, or `opencode`. Required positional. | — |
+| `<TOOL>` | `codex`, `claude`, `opencode`, or `pi`. Required positional. | — |
 | `<SESSION_ID>` | Session id. Required positional. | — |
 | `--limit-events <N>` | Maximum events to print. | `100` |
 | `--after-raw-line <N>` | Start after this raw line number. | start |
@@ -399,7 +399,7 @@ nabu memory show TOOL NAME [--project PROJECT] [--redact] [--format human|json|m
 
 | Flag | Description | Default |
 | --- | --- | --- |
-| `<TOOL>` | `codex`, `claude`, or `opencode`. Required positional. | — |
+| `<TOOL>` | `codex`, `claude`, `opencode`, or `pi`. Required positional. | — |
 | `<NAME>` | Memory file path relative to the tool's memory root, e.g. `MEMORY.md` or `sub/deep.md`. Required positional. | — |
 | `--project <PROJECT>` | Claude project slug (the `projects/<id>` folder name). Required for claude, whose memory is per-project; omit for codex/opencode. | — |
 | `--redact` | Apply secret-pattern redaction to the content. | off |
@@ -421,7 +421,7 @@ nabu memory sync [--tool codex|claude|opencode|all]
 
 | Flag | Description | Default |
 | --- | --- | --- |
-| `--tool <TOOL>` | `codex`, `claude`, `opencode`, or `all`. | `all` |
+| `--tool <TOOL>` | `codex`, `claude`, `opencode`, `pi`, or `all`. | `all` |
 
 ```shell
 nabu memory sync
@@ -441,7 +441,7 @@ nabu tail TOOL SESSION_ID [--follow]
 
 | Flag | Description | Default |
 | --- | --- | --- |
-| `<TOOL>` | `codex`, `claude`, or `opencode`. Required positional. | — |
+| `<TOOL>` | `codex`, `claude`, `opencode`, or `pi`. Required positional. | — |
 | `<SESSION_ID>` | Session id. Required positional. | — |
 | `--follow` | Stream new raw events as they are appended. | off |
 
@@ -458,7 +458,7 @@ nabu export TOOL SESSION_ID --format jsonl|markdown [--redact]
 
 | Flag | Description | Default |
 | --- | --- | --- |
-| `<TOOL>` | `codex`, `claude`, or `opencode`. Required positional. | — |
+| `<TOOL>` | `codex`, `claude`, `opencode`, or `pi`. Required positional. | — |
 | `<SESSION_ID>` | Session id. Required positional. | — |
 | `--format <FORMAT>` | `jsonl` or `markdown`. Required. | — |
 | `--redact` | Apply redaction for shareable output. | off |
@@ -476,7 +476,7 @@ nabu doctor [--tool codex|claude|opencode|all] [--deep] [--json]
 
 | Flag | Description | Default |
 | --- | --- | --- |
-| `--tool <TOOL>` | `codex`, `claude`, `opencode`, or `all`. | `all` |
+| `--tool <TOOL>` | `codex`, `claude`, `opencode`, `pi`, or `all`. | `all` |
 | `--deep` | Run full SQLite integrity and counts (slower). | off |
 | `--json` | Emit machine-readable JSON. | off |
 
@@ -499,7 +499,7 @@ nabu uninstall codex|claude|opencode|all [--dry-run]
 
 | Flag | Description | Default |
 | --- | --- | --- |
-| `<TOOL>` | `codex`, `claude`, `opencode`, or `all`. Required positional. | — |
+| `<TOOL>` | `codex`, `claude`, `opencode`, `pi`, or `all`. Required positional. | — |
 | `--dry-run` | Print the diff that would be applied; write nothing. | off |
 
 ```shell
@@ -621,7 +621,7 @@ nabu mcp uninstall codex|claude|opencode|all [--dry-run]
 
 | Flag | Description | Default |
 | --- | --- | --- |
-| `<TOOL>` | `codex`, `claude`, `opencode`, or `all`. Required positional. | — |
+| `<TOOL>` | `codex`, `claude`, `opencode`, `pi`, or `all`. Required positional. | — |
 | `--dry-run` | Print the diff that would be applied; write nothing. | off |
 
 ```shell
@@ -638,7 +638,7 @@ nabu mcp validate codex|claude|opencode|all [--json]
 
 | Flag | Description | Default |
 | --- | --- | --- |
-| `<TOOL>` | `codex`, `claude`, `opencode`, or `all`. Required positional. | — |
+| `<TOOL>` | `codex`, `claude`, `opencode`, `pi`, or `all`. Required positional. | — |
 | `--json` | Emit machine-readable JSON. | off |
 
 ```shell
