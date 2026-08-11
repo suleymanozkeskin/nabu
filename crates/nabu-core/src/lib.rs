@@ -106,10 +106,10 @@ pub use options::{
     CoverageSummary, DoctorCheck, DoctorReport, DoctorStats, EmbeddingDownloadProgress,
     EmbeddingDownloadReport, EmbeddingIndexProgress, EmbeddingModelDisclosure,
     EmbeddingModelStatus, EventOptions, EventPointer, FileIngestReport, FileTouch, IndexFreshness,
-    IndexOptions, IndexReport, InitReport, MemoryFileContent, MemoryFileSummary, MemorySyncReport,
-    PurgeAction, PurgeAllArtifact, PurgeAllOptions, PurgeAllReport, PurgeReport, PurgeTier,
-    SearchContinuation, SearchMode, SearchOptions, SearchPage, SearchResult, SessionOptions,
-    SessionPage, SessionSummary, StorageFootprint, StoredEvent, ToolUsage,
+    IndexOptions, IndexReport, InitReport, MemoryFileContent, MemoryFileSummary, MemoryListPage,
+    MemorySyncReport, PurgeAction, PurgeAllArtifact, PurgeAllOptions, PurgeAllReport, PurgeReport,
+    PurgeTier, SearchContinuation, SearchMode, SearchOptions, SearchPage, SearchResult,
+    SessionOptions, SessionPage, SessionSummary, StorageFootprint, StoredEvent, ToolUsage,
     SESSION_PROMPT_SNIPPET_CHARS, SESSION_TOP_FILES, SESSION_TOP_TOOLS,
 };
 
@@ -181,7 +181,7 @@ pub(crate) use redact::{redact_json_value, redact_text};
 mod memory;
 pub use memory::{
     discover_memory_files, get_memory, list_memories, sync_memory, MemoryFileMeta,
-    MAX_MEMORY_FILE_BYTES, MEMORY_SESSION_PREFIX,
+    MAX_MEMORY_FILE_BYTES, MEMORY_SESSION_PREFIX, MEMORY_STALENESS_ADVISORY,
 };
 
 mod provenance;

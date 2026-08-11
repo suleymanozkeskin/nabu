@@ -184,7 +184,9 @@ nabu index --watch --json-progress
 Indexing records derived checkpoints for canonical raw JSONL files. A repeated
 `index --once` skips unchanged raw files by source identity, size, and mtime;
 changed files are re-scanned from the top and remain idempotent through
-`dedupe_key`.
+`dedupe_key`. Explicit `index --once` also runs a memory-folder sync before
+scanning raw files; `index --watch` ticks do not (use `nabu memory sync` or a
+fresh `--once` to refresh captures).
 
 Long-running index commands write progress to stderr. When semantic mode is built
 and the local model is present, the embedding pass first emits an
@@ -385,7 +387,9 @@ nabu memory list --tool claude --json
 Each entry carries tool, project (claude), name, size, modified/captured
 timestamps, and the raw citation of the latest captured version. Files deleted
 from the tool's folders stay listed: the capture is durable history, not a
-mirror.
+mirror. List and show responses always include an `advisory` that captured
+memory is a point-in-time snapshot and can be stale — treat it as historical
+context, not ground truth.
 
 #### `nabu memory show` — read one captured memory file
 
@@ -672,7 +676,10 @@ for codex/opencode. session_id values are reserved pseudo-sessions
 (`memory:{project}`, `memory:global`) and never appear in `list_sessions`.
 opencode has no native memory folder and contributes nothing to these
 surfaces. Memory is captured by `nabu memory sync` / `nabu index --once`
-(not by `index --watch` ticks); only captured files are served.
+(not by `index --watch` ticks); only captured files are served. Every
+`list_memories` / `get_memory` response carries an `advisory`: captured memory
+is a point-in-time snapshot and can be stale relative to the live tool folders
+and current project truth.
 
 MVP MCP resources:
 

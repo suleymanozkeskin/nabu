@@ -426,6 +426,14 @@ pub struct MemoryFileSummary {
     pub raw_offset: Option<i64>,
 }
 
+/// List surface for captured memory files, with a staleness advisory that
+/// agents and humans should read before treating the entries as current truth.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct MemoryListPage {
+    pub memories: Vec<MemoryFileSummary>,
+    pub advisory: String,
+}
+
 /// A memory file with its content, served by `get_memory` / `nabu memory show`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct MemoryFileContent {
@@ -441,6 +449,9 @@ pub struct MemoryFileContent {
     pub raw_line: i64,
     pub raw_offset: Option<i64>,
     pub content: String,
+    /// Always present: captured memory is a point-in-time snapshot and may be
+    /// stale relative to the live tool folders and current project truth.
+    pub advisory: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]

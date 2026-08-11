@@ -38,7 +38,7 @@ use nabu_core::{
     redact_export_text, resolve_home, search_history_page, sync_memory, Error, IndexOptions,
     PurgeAllOptions, SearchMode, SearchOptions, SessionOptions, SingleFlightOutcome, Source, Tool,
 };
-use serde_json::{json, Value};
+use serde_json::Value;
 use std::fs::File;
 use std::io::{BufRead, BufReader, IsTerminal, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -1008,18 +1008,16 @@ fn run_mcp_command(home: &Path, command: McpCommand) -> nabu_core::Result<()> {
 fn run_memory_command(home: &Path, command: MemoryCommand) -> nabu_core::Result<()> {
     match command {
         MemoryCommand::List { tool, limit, json } => {
-            let memories = list_memories(home, tool, limit)?;
+            let page = list_memories(home, tool, limit)?;
             if json {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&json!({ "memories": memories }))?
-                );
-            } else if memories.is_empty() {
+                println!("{}", serde_json::to_string_pretty(&page)?);
+            } else if page.memories.is_empty() {
                 println!(
                     "no captured memory files (run `nabu memory sync` followed by `nabu index --once` to capture the tools' memory folders)"
                 );
             } else {
-                for memory in memories {
+                println!("advisory: {}", page.advisory);
+                for memory in page.memories {
                     let project = memory
                         .project
                         .as_deref()
@@ -1078,6 +1076,7 @@ fn run_memory_command(home: &Path, command: MemoryCommand) -> nabu_core::Result<
                     if redact {
                         println!("  redacted: true");
                     }
+                    println!("  advisory: {}", content.advisory);
                     println!("---");
                     print!("{}", content.content);
                     if !content.content.ends_with('\n') {

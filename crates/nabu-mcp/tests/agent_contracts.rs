@@ -1070,7 +1070,11 @@ fn memory_tools_serve_captured_memory_files_with_citations() {
         .map(|response| (response["id"].as_i64().unwrap(), response))
         .collect();
 
-    let listed = &by_id[&1]["result"]["structuredContent"]["memories"];
+    let list_body = &by_id[&1]["result"]["structuredContent"];
+    let list_advisory = list_body["advisory"].as_str().unwrap();
+    assert!(list_advisory.contains("stale"), "{list_advisory}");
+    assert!(list_advisory.contains("ground truth"), "{list_advisory}");
+    let listed = &list_body["memories"];
     let names: Vec<_> = listed
         .as_array()
         .unwrap()
@@ -1098,6 +1102,8 @@ fn memory_tools_serve_captured_memory_files_with_citations() {
     assert_eq!(claude_memory["name"], "MEMORY.md");
     assert!(claude_memory["content"].as_str().unwrap().contains("salt"));
     assert!(claude_memory.get("redacted").is_none());
+    let get_advisory = claude_memory["advisory"].as_str().unwrap();
+    assert!(get_advisory.contains("stale"), "{get_advisory}");
 
     let codex_memory = &by_id[&3]["result"]["structuredContent"];
     assert_eq!(codex_memory["redacted"], true);

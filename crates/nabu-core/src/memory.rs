@@ -11,8 +11,8 @@
 
 use crate::{
     append_prepared_events, open_index, payload_for_raw_pointer, sanitize_session_id,
-    CanonicalType, Error, MemoryFileContent, MemoryFileSummary, MemorySyncReport, NotFound, Result,
-    Source, Tool, SCHEMA_VERSION,
+    CanonicalType, Error, MemoryFileContent, MemoryFileSummary, MemoryListPage, MemorySyncReport,
+    NotFound, Result, Source, Tool, SCHEMA_VERSION,
 };
 use rusqlite::OptionalExtension;
 use serde_json::json;
@@ -31,6 +31,11 @@ pub const MEMORY_SESSION_PREFIX: &str = "memory:";
 /// at sync time so a pathological multi-MB note cannot bloat the raw store
 /// and FTS index in one pass.
 pub const MAX_MEMORY_FILE_BYTES: u64 = 1_048_576;
+
+/// Fixed advisory attached to every memory list/get response. Captured memory
+/// is a snapshot of each tool's own folders at sync time — not live state and
+/// not authoritative project truth.
+pub const MEMORY_STALENESS_ADVISORY: &str = "Captured tool memory is a point-in-time snapshot of each tool's own memory folders. It can be stale relative to the live folders and to current project truth — treat it as historical context, not ground truth.";
 
 /// Session id of the memory pseudo-session holding one file's captured
 /// history: `memory:{project-slug}` for a claude project folder, or
@@ -148,7 +153,9 @@ fn memory_roots(tool: Tool) -> Result<Vec<(PathBuf, Option<String>)>> {
     }
 }
 
-/// Recursively collect regular files under `dir`, skipping hidden entries.
+/// Recursively collect regular files under `dir`, skipping hidden entries and
+/// symlinks (symlinks are not followed, so a link out of the memory root
+/// cannot pull foreign paths into the capture).
 fn collect_memory_files(dir: &Path, output: &mut Vec<PathBuf>) -> Result<()> {
     let entries = fs::read_dir(dir).map_err(|source| Error::Io {
         path: dir.to_path_buf(),
@@ -166,9 +173,22 @@ fn collect_memory_files(dir: &Path, output: &mut Vec<PathBuf>) -> Result<()> {
         if file_name.starts_with('.') {
             continue;
         }
-        if path.is_dir() {
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(source) => {
+                return Err(Error::Io {
+                    path: path.clone(),
+                    source,
+                })
+            }
+        };
+        if metadata.file_type().is_symlink() {
+            continue;
+        }
+        if metadata.is_dir() {
             collect_memory_files(&path, output)?;
-        } else if path.is_file() {
+        } else if metadata.is_file() {
             output.push(path);
         }
     }
@@ -177,22 +197,15 @@ fn collect_memory_files(dir: &Path, output: &mut Vec<PathBuf>) -> Result<()> {
 
 /// Root-relative memory file name with stable `/` separators. Nested files
 /// keep their path (`sub/deep.md`) so list/get/dedupe identity is unambiguous.
-fn relative_memory_name(root: &Path, path: &Path) -> String {
-    match path.strip_prefix(root) {
-        Ok(relative) => {
-            let name = relative.to_string_lossy().replace('\\', "/");
-            if name.is_empty() {
-                path.file_name()
-                    .map(|value| value.to_string_lossy().into_owned())
-                    .unwrap_or_default()
-            } else {
-                name
-            }
-        }
-        Err(_) => path
-            .file_name()
-            .map(|value| value.to_string_lossy().into_owned())
-            .unwrap_or_default(),
+/// Returns `None` when `path` is not under `root` (e.g. after a race); callers
+/// skip those entries rather than falling back to a bare basename.
+fn relative_memory_name(root: &Path, path: &Path) -> Option<String> {
+    let relative = path.strip_prefix(root).ok()?;
+    let name = relative.to_string_lossy().replace('\\', "/");
+    if name.is_empty() {
+        None
+    } else {
+        Some(name)
     }
 }
 
@@ -224,10 +237,9 @@ pub fn discover_memory_files(tool: Tool) -> Result<Vec<MemoryFileMeta>> {
             if size > MAX_MEMORY_FILE_BYTES {
                 continue;
             }
-            let name = relative_memory_name(&root, &path);
-            if name.is_empty() {
+            let Some(name) = relative_memory_name(&root, &path) else {
                 continue;
-            }
+            };
             metas.push(MemoryFileMeta {
                 tool,
                 project: project.clone(),
@@ -251,12 +263,8 @@ pub fn sync_memory(home: &Path, tool: Tool) -> Result<MemorySyncReport> {
     let mut discovered_count = 0usize;
     let mut events = Vec::with_capacity(discovered.len());
     for meta in discovered {
-        let content = match fs::read(&meta.native_path) {
-            Ok(bytes) => match String::from_utf8(bytes) {
-                Ok(text) => text,
-                // Binary / non-UTF-8 memory files are not captured.
-                Err(_) => continue,
-            },
+        let bytes = match fs::read(&meta.native_path) {
+            Ok(bytes) => bytes,
             // File vanished since discovery: skip, it is not part of this pass.
             Err(source) if source.kind() == std::io::ErrorKind::NotFound => continue,
             Err(source) => {
@@ -266,14 +274,25 @@ pub fn sync_memory(home: &Path, tool: Tool) -> Result<MemorySyncReport> {
                 })
             }
         };
+        // Re-check size after read so a file that grew past the cap between
+        // discover and open is still refused.
+        if bytes.len() as u64 > MAX_MEMORY_FILE_BYTES {
+            continue;
+        }
+        let content = match String::from_utf8(bytes) {
+            Ok(text) => text,
+            // Binary / non-UTF-8 memory files are not captured.
+            Err(_) => continue,
+        };
         discovered_count += 1;
         let session_id = memory_session_id(tool, meta.project.as_deref());
+        let size = content.len() as u64;
         let payload = json!({
             "name": meta.name,
             "project": meta.project,
             "native_path": meta.native_path.display().to_string(),
             "content": content,
-            "size": meta.size,
+            "size": size,
             "modified_at": meta.modified_at,
             "synced_at": synced_at,
         });
@@ -350,12 +369,9 @@ fn memory_summary_from_row(
 /// captured version of each file (a file edited since its last sync appears
 /// once, with its most recent event). Files removed from the tool's folders
 /// remain listed: the capture is durable history, not a mirror. Identity is
-/// `(tool, project, name)` where `name` is the root-relative path.
-pub fn list_memories(
-    home: &Path,
-    tool: Option<Tool>,
-    limit: usize,
-) -> Result<Vec<MemoryFileSummary>> {
+/// `(tool, project, name)` where `name` is the root-relative path. The page
+/// always carries [`MEMORY_STALENESS_ADVISORY`].
+pub fn list_memories(home: &Path, tool: Option<Tool>, limit: usize) -> Result<MemoryListPage> {
     let db_path = home.join("index").join("harness.db");
     let conn = open_index(&db_path)?;
     let mut statement = conn
@@ -407,7 +423,10 @@ pub fn list_memories(
             source,
         })?);
     }
-    Ok(memories)
+    Ok(MemoryListPage {
+        memories,
+        advisory: MEMORY_STALENESS_ADVISORY.to_string(),
+    })
 }
 
 /// Read one captured memory file by its tool identity, hydrating content from
@@ -483,6 +502,7 @@ pub fn get_memory(
         raw_line,
         raw_offset,
         content,
+        advisory: MEMORY_STALENESS_ADVISORY.to_string(),
     })
 }
 
@@ -614,16 +634,24 @@ mod tests {
 
         index_once(&home).unwrap();
 
-        let memories = list_memories(&home, Some(Tool::Claude), 10).unwrap();
-        assert_eq!(memories.len(), 1);
-        assert_eq!(memories[0].name, "MEMORY.md");
-        assert_eq!(memories[0].project.as_deref(), Some("-Users-me-project"));
-        assert_eq!(memories[0].session_id, "memory:-Users-me-project");
-        assert_eq!(memories[0].native_path, memory_file.display().to_string());
+        let page = list_memories(&home, Some(Tool::Claude), 10).unwrap();
+        assert_eq!(page.advisory, MEMORY_STALENESS_ADVISORY);
+        assert_eq!(page.memories.len(), 1);
+        assert_eq!(page.memories[0].name, "MEMORY.md");
+        assert_eq!(
+            page.memories[0].project.as_deref(),
+            Some("-Users-me-project")
+        );
+        assert_eq!(page.memories[0].session_id, "memory:-Users-me-project");
+        assert_eq!(
+            page.memories[0].native_path,
+            memory_file.display().to_string()
+        );
 
         let content =
             get_memory(&home, Tool::Claude, Some("-Users-me-project"), "MEMORY.md").unwrap();
         assert!(content.content.contains("frozen"));
+        assert_eq!(content.advisory, MEMORY_STALENESS_ADVISORY);
         assert_eq!(content.raw_line, 2);
         assert!(content
             .raw_file
@@ -653,8 +681,8 @@ mod tests {
         sync_memory(&home, Tool::Claude).unwrap();
         index_once(&home).unwrap();
 
-        let memories = list_memories(&home, Some(Tool::Claude), 10).unwrap();
-        let mut names: Vec<_> = memories.iter().map(|m| m.name.clone()).collect();
+        let page = list_memories(&home, Some(Tool::Claude), 10).unwrap();
+        let mut names: Vec<_> = page.memories.iter().map(|m| m.name.clone()).collect();
         names.sort();
         assert_eq!(
             names,
@@ -697,8 +725,9 @@ mod tests {
         assert_eq!(report.appended, 1);
         index_once(&home).unwrap();
         let listed = list_memories(&home, Some(Tool::Codex), 10).unwrap();
-        assert_eq!(listed.len(), 1);
-        assert_eq!(listed[0].name, "ok.md");
+        assert_eq!(listed.memories.len(), 1);
+        assert_eq!(listed.memories[0].name, "ok.md");
+        assert_eq!(listed.advisory, MEMORY_STALENESS_ADVISORY);
     }
 
     #[test]
