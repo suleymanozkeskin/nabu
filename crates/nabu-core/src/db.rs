@@ -309,6 +309,7 @@ CREATE TABLE IF NOT EXISTS memories (
 );
 
 CREATE INDEX IF NOT EXISTS idx_memories_tool_project ON memories(tool, project);
+CREATE INDEX IF NOT EXISTS idx_memories_tool_name_project ON memories(tool, name, project);
 CREATE INDEX IF NOT EXISTS idx_memories_native_path ON memories(native_path);
 "#;
 
@@ -549,8 +550,14 @@ fn events_fts_missing_boundary_rows(conn: &Connection, path: &Path) -> Result<bo
 }
 
 fn ensure_supporting_indexes(conn: &Connection, path: &Path) -> Result<()> {
+    // Full events index set from schema.sql. Must be complete: DROP TABLE events
+    // during the memory migration destroys every index on events, and this is
+    // the only open-path recreation for existing installs.
     conn.execute_batch(
-        "CREATE INDEX IF NOT EXISTS idx_events_tool_captured ON events(tool, captured_at);
+        "CREATE INDEX IF NOT EXISTS idx_events_tool_session_raw ON events(tool, session_id, raw_line, raw_offset);
+         CREATE INDEX IF NOT EXISTS idx_events_canonical_captured ON events(canonical_type, captured_at);
+         CREATE INDEX IF NOT EXISTS idx_events_session_captured ON events(tool, session_id, captured_at);
+         CREATE INDEX IF NOT EXISTS idx_events_tool_captured ON events(tool, captured_at);
          CREATE INDEX IF NOT EXISTS idx_tool_events_session ON tool_events(tool, session_id);
          CREATE INDEX IF NOT EXISTS idx_compactions_session ON compactions(tool, session_id);",
     )

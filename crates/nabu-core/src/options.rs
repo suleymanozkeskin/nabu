@@ -370,9 +370,10 @@ pub struct IndexReport {
 pub struct IndexOptions {
     pub embed: bool,
     /// Sync each tool's memory folder into the raw store before scanning raw
-    /// files. Off for hook-triggered single-flight passes so per-event
-    /// indexing never walks the memory tree; on for explicit `index --once`/
-    /// `--watch` runs, so a manual index pass also refreshes memories.
+    /// files. Off by default so library callers, hook single-flight passes,
+    /// and `index --watch` ticks never walk the memory tree. The CLI turns it
+    /// on for explicit `index --once` (and the wizard); use `nabu memory sync`
+    /// to refresh captures independently of indexing.
     pub sync_memory: bool,
 }
 
@@ -381,8 +382,8 @@ impl Default for IndexOptions {
         Self {
             embed: true,
             // Off by default: memory sync walks each tool's native folders and
-            // must be opted into explicitly (the CLI turns it on for index
-            // --once/--watch; hook-triggered passes keep it off).
+            // must be opted into explicitly (CLI `index --once` and the wizard
+            // turn it on; watch ticks and hook passes keep it off).
             sync_memory: false,
         }
     }
@@ -418,7 +419,7 @@ pub struct MemoryFileSummary {
     pub modified_at: Option<String>,
     pub captured_at: String,
     /// The memory pseudo-session holding this file's captured history
-    /// (`<project-slug>` for claude, `memories` for codex).
+    /// (`memory:{project-slug}` for claude, `memory:global` for codex).
     pub session_id: String,
     pub raw_file: String,
     pub raw_line: i64,

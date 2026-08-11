@@ -354,12 +354,16 @@ Each tool keeps long-term memory files in its own folders: claude
 `projects/<id>/memory/` (per project), codex `memories/` (global). opencode has
 no native memory folder. `nabu memory sync` captures those files into the raw
 store as `memory.file` events; `nabu index --once` syncs them too, so the
-wizard flow reaches the same state. Captures are content-addressed: an
-unchanged file never appends a duplicate, and editing a file appends its new
-version (append-only, like sessions). Captured memory is searchable through
+wizard flow reaches the same state. `index --watch` does **not** re-walk memory
+folders on every tick — use `nabu memory sync` or a fresh `--once` to refresh
+captures. Nested files keep a root-relative name (`sub/deep.md`). Captures are
+content-addressed: an unchanged file never appends a duplicate, and editing a
+file appends its new version (append-only, like sessions). Binary and files
+larger than 1 MiB are skipped. Captured memory is searchable through
 `nabu search` (`--type memory.file`) and the MCP `search_history` surfaces,
-with the same raw-line citations as sessions. Memory pseudo-sessions do not
-appear in `list_sessions`.
+with the same raw-line citations as sessions. Memory lives in reserved
+pseudo-sessions (`memory:{project}` for claude, `memory:global` for codex)
+that do not appear in `list_sessions`.
 
 #### `nabu memory list` — list captured memory files
 
@@ -392,8 +396,8 @@ nabu memory show TOOL NAME [--project PROJECT] [--redact] [--format human|json|m
 | Flag | Description | Default |
 | --- | --- | --- |
 | `<TOOL>` | `codex`, `claude`, or `opencode`. Required positional. | — |
-| `<NAME>` | Memory file name, e.g. `MEMORY.md`. Required positional. | — |
-| `--project <PROJECT>` | Claude project slug (the `projects/<id>` folder name). Required for claude, whose memory is per-project; omit for codex, whose memory is global. | — |
+| `<NAME>` | Memory file path relative to the tool's memory root, e.g. `MEMORY.md` or `sub/deep.md`. Required positional. | — |
+| `--project <PROJECT>` | Claude project slug (the `projects/<id>` folder name). Required for claude, whose memory is per-project; omit for codex/opencode. | — |
 | `--redact` | Apply secret-pattern redaction to the content. | off |
 | `--format <FORMAT>` | `human`, `json`, or `markdown`. | `human` |
 
@@ -662,10 +666,13 @@ indexed like sessions: `search_history` and `recall_answer` find them (hits
 carry `canonical_type=memory.file` plus tool, session_id, and raw-line
 citations), `list_memories` lists them with metadata, and `get_memory` returns
 one file at full content (set `redact=true` for secret-pattern redaction).
-Claude memory is per-project, so `get_memory` requires `project` for claude
-and forbids it for codex. opencode has no native memory folder and contributes
-nothing to these surfaces. Memory is captured by `nabu memory sync` /
-`nabu index --once`; only captured files are served.
+`name` is the root-relative path (`MEMORY.md`, `sub/deep.md`). Claude memory
+is per-project, so `get_memory` requires `project` for claude and forbids it
+for codex/opencode. session_id values are reserved pseudo-sessions
+(`memory:{project}`, `memory:global`) and never appear in `list_sessions`.
+opencode has no native memory folder and contributes nothing to these
+surfaces. Memory is captured by `nabu memory sync` / `nabu index --once`
+(not by `index --watch` ticks); only captured files are served.
 
 MVP MCP resources:
 

@@ -1091,7 +1091,7 @@ fn memory_tools_serve_captured_memory_files_with_citations() {
         .find(|entry| entry["tool"] == "claude")
         .unwrap();
     assert_eq!(claude_entry["project"], "-Users-me-project");
-    assert_eq!(claude_entry["session_id"], "-Users-me-project");
+    assert_eq!(claude_entry["session_id"], "memory:-Users-me-project");
     assert!(claude_entry["raw_line"].as_i64().unwrap() >= 1);
 
     let claude_memory = &by_id[&2]["result"]["structuredContent"];

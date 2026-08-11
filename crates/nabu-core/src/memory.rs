@@ -22,21 +22,51 @@ use std::str::FromStr;
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 
+/// Reserved session-id prefix for memory pseudo-sessions. Native tool session
+/// ids never use this prefix, so memory history cannot collide with real
+/// sessions in the sessions table or raw-file namespace.
+pub const MEMORY_SESSION_PREFIX: &str = "memory:";
+
+/// Soft cap on a single memory file's on-disk size. Larger files are skipped
+/// at sync time so a pathological multi-MB note cannot bloat the raw store
+/// and FTS index in one pass.
+pub const MAX_MEMORY_FILE_BYTES: u64 = 1_048_576;
+
 /// Session id of the memory pseudo-session holding one file's captured
-/// history: the claude project slug (one pseudo-session per project's memory
-/// folder) or `memories` for codex's global folder.
+/// history: `memory:{project-slug}` for a claude project folder, or
+/// `memory:global` for codex's global folder (and any tool without a project).
 fn memory_session_id(tool: Tool, project: Option<&str>) -> String {
     match (tool, project) {
-        (Tool::Claude, Some(project)) => project.to_string(),
-        (Tool::Claude, None) => "memories".to_string(),
-        (Tool::Codex, _) => "memories".to_string(),
-        (Tool::Opencode, _) => "memories".to_string(),
+        (Tool::Claude, Some(project)) if !project.is_empty() => {
+            format!("{MEMORY_SESSION_PREFIX}{project}")
+        }
+        _ => format!("{MEMORY_SESSION_PREFIX}global"),
+    }
+}
+
+/// Validate tool/project/name identity rules shared by every get surface.
+fn validate_memory_identity(tool: Tool, project: Option<&str>, name: &str) -> Result<()> {
+    if name.is_empty() {
+        return Err(Error::Validation(
+            "memory file name must not be empty".to_string(),
+        ));
+    }
+    match (tool, project) {
+        (Tool::Claude, Some(project)) if !project.is_empty() => Ok(()),
+        (Tool::Claude, _) => Err(Error::Validation(
+            "project is required for claude memories (the projects/<id> folder name)".to_string(),
+        )),
+        (Tool::Codex | Tool::Opencode, Some(project)) if !project.is_empty() => Err(
+            Error::Validation(format!("project must be omitted for {tool} memories")),
+        ),
+        (Tool::Codex | Tool::Opencode, _) => Ok(()),
     }
 }
 
 /// A memory file discovered in a tool's native folders. `project` is the
 /// claude project slug (folder name under `projects/`); codex memories are
-/// global, so their project is `None`.
+/// global, so their project is `None`. `name` is the path relative to the
+/// memory root (`MEMORY.md`, `sub/deep.md`), always `/`-separated.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemoryFileMeta {
     pub tool: Tool,
@@ -145,6 +175,27 @@ fn collect_memory_files(dir: &Path, output: &mut Vec<PathBuf>) -> Result<()> {
     Ok(())
 }
 
+/// Root-relative memory file name with stable `/` separators. Nested files
+/// keep their path (`sub/deep.md`) so list/get/dedupe identity is unambiguous.
+fn relative_memory_name(root: &Path, path: &Path) -> String {
+    match path.strip_prefix(root) {
+        Ok(relative) => {
+            let name = relative.to_string_lossy().replace('\\', "/");
+            if name.is_empty() {
+                path.file_name()
+                    .map(|value| value.to_string_lossy().into_owned())
+                    .unwrap_or_default()
+            } else {
+                name
+            }
+        }
+        Err(_) => path
+            .file_name()
+            .map(|value| value.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+    }
+}
+
 fn modified_at_rfc3339(system_time: std::time::SystemTime) -> Option<String> {
     OffsetDateTime::from(system_time).format(&Rfc3339).ok()
 }
@@ -168,15 +219,21 @@ pub fn discover_memory_files(tool: Tool) -> Result<Vec<MemoryFileMeta>> {
                     })
                 }
             };
+            let size = metadata.len();
+            // Oversized files are skipped at discovery so sync never reads them.
+            if size > MAX_MEMORY_FILE_BYTES {
+                continue;
+            }
+            let name = relative_memory_name(&root, &path);
+            if name.is_empty() {
+                continue;
+            }
             metas.push(MemoryFileMeta {
                 tool,
                 project: project.clone(),
-                name: path
-                    .file_name()
-                    .map(|name| name.to_string_lossy().into_owned())
-                    .unwrap_or_default(),
+                name,
                 native_path: path.clone(),
-                size: metadata.len(),
+                size,
                 modified_at: metadata.modified().ok().and_then(modified_at_rfc3339),
             });
         }
@@ -186,15 +243,20 @@ pub fn discover_memory_files(tool: Tool) -> Result<Vec<MemoryFileMeta>> {
 
 /// Capture one tool's current memory files into the raw store. Each file
 /// becomes a `memory.file` event in its memory pseudo-session; the dedupe key
-/// is content-derived, so an unchanged file appends nothing.
+/// is content-derived, so an unchanged file appends nothing. Non-UTF-8
+/// (binary) files are skipped.
 pub fn sync_memory(home: &Path, tool: Tool) -> Result<MemorySyncReport> {
     let synced_at = OffsetDateTime::now_utc().format(&Rfc3339)?;
     let discovered = discover_memory_files(tool)?;
-    let discovered_count = discovered.len();
-    let mut events = Vec::with_capacity(discovered_count);
+    let mut discovered_count = 0usize;
+    let mut events = Vec::with_capacity(discovered.len());
     for meta in discovered {
         let content = match fs::read(&meta.native_path) {
-            Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+            Ok(bytes) => match String::from_utf8(bytes) {
+                Ok(text) => text,
+                // Binary / non-UTF-8 memory files are not captured.
+                Err(_) => continue,
+            },
             // File vanished since discovery: skip, it is not part of this pass.
             Err(source) if source.kind() == std::io::ErrorKind::NotFound => continue,
             Err(source) => {
@@ -204,6 +266,7 @@ pub fn sync_memory(home: &Path, tool: Tool) -> Result<MemorySyncReport> {
                 })
             }
         };
+        discovered_count += 1;
         let session_id = memory_session_id(tool, meta.project.as_deref());
         let payload = json!({
             "name": meta.name,
@@ -286,7 +349,8 @@ fn memory_summary_from_row(
 /// List captured memory files, newest capture first. Returns the latest
 /// captured version of each file (a file edited since its last sync appears
 /// once, with its most recent event). Files removed from the tool's folders
-/// remain listed: the capture is durable history, not a mirror.
+/// remain listed: the capture is durable history, not a mirror. Identity is
+/// `(tool, project, name)` where `name` is the root-relative path.
 pub fn list_memories(
     home: &Path,
     tool: Option<Tool>,
@@ -313,7 +377,9 @@ pub fn list_memories(
              WHERE (?1 IS NULL OR m.tool = ?1)
                AND m.id = (
                  SELECT MAX(m2.id) FROM memories m2
-                 WHERE m2.tool = m.tool AND m2.native_path = m.native_path
+                 WHERE m2.tool = m.tool
+                   AND m2.name = m.name
+                   AND m2.project IS m.project
                )
              ORDER BY m.captured_at DESC, m.id DESC
              LIMIT ?2",
@@ -346,13 +412,15 @@ pub fn list_memories(
 
 /// Read one captured memory file by its tool identity, hydrating content from
 /// the canonical raw store. For claude, `project` is required (memory is
-/// per-project); for codex it must be `None`.
+/// per-project); for codex/opencode it must be `None`. `name` is the
+/// root-relative path (`MEMORY.md`, `sub/deep.md`).
 pub fn get_memory(
     home: &Path,
     tool: Tool,
     project: Option<&str>,
     name: &str,
 ) -> Result<MemoryFileContent> {
+    validate_memory_identity(tool, project, name)?;
     let db_path = home.join("index").join("harness.db");
     let conn = open_index(&db_path)?;
     let mut statement = conn
@@ -493,8 +561,11 @@ mod tests {
         assert_eq!(
             names,
             vec![
-                ("deep.md".to_string(), Some("-Users-me-project".to_string())),
                 ("note.md".to_string(), Some("-Users-me-project".to_string())),
+                (
+                    "sub/deep.md".to_string(),
+                    Some("-Users-me-project".to_string())
+                ),
             ]
         );
 
@@ -547,14 +618,87 @@ mod tests {
         assert_eq!(memories.len(), 1);
         assert_eq!(memories[0].name, "MEMORY.md");
         assert_eq!(memories[0].project.as_deref(), Some("-Users-me-project"));
-        assert_eq!(memories[0].session_id, "-Users-me-project");
+        assert_eq!(memories[0].session_id, "memory:-Users-me-project");
         assert_eq!(memories[0].native_path, memory_file.display().to_string());
 
         let content =
             get_memory(&home, Tool::Claude, Some("-Users-me-project"), "MEMORY.md").unwrap();
         assert!(content.content.contains("frozen"));
         assert_eq!(content.raw_line, 2);
-        assert!(content.raw_file.ends_with("claude_-Users-me-project.jsonl"));
+        assert!(content
+            .raw_file
+            .ends_with("claude_memory_-Users-me-project.jsonl"));
+    }
+
+    #[test]
+    fn nested_memory_names_are_addressable_and_distinct() {
+        let temp = tempdir().unwrap();
+        let home = temp.path().join("home");
+        init_home(&home).unwrap();
+
+        let claude_config = temp.path().join("claude-config");
+        let memory_dir = claude_config
+            .join("projects")
+            .join("-Users-me-project")
+            .join("memory");
+        fs::create_dir_all(memory_dir.join("sub")).unwrap();
+        fs::write(memory_dir.join("note.md"), "top-level note").unwrap();
+        fs::write(memory_dir.join("sub").join("note.md"), "nested note").unwrap();
+        let _guard = EnvGuard::set(&[
+            ("HOME", temp.path().as_os_str()),
+            ("CLAUDE_CONFIG_DIR", claude_config.as_os_str()),
+            ("CODEX_HOME", temp.path().join("codex").as_os_str()),
+        ]);
+
+        sync_memory(&home, Tool::Claude).unwrap();
+        index_once(&home).unwrap();
+
+        let memories = list_memories(&home, Some(Tool::Claude), 10).unwrap();
+        let mut names: Vec<_> = memories.iter().map(|m| m.name.clone()).collect();
+        names.sort();
+        assert_eq!(
+            names,
+            vec!["note.md".to_string(), "sub/note.md".to_string()]
+        );
+
+        let top = get_memory(&home, Tool::Claude, Some("-Users-me-project"), "note.md").unwrap();
+        assert!(top.content.contains("top-level"));
+        let nested = get_memory(
+            &home,
+            Tool::Claude,
+            Some("-Users-me-project"),
+            "sub/note.md",
+        )
+        .unwrap();
+        assert!(nested.content.contains("nested"));
+    }
+
+    #[test]
+    fn sync_skips_binary_and_oversized_memory_files() {
+        let temp = tempdir().unwrap();
+        let home = temp.path().join("home");
+        init_home(&home).unwrap();
+
+        let codex_home = temp.path().join("codex");
+        let memories = codex_home.join("memories");
+        fs::create_dir_all(&memories).unwrap();
+        fs::write(memories.join("ok.md"), "keep me").unwrap();
+        fs::write(memories.join("bin.dat"), [0xff, 0xfe, 0x00, 0x01]).unwrap();
+        let oversized = vec![b'a'; MAX_MEMORY_FILE_BYTES as usize + 1];
+        fs::write(memories.join("huge.md"), &oversized).unwrap();
+        let _guard = EnvGuard::set(&[
+            ("HOME", temp.path().as_os_str()),
+            ("CODEX_HOME", codex_home.as_os_str()),
+            ("CLAUDE_CONFIG_DIR", temp.path().join("claude").as_os_str()),
+        ]);
+
+        let report = sync_memory(&home, Tool::Codex).unwrap();
+        assert_eq!(report.discovered, 1);
+        assert_eq!(report.appended, 1);
+        index_once(&home).unwrap();
+        let listed = list_memories(&home, Some(Tool::Codex), 10).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].name, "ok.md");
     }
 
     #[test]
@@ -580,7 +724,8 @@ mod tests {
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].canonical_type, "memory.file");
         assert_eq!(hits[0].tool, Tool::Codex);
-        assert_eq!(hits[0].session_id, "memories");
+        assert_eq!(hits[0].session_id, "memory:global");
+        assert!(hits[0].session_id.starts_with(MEMORY_SESSION_PREFIX));
 
         // Memory pseudo-sessions are not sessions: list_sessions stays clean.
         let sessions = crate::list_sessions(&home, None, None, None, 10).unwrap();
@@ -616,6 +761,10 @@ mod tests {
             "MEMORY.md",
         );
         assert!(matches!(result, Err(Error::NotFound(_))));
+
+        // Core enforces project rules for non-claude tools.
+        let bad = get_memory(&home, Tool::Codex, Some("x"), "MEMORY.md");
+        assert!(matches!(bad, Err(Error::Validation(_))));
     }
 
     #[test]
@@ -683,7 +832,8 @@ CREATE TABLE events (
         fs::create_dir_all(db_path.parent().unwrap()).unwrap();
 
         // Build a pre-memory store: sessions + the legacy events table plus the
-        // derived tables the open path indexes against, with one real event.
+        // derived tables the open path indexes against, with one real event and
+        // the pre-migration events indexes that DROP TABLE must restore.
         let conn = rusqlite::Connection::open(&db_path).unwrap();
         conn.execute_batch(
             "PRAGMA foreign_keys = ON;
@@ -753,6 +903,13 @@ CREATE TABLE events (
         .unwrap();
         conn.execute_batch(LEGACY_EVENTS_TABLE).unwrap();
         conn.execute_batch(
+            "CREATE INDEX idx_events_tool_session_raw ON events(tool, session_id, raw_line, raw_offset);
+             CREATE INDEX idx_events_canonical_captured ON events(canonical_type, captured_at);
+             CREATE INDEX idx_events_session_captured ON events(tool, session_id, captured_at);
+             CREATE INDEX idx_events_tool_captured ON events(tool, captured_at);",
+        )
+        .unwrap();
+        conn.execute_batch(
             r#"INSERT INTO sessions(tool, session_id, filename_session_id, started_at, updated_at, raw_file)
              VALUES ('codex', 'session-1', 'session-1', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', 'raw/codex/codex_session-1.jsonl');
              INSERT INTO events(
@@ -780,6 +937,29 @@ CREATE TABLE events (
         assert!(sql.contains("'memory.file'"), "{sql}");
         assert!(sql.contains("'memory_sync'"), "{sql}");
 
+        // DROP TABLE events destroys indexes; open_index must restore the full set.
+        let mut index_names = conn
+            .prepare(
+                "SELECT name FROM sqlite_master
+                 WHERE type = 'index' AND tbl_name = 'events' AND name NOT LIKE 'sqlite_%'
+                 ORDER BY name",
+            )
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
+        index_names.sort();
+        assert_eq!(
+            index_names,
+            vec![
+                "idx_events_canonical_captured".to_string(),
+                "idx_events_session_captured".to_string(),
+                "idx_events_tool_captured".to_string(),
+                "idx_events_tool_session_raw".to_string(),
+            ]
+        );
+
         // The legacy row survived with its id, and autoincrement continues.
         let (count, max_id): (i64, i64) = conn
             .query_row("SELECT COUNT(*), MAX(id) FROM events", [], |row| {
@@ -800,14 +980,14 @@ CREATE TABLE events (
         // A memory event now inserts cleanly through the new CHECK.
         conn.execute_batch(
             "INSERT INTO sessions(tool, session_id, filename_session_id, started_at, updated_at, raw_file)
-             VALUES ('codex', 'memories', 'memories', '2026-01-02T00:00:00Z', '2026-01-02T00:00:00Z', 'raw/codex/codex_memories.jsonl');
+             VALUES ('codex', 'memory:global', 'memory_global', '2026-01-02T00:00:00Z', '2026-01-02T00:00:00Z', 'raw/codex/codex_memory_global.jsonl');
              INSERT INTO events(
                tool, session_id, dedupe_key, schema_version, captured_at, source,
                source_event_type, canonical_type, raw_file, raw_line, searchable_text, compaction_state,
                payload_json
              ) VALUES (
-               'codex', 'memories', 'sha256:memory-event', 1, '2026-01-02T00:00:00Z', 'memory_sync',
-               'memory.file', 'memory.file', 'raw/codex/codex_memories.jsonl', 1, 'note', 'none',
+               'codex', 'memory:global', 'sha256:memory-event', 1, '2026-01-02T00:00:00Z', 'memory_sync',
+               'memory.file', 'memory.file', 'raw/codex/codex_memory_global.jsonl', 1, 'note', 'none',
                '{\"name\": \"note.md\", \"content\": \"note\"}'
              );",
         )

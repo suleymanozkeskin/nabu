@@ -678,6 +678,8 @@ fn is_volatile_identity_key(key: &str) -> bool {
             | "timestamp"
             | "created_at"
             | "updated_at"
+            | "modified_at"
+            | "synced_at"
             | "tool_version"
             | "session_id"
             | "filename_session_id"

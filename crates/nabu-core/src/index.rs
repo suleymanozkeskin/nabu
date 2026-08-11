@@ -125,10 +125,11 @@ where
     F: FnMut(EmbeddingIndexProgress),
 {
     init_home(home)?;
-    // Refresh memory captures before scanning raw files so this pass indexes
-    // any newly synced memory events. Explicit passes sync by default;
-    // hook-triggered single-flight passes disable it (IndexOptions
-    // sync_memory=false) so per-event indexing never walks the memory tree.
+    // Optionally refresh memory captures before scanning raw files so this
+    // pass indexes newly synced memory events. Off by default (library
+    // index_once, hook single-flight, index --watch ticks); the CLI opts in
+    // for explicit `index --once` and the wizard so a deliberate index also
+    // captures memory without re-walking the tree on every watch tick.
     if options.sync_memory {
         for tool in Tool::all() {
             sync_memory(home, tool)?;

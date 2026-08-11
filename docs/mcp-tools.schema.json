@@ -66,8 +66,8 @@
       "type": "object",
       "properties": {
         "tool": { "type": "string", "enum": ["codex", "claude", "opencode"] },
-        "name": { "type": "string", "minLength": 1, "description": "Memory file name (e.g. MEMORY.md)." },
-        "project": { "type": "string", "description": "Claude project slug (the projects/<id> folder name). Required for claude, whose memory is per-project; must be omitted for codex, whose memory is global." },
+        "name": { "type": "string", "minLength": 1, "description": "Memory file path relative to the tool's memory root (e.g. MEMORY.md or sub/deep.md)." },
+        "project": { "type": "string", "description": "Claude project slug (the projects/<id> folder name). Required for claude, whose memory is per-project; must be omitted for codex/opencode." },
         "redact": { "type": "boolean", "default": false, "description": "When true, apply secret-pattern redaction to the returned content." }
       },
       "required": ["tool", "name"],

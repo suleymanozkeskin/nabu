@@ -171,6 +171,7 @@ CREATE TABLE IF NOT EXISTS memories (
 );
 
 CREATE INDEX IF NOT EXISTS idx_memories_tool_project ON memories(tool, project);
+CREATE INDEX IF NOT EXISTS idx_memories_tool_name_project ON memories(tool, name, project);
 CREATE INDEX IF NOT EXISTS idx_memories_native_path ON memories(native_path);
 
 CREATE TABLE IF NOT EXISTS checkpoints (

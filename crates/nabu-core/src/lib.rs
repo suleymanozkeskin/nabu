@@ -179,7 +179,10 @@ pub use redact::{redact_export_json, redact_export_text};
 pub(crate) use redact::{redact_json_value, redact_text};
 
 mod memory;
-pub use memory::{discover_memory_files, get_memory, list_memories, sync_memory, MemoryFileMeta};
+pub use memory::{
+    discover_memory_files, get_memory, list_memories, sync_memory, MemoryFileMeta,
+    MAX_MEMORY_FILE_BYTES, MEMORY_SESSION_PREFIX,
+};
 
 mod provenance;
 pub(crate) use provenance::extract_refs;

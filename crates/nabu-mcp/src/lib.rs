@@ -354,7 +354,7 @@ fn tool_descriptions() -> Value {
         },
         {
             "name": "list_memories",
-            "description": "List captured memory files from the tools' own memory folders (claude projects/<id>/memory/, codex memories/) with metadata and raw citations: tool, project (claude only), name, native_path, size, modified_at, captured_at, and the session_id/raw_file/raw_line of the latest captured version. Lists across every tool by default; pass tool=\"all\" for the explicit cross-tool form or a specific tool name to narrow. opencode contributes no memories: it has no native memory folder. Read the full content with get_memory. Memory files are also searchable through search_history (canonical_type=memory.file).",
+            "description": "List captured memory files from the tools' own memory folders (claude projects/<id>/memory/, codex memories/) with metadata and raw citations: tool, project (claude only), name (root-relative path, e.g. MEMORY.md or sub/deep.md), native_path, size, modified_at, captured_at, and the session_id/raw_file/raw_line of the latest captured version. session_id is a reserved memory pseudo-session (memory:{project} for claude, memory:global for codex). Lists across every tool by default; pass tool=\"all\" for the explicit cross-tool form or a specific tool name to narrow. opencode contributes no memories: it has no native memory folder. Read the full content with get_memory. Memory files are also searchable through search_history (canonical_type=memory.file).",
             "inputSchema": tool_schema("list_memories")
         },
         {
@@ -364,7 +364,7 @@ fn tool_descriptions() -> Value {
         },
         {
             "name": "get_memory",
-            "description": "Read one captured memory file at full content, with its raw citation. Requires tool plus name; claude memories are per-project so project is required for claude and must be omitted for codex. The response carries tool, project, name, native_path, size, modified_at, captured_at, session_id, raw_file, raw_line, raw_offset, and the full content; set redact=true to apply secret-pattern redaction to the content. Content is hydrated from the canonical raw store, so a memory file deleted from the tool's folder remains readable. Memory files are captured by nabu memory sync / nabu index --once; only captured files are served.",
+            "description": "Read one captured memory file at full content, with its raw citation. Requires tool plus name (root-relative path, e.g. MEMORY.md or sub/deep.md); claude memories are per-project so project is required for claude and must be omitted for codex/opencode. The response carries tool, project, name, native_path, size, modified_at, captured_at, session_id (memory:{project} or memory:global), raw_file, raw_line, raw_offset, and the full content; set redact=true to apply secret-pattern redaction to the content. Content is hydrated from the canonical raw store, so a memory file deleted from the tool's folder remains readable. Memory files are captured by nabu memory sync / nabu index --once; only captured files are served.",
             "inputSchema": tool_schema("get_memory")
         },
         {
@@ -534,27 +534,9 @@ fn tool_list_memories(home: &Path, arguments: &Value) -> Result<Value, ToolError
 fn tool_get_memory(home: &Path, arguments: &Value) -> Result<Value, ToolError> {
     let tool = required_tool(arguments, "tool")?;
     let name = required_string(arguments, "name")?;
-    // Claude memory is per-project (projects/<id>/memory/), so claude lookups
-    // must name a project; codex memory is global and must not.
+    // Claude memory is per-project; codex/opencode memory is global. Core
+    // get_memory enforces the pairing and maps Validation to the MCP error.
     let project = optional_string(arguments, "project");
-    match (tool, project.as_deref()) {
-        (Tool::Claude, Some(project)) if !project.is_empty() => {}
-        (Tool::Claude, _) => {
-            return Err(ToolError::new(
-                "VALIDATION_ERROR",
-                "project is required for claude memories",
-                true,
-            ))
-        }
-        (_, Some(project)) if !project.is_empty() => {
-            return Err(ToolError::new(
-                "VALIDATION_ERROR",
-                "project must be omitted for codex memories (codex memory is global)",
-                true,
-            ))
-        }
-        _ => {}
-    }
     let redact = optional_bool(arguments, "redact", false);
     let content = get_memory(home, tool, project.as_deref(), name)?;
     let mut value = serde_json::to_value(content)?;
@@ -1029,36 +1011,51 @@ fn resource_content(home: &Path, uri: &str) -> nabu_core::Result<String> {
             )?)?)
         }
         _ if uri.starts_with("nabu://memories/") => {
-            // nabu://memories/{tool} or nabu://memories/{tool}/{project}/{name}
+            // nabu://memories/{tool}
+            // nabu://memories/{tool}/{name}                 (codex; name may contain /)
+            // nabu://memories/{tool}/{project}/{name}...    (claude; remaining segments = name)
             let rest = uri.trim_start_matches("nabu://memories/");
-            let mut parts = rest.split('/');
+            let parts: Vec<&str> = rest.split('/').filter(|part| !part.is_empty()).collect();
             let tool = parts
-                .next()
+                .first()
+                .copied()
                 .and_then(|value| Tool::from_str(value).ok())
                 .ok_or_else(|| Error::Validation("resource tool is invalid".to_string()))?;
-            let name = parts.next().filter(|value| !value.is_empty());
-            match name {
-                None => {
+            match parts.as_slice() {
+                [_] => {
                     let memories = list_memories(home, Some(tool), 50)?;
                     Ok(serde_json::to_string(&json!({ "memories": memories }))?)
                 }
-                Some(name) => {
-                    let project = parts.next().filter(|value| !value.is_empty());
-                    if project.is_some() && parts.next().is_some() {
-                        return Err(Error::Validation(
-                            "resource uri has too many segments".to_string(),
-                        ));
+                [_, name_parts @ ..] if !name_parts.is_empty() => match tool {
+                    Tool::Claude => {
+                        // claude requires project: first segment after tool is
+                        // the project slug; the rest (joined) is the root-relative name.
+                        if name_parts.len() < 2 {
+                            return Err(Error::Validation(
+                                "claude memory resources require nabu://memories/claude/{project}/{name}"
+                                    .to_string(),
+                            ));
+                        }
+                        let project = name_parts[0];
+                        let name = name_parts[1..].join("/");
+                        Ok(serde_json::to_string(&get_memory(
+                            home,
+                            tool,
+                            Some(project),
+                            &name,
+                        )?)?)
                     }
-                    // The uri is {tool}/{project}/{name} when project was read
-                    // after name: name holds the project segment.
-                    let (project, name) = match project {
-                        Some(project) => (Some(name), project),
-                        None => (None, name),
-                    };
-                    Ok(serde_json::to_string(&get_memory(
-                        home, tool, project, name,
-                    )?)?)
-                }
+                    Tool::Codex | Tool::Opencode => {
+                        // Global memory: every segment after tool is the name.
+                        let name = name_parts.join("/");
+                        Ok(serde_json::to_string(&get_memory(
+                            home, tool, None, &name,
+                        )?)?)
+                    }
+                },
+                _ => Err(Error::Validation(
+                    "resource uri has no path segments".to_string(),
+                )),
             }
         }
         _ => Err(Error::Validation(format!("unknown resource uri: {uri}"))),
@@ -1119,7 +1116,7 @@ fn resource_descriptions() -> Value {
         {
             "uriTemplate": "nabu://memories/{tool}/{project}/{name}",
             "name": "Captured memory file content",
-            "description": "Full content of one captured memory file. For codex (global memory) omit the project segment: nabu://memories/codex/{name}.",
+            "description": "Full content of one captured memory file. name is root-relative and may contain slashes (sub/deep.md). For codex (global memory) omit the project segment: nabu://memories/codex/{name}. Claude requires the project segment.",
             "mimeType": "application/json"
         },
         {
@@ -1213,8 +1210,8 @@ fn tool_schema(name: &str) -> Value {
             "type": "object",
             "properties": {
                 "tool": { "type": "string", "enum": ["codex", "claude", "opencode"] },
-                "name": { "type": "string", "minLength": 1, "description": "Memory file name (e.g. MEMORY.md)." },
-                "project": { "type": "string", "description": "Claude project slug (the projects/<id> folder name). Required for claude, whose memory is per-project; must be omitted for codex, whose memory is global." },
+                "name": { "type": "string", "minLength": 1, "description": "Memory file path relative to the tool's memory root (e.g. MEMORY.md or sub/deep.md)." },
+                "project": { "type": "string", "description": "Claude project slug (the projects/<id> folder name). Required for claude, whose memory is per-project; must be omitted for codex/opencode." },
                 "redact": { "type": "boolean", "default": false, "description": "When true, apply secret-pattern redaction to the returned content." }
             },
             "required": ["tool", "name"],

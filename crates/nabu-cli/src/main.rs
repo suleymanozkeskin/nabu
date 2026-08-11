@@ -269,11 +269,11 @@ enum MemoryCommand {
     /// Read one captured memory file with its raw citation.
     Show {
         tool: Tool,
-        /// Memory file name (e.g. MEMORY.md).
+        /// Memory file path relative to the tool's memory root (e.g. MEMORY.md
+        /// or sub/deep.md).
         name: String,
         /// Claude project slug (the projects/<id> folder name). Required for
-        /// claude, whose memory is per-project; omit for codex, whose memory
-        /// is global.
+        /// claude, whose memory is per-project; omit for codex/opencode.
         #[arg(long)]
         project: Option<String>,
         #[arg(long)]
@@ -640,11 +640,12 @@ fn run(cli: Cli) -> nabu_core::Result<()> {
             single_flight,
         } => {
             let progress = ProgressEmitter::new(json_progress);
-            // Explicit index runs refresh the memory capture (sync_memory);
-            // hook-triggered single-flight passes never walk the memory tree.
+            // Explicit `index --once` refreshes memory captures. Watch ticks
+            // and hook single-flight passes never walk the memory tree — use
+            // `nabu memory sync` (or a fresh --once) to recapture.
             let index_options = IndexOptions {
                 embed: !no_embed,
-                sync_memory: !single_flight,
+                sync_memory: once && !single_flight && !watch,
             };
             if single_flight {
                 if !once {
@@ -1045,21 +1046,7 @@ fn run_memory_command(home: &Path, command: MemoryCommand) -> nabu_core::Result<
             redact,
             format,
         } => {
-            let project =
-                match (tool, project) {
-                    (Tool::Claude, Some(project)) if !project.is_empty() => Some(project),
-                    (Tool::Claude, _) => return Err(Error::Validation(
-                        "project is required for claude memories (the projects/<id> folder name)"
-                            .to_string(),
-                    )),
-                    (_, Some(project)) if !project.is_empty() => {
-                        return Err(Error::Validation(
-                            "project must be omitted for codex memories (codex memory is global)"
-                                .to_string(),
-                        ))
-                    }
-                    (_, project) => project,
-                };
+            // Core get_memory validates tool/project pairing; pass through as-is.
             let mut content = get_memory(home, tool, project.as_deref(), &name)?;
             if redact {
                 content.content = redact_export_text(&content.content);

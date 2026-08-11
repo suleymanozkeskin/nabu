@@ -117,18 +117,9 @@ pub fn list_sessions(
          FROM sessions
          WHERE 1 = 1",
     );
-    // Memory pseudo-sessions (a project's captured memory folder, or codex's
-    // `memories`) are not sessions: they have their own list/get surface and
-    // must not pollute session triage. A session is a memory session when it
-    // holds no non-memory events, so keep only sessions with at least one.
-    sql.push_str(
-        " AND EXISTS (
-             SELECT 1 FROM events e
-             WHERE e.tool = sessions.tool
-               AND e.session_id = sessions.session_id
-               AND e.canonical_type != 'memory.file'
-           )",
-    );
+    // Memory pseudo-sessions use the reserved `memory:` session_id prefix and
+    // have their own list/get surface; exclude them from session triage.
+    sql.push_str(" AND session_id NOT LIKE 'memory:%'");
     let mut params = Vec::new();
 
     if let Some(tool) = tool {
