@@ -14,6 +14,8 @@ mod codex;
 use codex::*;
 mod opencode;
 pub(crate) use opencode::*;
+mod pi;
+pub(crate) use pi::*;
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -544,13 +546,18 @@ fn parse_backfill_source(
     start_offset: u64,
     parse_context: &BackfillParseContext,
 ) -> Result<ParsedBackfillSource> {
-    match source_path.extension().and_then(|value| value.to_str()) {
-        Some("jsonl") => parse_backfill_jsonl(tool, source_path, start_offset, parse_context),
-        Some("json") => parse_backfill_json(tool, source_path, parse_context),
-        _ => Ok(ParsedBackfillSource {
-            events: Vec::new(),
-            last_session_id: None,
-        }),
+    match tool {
+        // Pi files are parsed whole (the append path dedupes), so checkpoint
+        // offsets do not apply.
+        Tool::Pi => parse_pi_session_jsonl(source_path),
+        _ => match source_path.extension().and_then(|value| value.to_str()) {
+            Some("jsonl") => parse_backfill_jsonl(tool, source_path, start_offset, parse_context),
+            Some("json") => parse_backfill_json(tool, source_path, parse_context),
+            _ => Ok(ParsedBackfillSource {
+                events: Vec::new(),
+                last_session_id: None,
+            }),
+        },
     }
 }
 
@@ -1236,8 +1243,16 @@ fn backfill_tool_root(source_root: &Path, tool: Tool) -> PathBuf {
         Tool::Codex => source_root.join("codex"),
         Tool::Claude => source_root.join("claude-code"),
         Tool::Opencode => source_root.join("opencode"),
-        // Pi backfill roots are resolved in PR2; keep the nested path shape.
-        Tool::Pi => source_root.join("pi"),
+        // Pi: prefer the nested `pi/` harness-fixtures layout, else treat the
+        // given root as a sessions tree or fixture directory directly.
+        Tool::Pi => {
+            let nested = source_root.join("pi");
+            if nested.is_dir() {
+                nested
+            } else {
+                source_root.to_path_buf()
+            }
+        }
     };
     if candidate.exists() {
         candidate
@@ -1275,8 +1290,7 @@ fn is_backfill_candidate(tool: Tool, path: &Path) -> bool {
             path.extension().and_then(|value| value.to_str()),
             Some("json") | Some("jsonl")
         ),
-        // Pi session parsing lands with PR2; nothing is a candidate yet.
-        Tool::Pi => false,
+        Tool::Pi => is_pi_session_file(path),
     }
 }
 

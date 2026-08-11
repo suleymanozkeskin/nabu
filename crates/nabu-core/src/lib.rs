@@ -86,7 +86,7 @@ pub use identity::{dedupe_key, sanitize_session_id};
 pub(crate) use identity::{hash_line, sha256_hex};
 
 mod paths;
-pub use paths::{canonical_raw_path, resolve_home};
+pub use paths::{canonical_raw_path, pi_sessions_root, resolve_home};
 pub(crate) use paths::{
     chmod, create_dir_0700, harness_home_for_raw_file, lock_path_for_raw_file, set_if_exists,
 };

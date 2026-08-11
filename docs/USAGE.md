@@ -221,7 +221,20 @@ nabu backfill --tool claude --since 30d
 nabu backfill --tool codex --dry-run
 ```
 
-Without `--path`, backfill scans native local roots: `$CODEX_HOME/sessions`, `$CODEX_HOME/archived_sessions`, `$CLAUDE_CONFIG_DIR/projects` or `~/.claude/projects`, and `~/.local/share/opencode/`.
+Without `--path`, backfill scans native local roots: `$CODEX_HOME/sessions`, `$CODEX_HOME/archived_sessions`, `$CLAUDE_CONFIG_DIR/projects` or `~/.claude/projects`, `~/.local/share/opencode/`, and `$PI_AGENT_DIR/sessions` or `~/.pi/agent/sessions` (pi).
+
+Pi session files (`~/.pi/agent/sessions/--<cwd>--/<timestamp>_<uuid>.jsonl`) are
+imported with full tree fidelity: every entry of the file is kept in file
+order, including abandoned branches, with `parentId`/entry `id` preserved on
+each event payload and the full original entry under `payload.pi_entry`.
+Messages expand into canonical events (user/assistant/toolResult,
+toolCall blocks into `tool.call` events, `bashExecution` into a call/result
+pair), compactions become a single `compaction.after` (the `retainedTail`
+checkpoint is kept in the payload, not re-expanded), and metadata entries
+(`model_change`, `thinking_level_change`, `session_info`, `label`,
+`branch_summary`) map to `session.resumed`. Extension-private `custom`
+entries are skipped; `custom_message` entries import as `user.message`.
+Re-backfilling the same files appends nothing (content-addressed dedupe).
 
 OpenCode server reconciliation is disabled unless `NABU_OPENCODE_URL` or `[opencode] server_url = "..."` in `config.toml` is set. When configured, backfill discovers local OpenCode session ids and fetches `GET /session/:id/message`. Fetched server messages are appended directly to canonical raw session files; nabu does not keep a second copy of the API response in spool storage.
 

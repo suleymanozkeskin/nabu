@@ -42,6 +42,22 @@ pub fn default_home() -> Result<PathBuf> {
     Ok(current)
 }
 
+/// Pi's session transcripts root: `$PI_AGENT_DIR/sessions`, else
+/// `~/.pi/agent/sessions`. `PI_AGENT_DIR` is the pi agent config root (the
+/// directory that contains `sessions/` and `extensions/`).
+pub fn pi_sessions_root() -> Result<PathBuf> {
+    let agent_dir = match env::var_os("PI_AGENT_DIR") {
+        Some(agent_dir) => PathBuf::from(agent_dir),
+        None => {
+            let home = env::var_os("HOME")
+                .map(PathBuf::from)
+                .ok_or(Error::HomeUnavailable)?;
+            home.join(".pi").join("agent")
+        }
+    };
+    Ok(agent_dir.join("sessions"))
+}
+
 pub(crate) fn create_dir_0700(path: &Path) -> Result<()> {
     fs::create_dir_all(path).map_err(|source| Error::Io {
         path: path.to_path_buf(),

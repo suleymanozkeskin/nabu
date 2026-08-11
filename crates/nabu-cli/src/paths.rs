@@ -94,19 +94,11 @@ fn codex_home_dir() -> nabu_core::Result<PathBuf> {
     Ok(home_dir()?.join(".codex"))
 }
 
-/// Pi's agent root: `$PI_AGENT_DIR` (the dir containing `sessions/`), else
-/// `~/.pi/agent`.
-fn pi_agent_dir() -> nabu_core::Result<PathBuf> {
-    if let Some(agent_dir) = std::env::var_os("PI_AGENT_DIR") {
-        return Ok(PathBuf::from(agent_dir));
-    }
-    Ok(home_dir()?.join(".pi").join("agent"))
-}
-
 /// Pi session transcripts: `$PI_AGENT_DIR/sessions`, else
-/// `~/.pi/agent/sessions`.
+/// `~/.pi/agent/sessions` (resolution lives in nabu_core so backfill CLI and
+/// core agree on the root).
 fn pi_transcript_roots() -> nabu_core::Result<Vec<PathBuf>> {
-    Ok(vec![pi_agent_dir()?.join("sessions")])
+    Ok(vec![nabu_core::pi_sessions_root()?])
 }
 
 #[cfg(test)]
