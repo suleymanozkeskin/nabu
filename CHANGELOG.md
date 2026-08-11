@@ -5,6 +5,8 @@ in `docs/release-notes.md`.
 
 ## Unreleased
 
+## 0.1.5
+
 - Serve each tool's own memory folders as first-class, searchable history.
   `nabu memory sync` (also run by `nabu index --once` and the wizard; not by
   `index --watch` ticks or hook single-flight passes) captures claude
