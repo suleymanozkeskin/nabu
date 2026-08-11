@@ -145,7 +145,9 @@ pub(crate) use ingest::{
     read_raw_dedupe_snapshot, remove_dedupe_sidecar_for_raw_file, resolved_payload_for_envelope,
     sequence_for_payload, source_event_id_for_payload, DedupeSidecarFiles, ExistingRawEvent,
 };
-pub use ingest::{ingest_file, ingest_hook_event, ingest_opencode_server_messages, init_home};
+pub use ingest::{
+    ingest_file, ingest_hook_event, ingest_hook_events, ingest_opencode_server_messages, init_home,
+};
 
 mod index;
 pub use index::{
@@ -178,6 +180,8 @@ mod redact;
 pub use redact::{redact_export_json, redact_export_text};
 pub(crate) use redact::{redact_json_value, redact_text};
 
+mod pi_map;
+pub(crate) use pi_map::expand_pi_hook_payload;
 mod memory;
 pub use memory::{
     discover_memory_files, get_memory, list_memories, sync_memory, MemoryFileMeta,

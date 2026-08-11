@@ -35,6 +35,11 @@ const CLAUDE_HOOK_EVENTS: [&str; 12] = [
     "SessionEnd",
 ];
 const OPENCODE_PLUGIN: &str = include_str!("../templates/harness-history.ts");
+const PI_EXTENSION_TEMPLATE: &str = include_str!("../templates/nabu-pi-extension.ts");
+/// Marker every nabu pi extension file carries in its header comment.
+/// Install refuses to overwrite a file without it; uninstall refuses to delete
+/// one without it.
+const PI_EXTENSION_MARKER: &str = "NABU_PI_EXTENSION";
 #[cfg(test)]
 const CODEX_HOOKS_REFERENCE: &str = include_str!("../templates/codex-hooks.json");
 #[cfg(test)]
@@ -375,46 +380,129 @@ pub fn pi_extension_path() -> Result<PathBuf> {
         .join("nabu.ts"))
 }
 
-/// Install the pi capture extension. PR1 foundation: performs no writes and
-/// reports `changed: false`; the extension file lands with PR3.
+/// Install the pi capture extension: writes the template to
+/// `~/.pi/agent/extensions/nabu.ts` (or `$PI_AGENT_DIR/extensions/nabu.ts`).
+/// A marked nabu file is backed up and replaced (idempotent upgrade); a
+/// foreign file at the target path is refused, never overwritten.
 pub fn install_pi(home: &Path, dry_run: bool) -> Result<ConfigChangeReport> {
-    let _ = home;
     let extension_path = pi_extension_path()?;
+    let after = PI_EXTENSION_TEMPLATE;
+    let before = read_text_or_empty(&extension_path)?;
+    if extension_path.is_file() && !pi_file_is_marked(&extension_path) {
+        return Err(Error::Validation(format!(
+            "refusing to overwrite non-nabu extension at {}",
+            extension_path.display()
+        )));
+    }
+    let changed = before != after;
+
+    if changed && !dry_run {
+        if let Some(parent) = extension_path.parent() {
+            create_extensions_dir(parent)?;
+        }
+        if extension_path.is_file() {
+            backup_config(home, Tool::Pi, "install", &extension_path)?;
+        }
+        write_text_file(&extension_path, after, 0o644)?;
+    }
+
     Ok(ConfigChangeReport {
         tool: Tool::Pi,
         target_path: extension_path,
-        changed: false,
+        changed,
         dry_run,
-        summary: "pi extension install is not enabled yet".to_string(),
+        summary: if changed {
+            if dry_run {
+                "would install the pi capture extension".to_string()
+            } else {
+                "installed the pi capture extension".to_string()
+            }
+        } else {
+            "pi capture extension already installed".to_string()
+        },
         diff: String::new(),
     })
 }
 
-/// Uninstall the pi capture extension. PR1 foundation: no-op, reports
-/// `changed: false`; real removal lands with PR3.
+/// Uninstall the pi capture extension: removes only a nabu-marked file (with
+/// a backup); a foreign file at the target path is refused. The extensions/
+/// directory itself is left in place even when empty.
 pub fn uninstall_pi(home: &Path, dry_run: bool) -> Result<ConfigChangeReport> {
-    let _ = home;
     let extension_path = pi_extension_path()?;
+    let exists = extension_path.is_file();
+    if exists && !pi_file_is_marked(&extension_path) {
+        return Err(Error::Validation(format!(
+            "refusing to remove non-nabu extension at {}",
+            extension_path.display()
+        )));
+    }
+
+    if exists && !dry_run {
+        backup_config(home, Tool::Pi, "uninstall", &extension_path)?;
+        fs::remove_file(&extension_path).map_err(|source| Error::Io {
+            path: extension_path.clone(),
+            source,
+        })?;
+    }
+
     Ok(ConfigChangeReport {
         tool: Tool::Pi,
         target_path: extension_path,
-        changed: false,
+        changed: exists,
         dry_run,
-        summary: "pi extension uninstall is not enabled yet".to_string(),
+        summary: if exists {
+            if dry_run {
+                "would remove the pi capture extension".to_string()
+            } else {
+                "removed the pi capture extension".to_string()
+            }
+        } else {
+            "pi capture extension not installed".to_string()
+        },
         diff: String::new(),
     })
 }
 
-/// Report pi's install state: binary on PATH, extension file presence, and
+/// True when the extension file exists and carries the nabu marker.
+fn pi_file_is_marked(path: &Path) -> bool {
+    read_text_or_empty(path)
+        .map(|content| content.contains(PI_EXTENSION_MARKER))
+        .unwrap_or(false)
+}
+
+/// Create the pi extensions directory with mode 0o755 (pi loads extensions
+/// from it); only tightens the mode when this call creates it.
+fn create_extensions_dir(dir: &Path) -> Result<()> {
+    let created = !dir.exists();
+    fs::create_dir_all(dir).map_err(|source| Error::Io {
+        path: dir.to_path_buf(),
+        source,
+    })?;
+    if created {
+        chmod(dir, 0o755)?;
+    }
+    Ok(())
+}
+
+/// Report pi's install state: binary on PATH, nabu-marked extension file, and
 /// whether nabu's raw/pi storage exists.
 pub fn pi_status(home: &Path) -> Result<PiStatus> {
     let extension_path = pi_extension_path()?;
+    let extension_installed = pi_file_is_marked(&extension_path);
+    let error = if extension_path.is_file() && !extension_installed {
+        Some(format!(
+            "extension file at {} is not a nabu extension; install/uninstall refuse to touch it",
+            extension_path.display()
+        ))
+    } else {
+        None
+    };
     Ok(PiStatus {
         pi_installed: command_in_path("pi"),
-        extension_installed: extension_path.is_file(),
+        extension_installed,
         extension_path,
         storage_writable: home.join("raw").join("pi").is_dir(),
-        error: None,
+        error,
     })
 }
 
@@ -458,6 +546,16 @@ fn opencode_plugin_path() -> Result<PathBuf> {
         .join("opencode")
         .join("plugins")
         .join("harness-history.ts"))
+}
+
+fn read_text_or_empty(path: &Path) -> Result<String> {
+    if !path.exists() {
+        return Ok(String::new());
+    }
+    fs::read_to_string(path).map_err(|source| Error::Io {
+        path: path.to_path_buf(),
+        source,
+    })
 }
 
 fn read_settings_or_empty(path: &Path) -> Result<Value> {
@@ -1556,18 +1654,130 @@ mod tests {
         assert_eq!(leftovers, 0);
     }
 
+    #[test]
+    fn install_pi_writes_marker_file_and_is_idempotent() {
+        let temp = tempdir().unwrap();
+        let pi_agent_dir = temp.path().join("pi-agent");
+        let _env = EnvGuard::set([("PI_AGENT_DIR", pi_agent_dir.as_os_str())]);
+        let home = temp.path().join("home");
+        fs::create_dir_all(home.join("raw").join("pi")).unwrap();
+
+        let first = install_pi(&home, false).unwrap();
+        assert!(first.changed);
+        let extension_path = pi_extension_path().unwrap();
+        assert!(extension_path.is_file());
+        let content = fs::read_to_string(&extension_path).unwrap();
+        assert!(content.contains("NABU_PI_EXTENSION"));
+        assert!(content.contains("session_start"));
+        assert!(content.contains("message_end"));
+        assert!(content.contains("session_compact"));
+        assert!(content.contains("node:child_process"));
+        assert!(!content.contains("Bun.spawn"));
+
+        // Idempotent re-install.
+        let second = install_pi(&home, false).unwrap();
+        assert!(!second.changed);
+        drop(_env);
+    }
+
+    #[test]
+    fn install_pi_refuses_foreign_file() {
+        let temp = tempdir().unwrap();
+        let pi_agent_dir = temp.path().join("pi-agent");
+        let _env = EnvGuard::set([("PI_AGENT_DIR", pi_agent_dir.as_os_str())]);
+        let home = temp.path().join("home");
+        let extension_path = pi_extension_path().unwrap();
+        fs::create_dir_all(extension_path.parent().unwrap()).unwrap();
+        fs::write(
+            &extension_path,
+            "// user extension\nexport default () => {};",
+        )
+        .unwrap();
+
+        let result = install_pi(&home, false);
+        assert!(
+            matches!(result, Err(Error::Validation(message)) if message.contains("refusing to overwrite"))
+        );
+        assert_eq!(
+            fs::read_to_string(&extension_path).unwrap(),
+            "// user extension\nexport default () => {};"
+        );
+        drop(_env);
+    }
+
+    #[test]
+    fn uninstall_pi_removes_only_marked_files() {
+        let temp = tempdir().unwrap();
+        let pi_agent_dir = temp.path().join("pi-agent");
+        let _env = EnvGuard::set([("PI_AGENT_DIR", pi_agent_dir.as_os_str())]);
+        let home = temp.path().join("home");
+        fs::create_dir_all(home.join("raw").join("pi")).unwrap();
+
+        // Not installed: no-op.
+        let missing = uninstall_pi(&home, false).unwrap();
+        assert!(!missing.changed);
+
+        install_pi(&home, false).unwrap();
+        let removed = uninstall_pi(&home, false).unwrap();
+        assert!(removed.changed);
+        assert!(!pi_extension_path().unwrap().exists());
+        // The extensions/ directory itself stays.
+        assert!(pi_extension_path().unwrap().parent().unwrap().is_dir());
+
+        // Foreign file is refused on uninstall.
+        let extension_path = pi_extension_path().unwrap();
+        fs::write(&extension_path, "// not nabu").unwrap();
+        let result = uninstall_pi(&home, false);
+        assert!(
+            matches!(result, Err(Error::Validation(message)) if message.contains("refusing to remove"))
+        );
+        assert!(extension_path.exists());
+        drop(_env);
+    }
+
+    #[test]
+    fn pi_status_detects_marker_and_foreign_files() {
+        let temp = tempdir().unwrap();
+        let pi_agent_dir = temp.path().join("pi-agent");
+        let _env = EnvGuard::set([("PI_AGENT_DIR", pi_agent_dir.as_os_str())]);
+        let home = temp.path().join("home");
+        fs::create_dir_all(home.join("raw").join("pi")).unwrap();
+
+        let before = pi_status(&home).unwrap();
+        assert!(!before.extension_installed);
+        assert!(before.storage_writable);
+
+        install_pi(&home, false).unwrap();
+        let installed = pi_status(&home).unwrap();
+        assert!(installed.extension_installed);
+        assert!(installed.error.is_none());
+
+        fs::write(pi_extension_path().unwrap(), "// foreign").unwrap();
+        let foreign = pi_status(&home).unwrap();
+        assert!(!foreign.extension_installed);
+        assert!(foreign.error.is_some());
+        drop(_env);
+    }
+
     struct EnvGuard {
+        // Held for the guard's lifetime: env vars are process-global, so tests
+        // that mutate them must run serialized (a second EnvGuard::set blocks).
+        _lock: std::sync::MutexGuard<'static, ()>,
         old_values: Vec<(&'static str, Option<OsString>)>,
     }
 
     impl EnvGuard {
         fn set<const N: usize>(values: [(&'static str, &OsStr); N]) -> Self {
+            static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+            let _lock = ENV_LOCK
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             let mut old_values = Vec::new();
             for (key, value) in values {
                 old_values.push((key, env::var_os(key)));
                 env::set_var(key, value);
             }
-            Self { old_values }
+            Self { _lock, old_values }
         }
     }
 
