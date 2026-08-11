@@ -5,10 +5,11 @@ in `docs/release-notes.md`.
 
 ## Unreleased
 
-- Wizard health is a fast liveness check (storage/index/backfill only) with a
-  live braille spinner while each stage runs, instead of freezing on the
-  storage-footprint walk and raw-file freshness scan. Capture detection,
-  backfill scan/import, and indexing also animate in-progress work.
+- Wizard long steps animate with a braille spinner (health stages, agent
+  detection on every frame, capture install, backfill scan/import, indexing)
+  so the UI no longer looks frozen. Health is also a fast liveness check only
+  (storage/index/backfill) — it skips the storage-footprint walk and raw-file
+  freshness scan that dominate on large stores.
 
 ## 0.1.6
 

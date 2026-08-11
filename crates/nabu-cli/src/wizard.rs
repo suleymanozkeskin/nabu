@@ -158,6 +158,9 @@ pub(crate) trait Prompter {
     fn end_work(&mut self, ok: bool, message: &str) {
         self.status(ok, message);
     }
+    /// Stop in-progress work without printing a result line (e.g. chrome
+    /// detect, where the next painted status line is the outcome).
+    fn cancel_work(&mut self) {}
     /// A `label   value` row for summaries and the settings inspector.
     fn field(&mut self, label: &str, value: &str) {
         self.info(&format!("{label}  {value}"));
@@ -500,6 +503,10 @@ impl Prompter for TtyPrompter {
         self.status(ok, message);
     }
 
+    fn cancel_work(&mut self) {
+        self.stop_work_spinner();
+    }
+
     fn field(&mut self, label: &str, value: &str) {
         println!(
             "  {}  {value}",
@@ -820,10 +827,15 @@ fn draw_chrome(
 ) -> Result<Vec<ToolState>> {
     prompter.clear();
     prompter.heading("𒀭𒀝   nabu");
-    prompter.info("Local, cross-agent history for Codex, Claude Code & OpenCode.");
+    prompter.info("Local, cross-agent history for Codex, Claude Code, OpenCode & Pi.");
     prompter.blank();
 
+    // Detect can touch four tool configs and PATH lookups; animate so a slow
+    // machine does not look frozen after the screen clears.
+    prompter.begin_work("Checking agents…");
     let detected = actions.detect(home)?;
+    prompter.cancel_work();
+
     let configured = joined_tool_labels(
         detected.iter().filter(|t| t.configured).map(|t| t.tool),
         " · ",
@@ -1176,9 +1188,11 @@ fn install_selected(
         if state.configured {
             continue;
         }
+        prompter.begin_work(&format!("Installing {label} capture…"));
         match actions.install(home, state.tool, false) {
-            Ok(_) => prompter.success(&format!("{label} capture installed")),
+            Ok(_) => prompter.end_work(true, &format!("{label} capture installed")),
             Err(error) => {
+                prompter.end_work(false, &format!("{label} capture"));
                 prompter.failure(&format!("{label} capture failed: {error}"));
                 prompter.note("Other steps continue; fix and re-run to repair.");
             }
@@ -1195,12 +1209,17 @@ fn connect_selected(
 ) {
     let mut connected = String::new();
     for state in states {
+        let label = tool_label(state.tool);
+        prompter.begin_work(&format!("Connecting {label}…"));
         match actions.mcp_install(home, state.tool, false) {
-            Ok(_) => push_joined_tool_label(&mut connected, state.tool, " · "),
-            Err(error) => prompter.failure(&format!(
-                "{} connect failed: {error}",
-                tool_label(state.tool)
-            )),
+            Ok(_) => {
+                prompter.end_work(true, &format!("{label} connected"));
+                push_joined_tool_label(&mut connected, state.tool, " · ");
+            }
+            Err(error) => {
+                prompter.end_work(false, &format!("{label} connect"));
+                prompter.failure(&format!("{label} connect failed: {error}"));
+            }
         }
     }
     if !connected.is_empty() {
