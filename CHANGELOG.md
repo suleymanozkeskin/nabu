@@ -5,6 +5,8 @@ in `docs/release-notes.md`.
 
 ## Unreleased
 
+## 0.1.7
+
 - `nabu install pi` replaces inert non-factory stubs at the extension path
   (e.g. leftover `// foreign` debris) after backup, instead of permanently
   blocking install and breaking `pi` startup. Real unmarked extensions that
