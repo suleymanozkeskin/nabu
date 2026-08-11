@@ -5,6 +5,15 @@ in `docs/release-notes.md`.
 
 ## Unreleased
 
+- Register nabu history tools inside pi: the installed extension now both
+  live-captures and registers `nabu_search_history`, `nabu_list_sessions`,
+  `nabu_get_session`, `nabu_list_memories`, `nabu_get_memory`, and
+  `nabu_get_event` via `pi.registerTool()`, backed by the nabu CLI
+  (`NABU_BIN`/`NABU_HOME` honored, 30 s timeout, 256 KiB output cap, errors as
+  text). `nabu install pi` is an idempotent upgrade to the latest capture+tools
+  template. New `nabu sessions [--json]` CLI command lists captured sessions
+  with triage metadata; `nabu show --redact` masks secret-looking values.
+
 - Live-capture pi sessions via a pi extension: `nabu install pi` writes
   `~/.pi/agent/extensions/nabu.ts` (or `$PI_AGENT_DIR/extensions/nabu.ts`),
   which subscribes to `session_start`, `message_end`, and `session_compact`
