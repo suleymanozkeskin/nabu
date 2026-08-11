@@ -84,6 +84,44 @@ pub(crate) fn table_exists(conn: &Connection, db_path: &Path, table: &str) -> Re
     })
 }
 
+/// How long SQLite waits on a busy/locked `harness.db` before failing. Must
+/// cover a concurrent `index --once` write transaction (hook-triggered
+/// background index holds a write txn for the whole pass). 5s was too short
+/// and made wizard backfill scans fail with "database is locked".
+const INDEX_BUSY_TIMEOUT_MS: u32 = 30_000;
+
+/// Apply connection PRAGMAs shared by init and open. `busy_timeout` is set via
+/// the rusqlite API (milliseconds) so it is not lost if the batch is split.
+fn configure_index_connection(conn: &Connection, path: &Path) -> Result<()> {
+    conn.busy_timeout(std::time::Duration::from_millis(
+        INDEX_BUSY_TIMEOUT_MS as u64,
+    ))
+    .map_err(|source| Error::Sqlite {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    conn.execute_batch(
+        "PRAGMA foreign_keys = ON;
+         PRAGMA journal_mode = WAL;
+         PRAGMA synchronous = NORMAL;",
+    )
+    .map_err(|source| Error::Sqlite {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    Ok(())
+}
+
+fn is_sqlite_busy(error: &rusqlite::Error) -> bool {
+    matches!(
+        error,
+        rusqlite::Error::SqliteFailure(code, _) if matches!(
+            code.code,
+            rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
+        )
+    )
+}
+
 pub(crate) fn initialize_database(path: &Path) -> Result<()> {
     register_semantic_extension_if_enabled();
     let mut conn = Connection::open(path).map_err(|source| Error::Sqlite {
@@ -91,16 +129,7 @@ pub(crate) fn initialize_database(path: &Path) -> Result<()> {
         source,
     })?;
 
-    conn.execute_batch(
-        "PRAGMA foreign_keys = ON;
-         PRAGMA journal_mode = WAL;
-         PRAGMA synchronous = NORMAL;
-         PRAGMA busy_timeout = 5000;",
-    )
-    .map_err(|source| Error::Sqlite {
-        path: path.to_path_buf(),
-        source,
-    })?;
+    configure_index_connection(&conn, path)?;
 
     conn.execute_batch(SQLITE_SCHEMA)
         .map_err(|source| Error::Sqlite {
@@ -136,20 +165,36 @@ pub(crate) fn initialize_database(path: &Path) -> Result<()> {
 
 pub(crate) fn open_index(path: &Path) -> Result<Connection> {
     register_semantic_extension_if_enabled();
+    // Retry a few times when another nabu process (usually background
+    // `index --once --single-flight` after a hook) holds a write transaction.
+    // busy_timeout covers short waits inside SQLite; outer retries cover the
+    // case where open/migrate itself loses the race after the timeout window.
+    const ATTEMPTS: u32 = 4;
+    let mut last_error = None;
+    for attempt in 0..ATTEMPTS {
+        match try_open_index(path) {
+            Ok(conn) => return Ok(conn),
+            Err(Error::Sqlite { path, source }) if is_sqlite_busy(&source) => {
+                last_error = Some(Error::Sqlite { path, source });
+                if attempt + 1 < ATTEMPTS {
+                    std::thread::sleep(std::time::Duration::from_millis(
+                        250 * u64::from(attempt + 1),
+                    ));
+                    continue;
+                }
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Err(last_error.expect("ATTEMPTS >= 1"))
+}
+
+fn try_open_index(path: &Path) -> Result<Connection> {
     let mut conn = Connection::open(path).map_err(|source| Error::Sqlite {
         path: path.to_path_buf(),
         source,
     })?;
-    conn.execute_batch(
-        "PRAGMA foreign_keys = ON;
-         PRAGMA journal_mode = WAL;
-         PRAGMA synchronous = NORMAL;
-         PRAGMA busy_timeout = 5000;",
-    )
-    .map_err(|source| Error::Sqlite {
-        path: path.to_path_buf(),
-        source,
-    })?;
+    configure_index_connection(&conn, path)?;
     ensure_checkpoint_schema(&conn, path)?;
     ensure_events_schema(&mut conn, path)?;
     ensure_memory_event_schema(&mut conn, path)?;

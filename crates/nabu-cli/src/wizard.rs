@@ -1245,6 +1245,7 @@ fn run_backfill_for(
     let mut total_events = 0usize;
     let mut total_sources = 0usize;
     let mut with_work: Vec<BackfillTool> = Vec::new();
+    let mut scan_failed = false;
     for scope in scopes {
         let label = format!(
             "Scanning {} past sessions",
@@ -1269,14 +1270,25 @@ fn run_backfill_for(
                 }
             }
             Err(error) => {
+                scan_failed = true;
                 prompter.end_work(false, &label);
-                prompter.warn(&format!("Couldn’t scan past sessions: {error}"));
+                if error_looks_like_db_busy(&error) {
+                    prompter.warn(
+                        "Index is busy (a background `nabu index` may still be running after capture). Wait a few seconds and retry Backfill, or run `nabu index --once` first.",
+                    );
+                } else {
+                    prompter.warn(&format!("Couldn’t scan past sessions: {error}"));
+                }
             }
         }
     }
 
     if with_work.is_empty() {
-        prompter.skip("No past sessions to import — already up to date.");
+        if scan_failed {
+            prompter.skip("Backfill scan did not finish — nothing imported.");
+        } else {
+            prompter.skip("No past sessions to import — already up to date.");
+        }
         return Ok(());
     }
     if !prompter.confirm(
@@ -1774,6 +1786,14 @@ fn settings_menu(
 // ---------------------------------------------------------------------------
 // Small helpers.
 // ---------------------------------------------------------------------------
+
+/// True when an error string is the SQLite busy/locked failure (background
+/// index holding a write transaction). Used to avoid calling a failed scan
+/// "already up to date".
+fn error_looks_like_db_busy(error: &Error) -> bool {
+    let text = error.to_string();
+    text.contains("database is locked") || text.contains("database is busy")
+}
 
 fn ok_label(ok: bool) -> &'static str {
     if ok {

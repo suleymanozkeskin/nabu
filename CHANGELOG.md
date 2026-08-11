@@ -5,6 +5,10 @@ in `docs/release-notes.md`.
 
 ## Unreleased
 
+- Raise the SQLite busy timeout and retry `open_index` when the index is locked
+  (e.g. a hook-spawned background `index --once` still writing). Wizard backfill
+  no longer treats a locked scan as "already up to date".
+
 - Wizard long steps animate with a braille spinner (health stages, agent
   detection on every frame, capture install, backfill scan/import, indexing)
   so the UI no longer looks frozen. Health is also a fast liveness check only
