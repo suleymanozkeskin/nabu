@@ -118,7 +118,10 @@ pub use purge::{purge_all, purge_before, purge_session};
 
 mod doctor;
 pub(crate) use doctor::{directory_size, storage_footprint};
-pub use doctor::{doctor, doctor_with_options, doctor_with_progress, index_freshness, DoctorStage};
+pub use doctor::{
+    doctor, doctor_with_options, doctor_with_progress, index_freshness, DoctorOptions, DoctorStage,
+    DoctorStageEvent,
+};
 mod json;
 pub(crate) use json::{i64_pointer, required_string, string_pointer};
 

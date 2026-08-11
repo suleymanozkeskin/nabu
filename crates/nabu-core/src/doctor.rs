@@ -28,49 +28,140 @@ pub enum DoctorStage {
     LatestEvents,
 }
 
-pub fn doctor_with_options(home: &Path, deep: bool) -> DoctorReport {
-    doctor_with_progress(home, deep, &mut |_, _| {})
+/// Progress events for a doctor run: each stage emits [`Started`] before the
+/// work begins and [`Finished`] when it completes, so UIs can animate in-flight
+/// work instead of freezing until the stage returns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DoctorStageEvent {
+    Started(DoctorStage),
+    Finished(DoctorStage, bool),
 }
 
-/// Like [`doctor_with_options`], but invokes `on_stage(stage, ok)` after each
-/// sub-check completes, in display order. The `ok` bit is the pass/fail of the
-/// boolean checks (Storage/Index/Backfill); the derived stages
-/// (Coverage/Footprint/LatestEvents) always report `true` since they have no
-/// pass/fail bit. Behaviour and the returned report are identical to
-/// `doctor_with_options`.
+/// Controls which doctor work runs. The wizard uses `metrics: false` so health
+/// stays a quick liveness check; the CLI/MCP keep `metrics: true` for full
+/// footprint/freshness detail.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DoctorOptions {
+    pub deep: bool,
+    /// When true, also compute coverage counts, the storage-footprint walk,
+    /// latest-event rows, and per-tool index freshness (expensive on large
+    /// stores). When false, those fields are zero/empty defaults.
+    pub metrics: bool,
+}
+
+impl Default for DoctorOptions {
+    fn default() -> Self {
+        Self {
+            deep: false,
+            metrics: true,
+        }
+    }
+}
+
+pub fn doctor_with_options(home: &Path, deep: bool) -> DoctorReport {
+    doctor_with_progress(
+        home,
+        DoctorOptions {
+            deep,
+            metrics: true,
+        },
+        &mut |_| {},
+    )
+}
+
+/// Like [`doctor_with_options`], but streams [`DoctorStageEvent`]s so callers
+/// can show in-progress work. Boolean stages report their pass/fail on
+/// [`DoctorStageEvent::Finished`]; derived metric stages always finish `true`.
 pub fn doctor_with_progress(
     home: &Path,
-    deep: bool,
-    on_stage: &mut dyn FnMut(DoctorStage, bool),
+    options: DoctorOptions,
+    on_stage: &mut dyn FnMut(DoctorStageEvent),
 ) -> DoctorReport {
-    let storage_ok = storage_is_healthy(home);
-    on_stage(DoctorStage::Storage, storage_ok);
-
-    let index_ok = if deep {
-        index_integrity_is_healthy(home)
-    } else {
-        index_structure_is_healthy(home)
+    let mut run = |stage: DoctorStage, work: &mut dyn FnMut() -> bool| {
+        on_stage(DoctorStageEvent::Started(stage));
+        let ok = work();
+        on_stage(DoctorStageEvent::Finished(stage, ok));
+        ok
     };
-    on_stage(DoctorStage::Index, index_ok);
 
-    let backfill_ok = backfill_is_healthy(home);
-    on_stage(DoctorStage::Backfill, backfill_ok);
+    let storage_ok = run(DoctorStage::Storage, &mut || storage_is_healthy(home));
 
-    let coverage = coverage_summary(home);
-    on_stage(DoctorStage::Coverage, true);
+    let index_ok = run(DoctorStage::Index, &mut || {
+        if options.deep {
+            index_integrity_is_healthy(home)
+        } else {
+            index_structure_is_healthy(home)
+        }
+    });
 
-    let storage_footprint = storage_footprint(home);
-    on_stage(DoctorStage::Footprint, true);
+    let backfill_ok = run(DoctorStage::Backfill, &mut || backfill_is_healthy(home));
 
-    let latest_captured_events = latest_events_for_doctor(home);
-    let index_freshness = index_freshness_for_doctor(home);
-    on_stage(DoctorStage::LatestEvents, true);
+    let (coverage, storage_footprint, latest_captured_events, index_freshness) = if options.metrics
+    {
+        let coverage = {
+            on_stage(DoctorStageEvent::Started(DoctorStage::Coverage));
+            let value = coverage_summary(home);
+            on_stage(DoctorStageEvent::Finished(DoctorStage::Coverage, true));
+            value
+        };
+        let storage_footprint = {
+            on_stage(DoctorStageEvent::Started(DoctorStage::Footprint));
+            let value = storage_footprint(home);
+            on_stage(DoctorStageEvent::Finished(DoctorStage::Footprint, true));
+            value
+        };
+        let (latest_captured_events, index_freshness) = {
+            on_stage(DoctorStageEvent::Started(DoctorStage::LatestEvents));
+            let latest = latest_events_for_doctor(home);
+            let freshness = index_freshness_for_doctor(home);
+            on_stage(DoctorStageEvent::Finished(DoctorStage::LatestEvents, true));
+            (latest, freshness)
+        };
+        (
+            coverage,
+            storage_footprint,
+            latest_captured_events,
+            index_freshness,
+        )
+    } else {
+        (
+            CoverageSummary {
+                checkpointed_sources: 0,
+                captured_sessions: 0,
+                captured_events: 0,
+            },
+            StorageFootprint {
+                raw_bytes: 0,
+                index_bytes: 0,
+                vectors_bytes: 0,
+                spool_bytes: 0,
+                blobs_bytes: 0,
+                models_bytes: 0,
+                canonical_total: 0,
+                derived_total: 0,
+                total_bytes: 0,
+            },
+            BTreeMap::new(),
+            BTreeMap::new(),
+        )
+    };
 
-    let stats = if deep { index_stats(home).ok() } else { None };
+    let stats = if options.deep {
+        index_stats(home).ok()
+    } else {
+        None
+    };
 
     DoctorReport {
-        level: if deep { "deep" } else { "fast" }.to_string(),
-        integrity: if deep { "full" } else { "structural" }.to_string(),
+        level: if options.deep {
+            "deep"
+        } else if options.metrics {
+            "fast"
+        } else {
+            "wizard"
+        }
+        .to_string(),
+        integrity: if options.deep { "full" } else { "structural" }.to_string(),
         storage: DoctorCheck {
             ok: storage_ok,
             message: if storage_ok {
@@ -82,7 +173,7 @@ pub fn doctor_with_progress(
         index: DoctorCheck {
             ok: index_ok,
             message: if index_ok {
-                if deep {
+                if options.deep {
                     "sqlite integrity_check returned ok".to_string()
                 } else {
                     "index opens and core tables are present".to_string()
