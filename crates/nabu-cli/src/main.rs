@@ -32,13 +32,13 @@ use nabu_core::index_once;
 use nabu_core::{
     canonical_raw_path, doctor_with_options, download_embedding_model_with_progress,
     embedding_model_disclosure, embedding_model_status, export_session_jsonl_with_options,
-    export_session_markdown_with_options, index_once_single_flight,
-    index_once_with_options_and_progress, ingest_file, ingest_hook_event, init_home,
+    export_session_markdown_with_options, get_memory, index_once_single_flight,
+    index_once_with_options_and_progress, ingest_file, ingest_hook_event, init_home, list_memories,
     malformed_native_payload, prune_embedding_cache, purge_all, purge_before, purge_session,
-    resolve_home, search_history_page, Error, IndexOptions, PurgeAllOptions, SearchMode,
-    SearchOptions, SessionOptions, SingleFlightOutcome, Source, Tool,
+    redact_export_text, resolve_home, search_history_page, sync_memory, Error, IndexOptions,
+    PurgeAllOptions, SearchMode, SearchOptions, SessionOptions, SingleFlightOutcome, Source, Tool,
 };
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::fs::File;
 use std::io::{BufRead, BufReader, IsTerminal, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -180,6 +180,10 @@ enum Command {
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         format: OutputFormat,
     },
+    Memory {
+        #[command(subcommand)]
+        command: MemoryCommand,
+    },
     Tail {
         tool: Tool,
         session_id: String,
@@ -236,6 +240,11 @@ impl Command {
             Command::Search { format, .. } | Command::Show { format, .. } => {
                 *format == OutputFormat::Json
             }
+            Command::Memory { command } => match command {
+                MemoryCommand::List { json, .. } => *json,
+                MemoryCommand::Show { format, .. } => *format == OutputFormat::Json,
+                MemoryCommand::Sync { .. } => false,
+            },
             Command::Doctor { json, .. } => *json,
             Command::Mcp {
                 command: McpCommand::Validate { json, .. },
@@ -243,6 +252,40 @@ impl Command {
             _ => false,
         }
     }
+}
+
+#[derive(Debug, Subcommand)]
+enum MemoryCommand {
+    /// List captured memory files from the tools' own memory folders, newest
+    /// capture first.
+    List {
+        #[arg(long, value_enum)]
+        tool: Option<Tool>,
+        #[arg(long, default_value_t = 50)]
+        limit: usize,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Read one captured memory file with its raw citation.
+    Show {
+        tool: Tool,
+        /// Memory file name (e.g. MEMORY.md).
+        name: String,
+        /// Claude project slug (the projects/<id> folder name). Required for
+        /// claude, whose memory is per-project; omit for codex, whose memory
+        /// is global.
+        #[arg(long)]
+        project: Option<String>,
+        #[arg(long)]
+        redact: bool,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        format: OutputFormat,
+    },
+    /// Capture the tools' current memory folders into the store.
+    Sync {
+        #[arg(long, value_enum, default_value_t = MemoryTool::All)]
+        tool: MemoryTool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -383,6 +426,25 @@ enum AgentTool {
     Claude,
     Opencode,
     All,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum MemoryTool {
+    Codex,
+    Claude,
+    Opencode,
+    All,
+}
+
+impl MemoryTool {
+    fn selection(self) -> Option<Tool> {
+        match self {
+            MemoryTool::Codex => Some(Tool::Codex),
+            MemoryTool::Claude => Some(Tool::Claude),
+            MemoryTool::Opencode => Some(Tool::Opencode),
+            MemoryTool::All => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -578,7 +640,12 @@ fn run(cli: Cli) -> nabu_core::Result<()> {
             single_flight,
         } => {
             let progress = ProgressEmitter::new(json_progress);
-            let index_options = IndexOptions { embed: !no_embed };
+            // Explicit index runs refresh the memory capture (sync_memory);
+            // hook-triggered single-flight passes never walk the memory tree.
+            let index_options = IndexOptions {
+                embed: !no_embed,
+                sync_memory: !single_flight,
+            };
             if single_flight {
                 if !once {
                     return Err(Error::Validation(
@@ -901,6 +968,7 @@ fn run(cli: Cli) -> nabu_core::Result<()> {
             }
         }
         Command::Mcp { command } => run_mcp_command(&home, command)?,
+        Command::Memory { command } => run_memory_command(&home, command)?,
     }
 
     Ok(())
@@ -930,6 +998,125 @@ fn run_mcp_command(home: &Path, command: McpCommand) -> nabu_core::Result<()> {
                 println!("{}", serde_json::to_string_pretty(&json_success(value))?);
             } else {
                 println!("{}", value);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn run_memory_command(home: &Path, command: MemoryCommand) -> nabu_core::Result<()> {
+    match command {
+        MemoryCommand::List { tool, limit, json } => {
+            let memories = list_memories(home, tool, limit)?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&json!({ "memories": memories }))?
+                );
+            } else if memories.is_empty() {
+                println!(
+                    "no captured memory files (run `nabu memory sync` followed by `nabu index --once` to capture the tools' memory folders)"
+                );
+            } else {
+                for memory in memories {
+                    let project = memory
+                        .project
+                        .as_deref()
+                        .map(|project| format!("{project}/"))
+                        .unwrap_or_default();
+                    println!(
+                        "{}:{}{}  ({} B, modified {}, captured {})",
+                        memory.tool,
+                        project,
+                        memory.name,
+                        memory.size,
+                        memory.modified_at.as_deref().unwrap_or("unknown"),
+                        memory.captured_at
+                    );
+                    println!("  native: {}", memory.native_path);
+                    println!("  raw: {}:{}", memory.raw_file, memory.raw_line);
+                }
+            }
+        }
+        MemoryCommand::Show {
+            tool,
+            name,
+            project,
+            redact,
+            format,
+        } => {
+            let project =
+                match (tool, project) {
+                    (Tool::Claude, Some(project)) if !project.is_empty() => Some(project),
+                    (Tool::Claude, _) => return Err(Error::Validation(
+                        "project is required for claude memories (the projects/<id> folder name)"
+                            .to_string(),
+                    )),
+                    (_, Some(project)) if !project.is_empty() => {
+                        return Err(Error::Validation(
+                            "project must be omitted for codex memories (codex memory is global)"
+                                .to_string(),
+                        ))
+                    }
+                    (_, project) => project,
+                };
+            let mut content = get_memory(home, tool, project.as_deref(), &name)?;
+            if redact {
+                content.content = redact_export_text(&content.content);
+            }
+            match format {
+                OutputFormat::Json => {
+                    println!("{}", serde_json::to_string_pretty(&content)?);
+                }
+                OutputFormat::Markdown => {
+                    print!("{}", content.content);
+                    if !content.content.ends_with('\n') {
+                        println!();
+                    }
+                }
+                OutputFormat::Human => {
+                    let project = content
+                        .project
+                        .as_deref()
+                        .map(|project| format!("{project}:"))
+                        .unwrap_or_default();
+                    println!("{}:{}{}", content.tool, project, content.name);
+                    println!("  native: {}", content.native_path);
+                    println!(
+                        "  modified: {}",
+                        content.modified_at.as_deref().unwrap_or("unknown")
+                    );
+                    println!("  captured: {}", content.captured_at);
+                    println!("  raw: {}:{}", content.raw_file, content.raw_line);
+                    if redact {
+                        println!("  redacted: true");
+                    }
+                    println!("---");
+                    print!("{}", content.content);
+                    if !content.content.ends_with('\n') {
+                        println!();
+                    }
+                }
+            }
+        }
+        MemoryCommand::Sync { tool } => {
+            let mut discovered = 0usize;
+            let mut appended = 0usize;
+            for candidate in Tool::all() {
+                if let Some(selected) = tool.selection() {
+                    if selected != candidate {
+                        continue;
+                    }
+                }
+                let report = sync_memory(home, candidate)?;
+                discovered += report.discovered;
+                appended += report.appended;
+            }
+            println!(
+                "memory sync: discovered {discovered} file(s), appended {appended} new capture(s)"
+            );
+            if appended > 0 {
+                println!("run `nabu index --once` to make them searchable and readable");
             }
         }
     }

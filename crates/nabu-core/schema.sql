@@ -45,7 +45,8 @@ CREATE TABLE IF NOT EXISTS events (
       'sdk_session_store',
       'backfill',
       'exec_json',
-      'app_server'
+      'app_server',
+      'memory_sync'
     )
   ),
   source_event_type TEXT NOT NULL,
@@ -72,7 +73,8 @@ CREATE TABLE IF NOT EXISTS events (
       'compaction.before',
       'compaction.after',
       'source.discontinuity',
-      'error'
+      'error',
+      'memory.file'
     )
   ),
   sequence INTEGER,
@@ -149,6 +151,27 @@ CREATE TABLE IF NOT EXISTS compactions (
   created_at TEXT NOT NULL,
   FOREIGN KEY (event_id) REFERENCES events(id) ON DELETE CASCADE
 );
+
+-- Derived per-file metadata for `memory.file` events: the memory folder
+-- contents of each tool, captured at sync time. Rebuilt from raw on reindex
+-- (same lifecycle as tool_events/compactions); the content itself lives in the
+-- event payload (raw JSONL/blobs) and is hydrated on read.
+CREATE TABLE IF NOT EXISTS memories (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  event_id INTEGER NOT NULL UNIQUE,
+  tool TEXT NOT NULL CHECK (tool IN ('codex', 'claude', 'opencode')),
+  session_id TEXT NOT NULL,
+  project TEXT,
+  name TEXT NOT NULL,
+  native_path TEXT NOT NULL,
+  size INTEGER NOT NULL DEFAULT 0,
+  modified_at TEXT,
+  captured_at TEXT NOT NULL,
+  FOREIGN KEY (event_id) REFERENCES events(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_memories_tool_project ON memories(tool, project);
+CREATE INDEX IF NOT EXISTS idx_memories_native_path ON memories(native_path);
 
 CREATE TABLE IF NOT EXISTS checkpoints (
   id INTEGER PRIMARY KEY AUTOINCREMENT,

@@ -369,17 +369,77 @@ pub struct IndexReport {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct IndexOptions {
     pub embed: bool,
+    /// Sync each tool's memory folder into the raw store before scanning raw
+    /// files. Off for hook-triggered single-flight passes so per-event
+    /// indexing never walks the memory tree; on for explicit `index --once`/
+    /// `--watch` runs, so a manual index pass also refreshes memories.
+    pub sync_memory: bool,
 }
 
 impl Default for IndexOptions {
     fn default() -> Self {
-        Self { embed: true }
+        Self {
+            embed: true,
+            // Off by default: memory sync walks each tool's native folders and
+            // must be opted into explicitly (the CLI turns it on for index
+            // --once/--watch; hook-triggered passes keep it off).
+            sync_memory: false,
+        }
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct FileIngestReport {
     pub appended_events: usize,
+}
+
+/// One pass of the memory-folder sync for a single tool: how many files were
+/// found in the tool's native memory folders and how many were appended to the
+/// raw store (unchanged files dedupe to zero appends).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct MemorySyncReport {
+    pub tool: Tool,
+    pub discovered: usize,
+    pub appended: usize,
+}
+
+/// A memory file as served by list surfaces: metadata plus the raw citation
+/// of its latest captured version. Content is hydrated on demand (`get_memory`)
+/// from the raw store.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct MemoryFileSummary {
+    pub tool: Tool,
+    /// Claude project slug (e.g. `-Users-...-project`); `None` for codex,
+    /// whose memories folder is global rather than per-project.
+    pub project: Option<String>,
+    pub name: String,
+    pub native_path: String,
+    pub size: i64,
+    pub modified_at: Option<String>,
+    pub captured_at: String,
+    /// The memory pseudo-session holding this file's captured history
+    /// (`<project-slug>` for claude, `memories` for codex).
+    pub session_id: String,
+    pub raw_file: String,
+    pub raw_line: i64,
+    pub raw_offset: Option<i64>,
+}
+
+/// A memory file with its content, served by `get_memory` / `nabu memory show`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct MemoryFileContent {
+    pub tool: Tool,
+    pub project: Option<String>,
+    pub name: String,
+    pub native_path: String,
+    pub size: i64,
+    pub modified_at: Option<String>,
+    pub captured_at: String,
+    pub session_id: String,
+    pub raw_file: String,
+    pub raw_line: i64,
+    pub raw_offset: Option<i64>,
+    pub content: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]

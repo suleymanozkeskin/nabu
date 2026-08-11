@@ -593,7 +593,14 @@ fn semantic_index_no_embed_skips_fake_model_and_leaves_vectors_empty() {
     )
     .unwrap();
 
-    let report = index_once_with_options(&home, IndexOptions { embed: false }).unwrap();
+    let report = index_once_with_options(
+        &home,
+        IndexOptions {
+            embed: false,
+            sync_memory: false,
+        },
+    )
+    .unwrap();
     let db_path = home.join("index").join("harness.db");
     let conn = open_index(&db_path).unwrap();
 
@@ -969,7 +976,14 @@ fn semantic_acceptance_no_embed_defers_vectors_until_later_default_index() {
     )
     .unwrap();
 
-    let first = index_once_with_options(&home, IndexOptions { embed: false }).unwrap();
+    let first = index_once_with_options(
+        &home,
+        IndexOptions {
+            embed: false,
+            sync_memory: false,
+        },
+    )
+    .unwrap();
     let db_path = home.join("index").join("harness.db");
     let conn = open_index(&db_path).unwrap();
     assert_eq!(first.indexed_events, 1);
@@ -6067,14 +6081,29 @@ fn single_flight_indexes_appended_delta() {
     )
     .unwrap();
 
-    match index_once_single_flight(&home, IndexOptions { embed: false }).unwrap() {
+    match index_once_single_flight(
+        &home,
+        IndexOptions {
+            embed: false,
+            sync_memory: false,
+        },
+    )
+    .unwrap()
+    {
         SingleFlightOutcome::Ran(report) => assert!(report.indexed_events >= 1),
         SingleFlightOutcome::Skipped => panic!("expected a pass to run"),
     }
     assert!(latest_event(&home, Tool::Claude).unwrap().is_some());
 
     // A second pass with no new data indexes nothing but still ran (lock was free).
-    let again = index_once_single_flight(&home, IndexOptions { embed: false }).unwrap();
+    let again = index_once_single_flight(
+        &home,
+        IndexOptions {
+            embed: false,
+            sync_memory: false,
+        },
+    )
+    .unwrap();
     assert_eq!(
         again,
         SingleFlightOutcome::Ran(IndexReport { indexed_events: 0 })
@@ -6113,7 +6142,14 @@ fn single_flight_skips_when_lock_held_then_drains_after_release() {
 
     // Another pass holds the lock: the attempt is a no-op, nothing indexed.
     assert_eq!(
-        index_once_single_flight(&home, IndexOptions { embed: false }).unwrap(),
+        index_once_single_flight(
+            &home,
+            IndexOptions {
+                embed: false,
+                sync_memory: false
+            }
+        )
+        .unwrap(),
         SingleFlightOutcome::Skipped
     );
     assert!(latest_event(&home, Tool::Claude).unwrap().is_none());
@@ -6121,7 +6157,7 @@ fn single_flight_skips_when_lock_held_then_drains_after_release() {
     // Once free, the next trigger drains the same delta — no coverage lost.
     FileExt::unlock(&holder).unwrap();
     assert!(matches!(
-        index_once_single_flight(&home, IndexOptions { embed: false }).unwrap(),
+        index_once_single_flight(&home, IndexOptions { embed: false, sync_memory: false }).unwrap(),
         SingleFlightOutcome::Ran(report) if report.indexed_events >= 1
     ));
 }
@@ -6152,7 +6188,14 @@ fn doctor_freshness_flags_unindexed_capture_then_clears_after_index() {
     assert_eq!(before.unindexed_bytes, before.raw_bytes);
     assert_eq!(before.pending_files, 1);
 
-    index_once_with_options(&home, IndexOptions { embed: false }).unwrap();
+    index_once_with_options(
+        &home,
+        IndexOptions {
+            embed: false,
+            sync_memory: false,
+        },
+    )
+    .unwrap();
 
     // Indexed now: the checkpoint has consumed the whole file, so lag clears.
     let report = doctor_with_options(&home, false);
@@ -6182,7 +6225,14 @@ fn doctor_freshness_counts_partially_indexed_delta() {
         }),
     )
     .unwrap();
-    index_once_with_options(&home, IndexOptions { embed: false }).unwrap();
+    index_once_with_options(
+        &home,
+        IndexOptions {
+            embed: false,
+            sync_memory: false,
+        },
+    )
+    .unwrap();
     let indexed_after_first = doctor_with_options(&home, false)
         .index_freshness
         .get("claude")

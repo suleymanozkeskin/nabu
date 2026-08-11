@@ -57,6 +57,7 @@ pub enum Source {
     Backfill,
     ExecJson,
     AppServer,
+    MemorySync,
 }
 
 impl Source {
@@ -69,6 +70,7 @@ impl Source {
             Source::Backfill => "backfill",
             Source::ExecJson => "exec_json",
             Source::AppServer => "app_server",
+            Source::MemorySync => "memory_sync",
         }
     }
 }
@@ -85,6 +87,7 @@ impl FromStr for Source {
             "backfill" => Ok(Source::Backfill),
             "exec_json" => Ok(Source::ExecJson),
             "app_server" => Ok(Source::AppServer),
+            "memory_sync" => Ok(Source::MemorySync),
             _ => Err(Error::Validation(format!("unsupported source: {value}"))),
         }
     }
@@ -122,6 +125,12 @@ pub enum CanonicalType {
     SourceDiscontinuity,
     #[serde(rename = "error")]
     Error,
+    /// A memory file captured from a tool's own memory folder (claude
+    /// `projects/<id>/memory/`, codex `memories/`). Served as a first-class
+    /// read surface (list_memories/get_memory) and searchable like any other
+    /// event.
+    #[serde(rename = "memory.file")]
+    MemoryFile,
 }
 
 impl CanonicalType {
@@ -142,6 +151,7 @@ impl CanonicalType {
             CanonicalType::CompactionAfter => "compaction.after",
             CanonicalType::SourceDiscontinuity => "source.discontinuity",
             CanonicalType::Error => "error",
+            CanonicalType::MemoryFile => "memory.file",
         }
     }
 }
@@ -166,6 +176,7 @@ impl FromStr for CanonicalType {
             "compaction.after" => Ok(CanonicalType::CompactionAfter),
             "source.discontinuity" => Ok(CanonicalType::SourceDiscontinuity),
             "error" => Ok(CanonicalType::Error),
+            "memory.file" => Ok(CanonicalType::MemoryFile),
             _ => Err(Error::Validation(format!(
                 "unsupported canonical_type: {value}"
             ))),
@@ -226,7 +237,8 @@ impl CanonicalType {
             | CanonicalType::FileChanged
             | CanonicalType::CompactionBefore
             | CanonicalType::SourceDiscontinuity
-            | CanonicalType::Error => None,
+            | CanonicalType::Error
+            | CanonicalType::MemoryFile => None,
         }
     }
 }

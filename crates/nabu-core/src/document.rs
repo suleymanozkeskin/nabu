@@ -325,6 +325,28 @@ pub(crate) fn search_document_for_event(
             document.metadata_text =
                 preferred_text(payload, &["error", "message", "reason", "text", "details"]);
         }
+        CanonicalType::MemoryFile => {
+            // The full file content plus its identity metadata, so memory hits
+            // are searchable by both what they say and where they live. The
+            // rendered text doubles as the content hash input for dedupe, so
+            // an unchanged file re-syncs to the same key and never appends a
+            // duplicate event.
+            let name = string_field(payload, "name").unwrap_or_default();
+            let project = string_field(payload, "project").unwrap_or_default();
+            let content = string_field(payload, "content").unwrap_or_default();
+            let mut lines = Vec::new();
+            if !name.is_empty() {
+                lines.push(if project.is_empty() {
+                    name.to_string()
+                } else {
+                    format!("{project}/{name}")
+                });
+            }
+            if !content.is_empty() {
+                lines.push(content.to_string());
+            }
+            document.metadata_text = lines.join("\n");
+        }
         _ => {
             document.metadata_text = nonvolatile_text(payload);
         }

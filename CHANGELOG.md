@@ -5,6 +5,20 @@ in `docs/release-notes.md`.
 
 ## Unreleased
 
+- Serve each tool's own memory folders as first-class, searchable history.
+  `nabu memory sync` (also run by `nabu index --once`/`--watch`) captures
+  claude `projects/<id>/memory/` and codex `memories/` files into the raw
+  store as `memory.file` events — content-addressed, so an unchanged file
+  never appends a duplicate. Memory is searchable through `nabu search` and
+  the MCP `search_history`/`recall_answer` (hits carry
+  `canonical_type=memory.file` with session/raw-line citations), listed and
+  read through new CLI (`nabu memory list|show`) and MCP (`list_memories`,
+  `get_memory`, `nabu://memories` resources) surfaces with full content
+  hydration from the raw store and optional redaction. Memory pseudo-sessions
+  stay out of `list_sessions`; opencode has no native memory folder and
+  contributes nothing. Existing indexes migrate on first open (events table
+  rebuilt once, preserving row ids).
+
 - Add a retrieval advisory to weak lexical-only search pages. When a query
   runs lexical-only (semantic unavailable, `expand_concepts` off) and returns
   nothing or top hits scattered across sessions, the search response carries
