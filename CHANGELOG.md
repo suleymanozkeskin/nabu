@@ -5,6 +5,11 @@ in `docs/release-notes.md`.
 
 ## Unreleased
 
+- Wizard health is a fast liveness check (storage/index/backfill only) with a
+  live braille spinner while each stage runs, instead of freezing on the
+  storage-footprint walk and raw-file freshness scan. Capture detection,
+  backfill scan/import, and indexing also animate in-progress work.
+
 ## 0.1.6
 
 - Add full pi (`@earendil-works/pi-coding-agent`) support as a fourth harness

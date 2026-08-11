@@ -23,7 +23,8 @@ use nabu_adapters::{
 use nabu_core::{
     doctor_with_progress, embedding_model_status, index_once_with_options, init_home,
     opencode_server_url, search_history_page, set_opencode_server_url, BackfillDryRunReport,
-    BackfillReport, DoctorReport, DoctorStage, Error, IndexOptions, Result, SearchOptions, Tool,
+    BackfillReport, DoctorOptions, DoctorReport, DoctorStage, DoctorStageEvent, Error,
+    IndexOptions, Result, SearchOptions, Tool,
 };
 
 use crate::backfill::{run_backfill_command, run_backfill_dry_run_command};
@@ -148,6 +149,15 @@ pub(crate) trait Prompter {
         let mark = if on { "●" } else { "○" };
         self.info(&format!("{mark} {message}"));
     }
+    /// Start an animated in-progress line for long work (doctor stage, backfill
+    /// scan, index). Default records a note so scripted tests stay quiet.
+    fn begin_work(&mut self, message: &str) {
+        self.note(&format!("… {message}"));
+    }
+    /// Finish in-progress work and print the final pass/fail status line.
+    fn end_work(&mut self, ok: bool, message: &str) {
+        self.status(ok, message);
+    }
     /// A `label   value` row for summaries and the settings inspector.
     fn field(&mut self, label: &str, value: &str) {
         self.info(&format!("{label}  {value}"));
@@ -179,6 +189,9 @@ pub(crate) trait Prompter {
 /// Real `dialoguer`/`console` prompter for an attended terminal.
 pub(crate) struct TtyPrompter {
     theme: dialoguer::theme::ColorfulTheme,
+    /// In-flight work spinner, if any. Dropped / finished before the next
+    /// prompt so dialoguer never races the spinner thread on stdout.
+    work: Option<WorkSpinner>,
 }
 
 impl TtyPrompter {
@@ -206,7 +219,75 @@ impl TtyPrompter {
             hint_style: Style::new().dim(),
             ..ColorfulTheme::default()
         };
-        Self { theme }
+        Self { theme, work: None }
+    }
+
+    fn stop_work_spinner(&mut self) {
+        if let Some(spinner) = self.work.take() {
+            spinner.stop();
+        }
+    }
+}
+
+/// Braille spinner on stdout for long wizard work. Rewrites one line in place
+/// so the frame stays still while a stage runs.
+struct WorkSpinner {
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    join: Option<std::thread::JoinHandle<()>>,
+}
+
+impl WorkSpinner {
+    fn start(message: String) -> Self {
+        use std::io::Write;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&stop);
+        let join = std::thread::spawn(move || {
+            const FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+            let mut term = console::Term::stdout();
+            let mut frame = 0usize;
+            // Hide the cursor while spinning so the glyph does not flash.
+            let _ = term.hide_cursor();
+            while !flag.load(Ordering::Relaxed) {
+                let glyph = FRAMES[frame % FRAMES.len()];
+                let line = format!(
+                    "  {} {}",
+                    crate::theme::accent(glyph),
+                    console::style(&message).dim()
+                );
+                let _ = term.clear_line();
+                let _ = write!(term, "{line}");
+                let _ = term.flush();
+                frame = frame.wrapping_add(1);
+                std::thread::sleep(Duration::from_millis(80));
+            }
+            let _ = term.clear_line();
+            let _ = term.show_cursor();
+            let _ = term.flush();
+        });
+        Self {
+            stop,
+            join: Some(join),
+        }
+    }
+
+    fn stop(mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Some(join) = self.join.take() {
+            let _ = join.join();
+        }
+    }
+}
+
+impl Drop for WorkSpinner {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Some(join) = self.join.take() {
+            let _ = join.join();
+        }
     }
 }
 
@@ -231,6 +312,7 @@ fn cancelled_select_index(options: &[&str]) -> Result<usize> {
 
 impl Prompter for TtyPrompter {
     fn select(&mut self, prompt: &str, options: &[&str]) -> Result<usize> {
+        self.stop_work_spinner();
         // `clear(true)` removes the menu after a pick and `report(false)`
         // suppresses the resolved-choice echo, so the menu leaves no scrollback
         // residue — the frame is redrawn cleanly on the next loop.
@@ -254,6 +336,7 @@ impl Prompter for TtyPrompter {
     }
 
     fn confirm(&mut self, prompt: &str, default: bool) -> Result<bool> {
+        self.stop_work_spinner();
         // `report(false)`: don't leave a `· prompt  yes` echo stacking up under
         // each consent — the frame owns what stays on screen.
         dialoguer::Confirm::with_theme(&self.theme)
@@ -265,6 +348,7 @@ impl Prompter for TtyPrompter {
     }
 
     fn confirm_opt(&mut self, prompt: &str, default: bool) -> Result<Option<bool>> {
+        self.stop_work_spinner();
         dialoguer::Confirm::with_theme(&self.theme)
             .with_prompt(prompt)
             .default(default)
@@ -279,6 +363,7 @@ impl Prompter for TtyPrompter {
         options: &[&str],
         checked: &[bool],
     ) -> Result<Option<Vec<usize>>> {
+        self.stop_work_spinner();
         // dialoguer's MultiSelect toggles with Space and commits with Enter — but
         // everyone reaches for Enter to "pick" a row, which on a fully pre-checked
         // list silently commits every item. This is a Select-driven checklist
@@ -396,12 +481,23 @@ impl Prompter for TtyPrompter {
     }
 
     fn status(&mut self, on: bool, message: &str) {
+        self.stop_work_spinner();
         let mark = if on {
             crate::theme::success("●")
         } else {
             console::style("○").dim().to_string()
         };
         println!("  {mark} {message}");
+    }
+
+    fn begin_work(&mut self, message: &str) {
+        self.stop_work_spinner();
+        self.work = Some(WorkSpinner::start(message.to_string()));
+    }
+
+    fn end_work(&mut self, ok: bool, message: &str) {
+        self.stop_work_spinner();
+        self.status(ok, message);
     }
 
     fn field(&mut self, label: &str, value: &str) {
@@ -481,12 +577,12 @@ pub(crate) trait WizardActions {
     /// the number of newly indexed events. Semantic embedding is intentionally
     /// excluded — it is the slow, opt-in path and must not block onboarding.
     fn index(&mut self, home: &Path) -> Result<usize>;
-    /// Run the fast doctor, invoking `on_stage` after each sub-check so the caller
-    /// can render a live checklist.
+    /// Run the wizard-fast doctor (liveness only), streaming start/finish stage
+    /// events so the caller can animate in-flight work.
     fn doctor(
         &mut self,
         home: &Path,
-        on_stage: &mut dyn FnMut(DoctorStage, bool),
+        on_stage: &mut dyn FnMut(DoctorStageEvent),
     ) -> Result<DoctorReport>;
     fn mcp_install(&mut self, home: &Path, tool: Tool, dry_run: bool)
         -> Result<ConfigChangeReport>;
@@ -594,9 +690,19 @@ impl WizardActions for LiveActions {
     fn doctor(
         &mut self,
         home: &Path,
-        on_stage: &mut dyn FnMut(DoctorStage, bool),
+        on_stage: &mut dyn FnMut(DoctorStageEvent),
     ) -> Result<DoctorReport> {
-        Ok(doctor_with_progress(home, false, on_stage))
+        // Wizard health is a liveness check only: skip the storage-footprint
+        // walk, freshness scan, and latest-event queries (those dominate on
+        // large stores and are not shown in the wizard verdict).
+        Ok(doctor_with_progress(
+            home,
+            DoctorOptions {
+                deep: false,
+                metrics: false,
+            },
+            on_stage,
+        ))
     }
 
     fn mcp_install(
@@ -880,9 +986,17 @@ fn gs_storage_step(
     };
     state.storage_default = create;
     if create {
-        actions.init_home(home)?;
-        prompter.success("Storage ready");
-        state.storage = Some("Storage ✓ ready".to_string());
+        prompter.begin_work("Creating history store…");
+        match actions.init_home(home) {
+            Ok(()) => {
+                prompter.end_work(true, "Storage ready");
+                state.storage = Some("Storage ✓ ready".to_string());
+            }
+            Err(error) => {
+                prompter.end_work(false, "Creating history store");
+                return Err(error);
+            }
+        }
     } else {
         prompter.skip("Skipped — later steps need a store; re-run to create it.");
         state.storage = Some("Storage · skipped".to_string());
@@ -897,13 +1011,25 @@ fn gs_capture_step(
     state: &mut GsState,
 ) -> Result<StepOutcome> {
     step_header(prompter, 2, "Capture");
+    prompter.begin_work("Detecting agents…");
     let present: Vec<ToolState> = actions
         .detect(home)?
         .into_iter()
         .filter(|t| t.present)
         .collect();
+    prompter.end_work(
+        true,
+        &if present.is_empty() {
+            "Detecting agents — none found".to_string()
+        } else {
+            format!(
+                "Detecting agents — {}",
+                joined_tool_labels(present.iter().map(|t| t.tool), " · ")
+            )
+        },
+    );
     if present.is_empty() {
-        prompter.skip("No Codex, Claude Code, or OpenCode install found — nothing to capture.");
+        prompter.skip("No agent install found — nothing to capture.");
         state.capture = Some("Capture · none detected".to_string());
         return Ok(StepOutcome::Forward);
     }
@@ -915,8 +1041,12 @@ fn gs_capture_step(
         if tool_state.configured {
             prompter.success(&format!("{label} already configured"));
         } else {
+            prompter.begin_work(&format!("Previewing {label} capture…"));
             let preview = actions.install(home, tool_state.tool, true)?;
-            prompter.field(label, &preview.target_path.display().to_string());
+            prompter.end_work(
+                true,
+                &format!("{label} → {}", preview.target_path.display()),
+            );
         }
         previews.push((tool_state.tool, label.to_string(), tool_state.configured));
     }
@@ -1097,22 +1227,32 @@ fn run_backfill_for(
     let mut total_sources = 0usize;
     let mut with_work: Vec<BackfillTool> = Vec::new();
     for scope in scopes {
-        prompter.status(
-            true,
-            &format!(
-                "Scanning {} past sessions…",
-                backfill_tool_scope_label(scope)
-            ),
+        let label = format!(
+            "Scanning {} past sessions",
+            backfill_tool_scope_label(scope)
         );
+        prompter.begin_work(&format!("{label}…"));
         match actions.backfill_preview(home, scope) {
             Ok(preview) => {
                 if preview.source_files > 0 && preview.missing_events > 0 {
                     total_events += preview.missing_events;
                     total_sources += preview.source_files;
                     with_work.push(scope);
+                    prompter.end_work(
+                        true,
+                        &format!(
+                            "{label} — {} to import",
+                            plural(preview.missing_events, "event")
+                        ),
+                    );
+                } else {
+                    prompter.end_work(true, &format!("{label} — up to date"));
                 }
             }
-            Err(error) => prompter.warn(&format!("Couldn’t scan past sessions: {error}")),
+            Err(error) => {
+                prompter.end_work(false, &label);
+                prompter.warn(&format!("Couldn’t scan past sessions: {error}"));
+            }
         }
     }
 
@@ -1135,12 +1275,21 @@ fn run_backfill_for(
     let mut imported_events = 0usize;
     let mut imported_sources = 0usize;
     for scope in with_work {
+        let label = format!("Importing {}", backfill_tool_scope_label(scope));
+        prompter.begin_work(&format!("{label}…"));
         match actions.backfill(home, scope) {
             Ok(report) => {
                 imported_events += report.appended_events;
                 imported_sources += report.source_files;
+                prompter.end_work(
+                    true,
+                    &format!("{label} — {}", plural(report.appended_events, "event")),
+                );
             }
-            Err(error) => prompter.failure(&format!("Backfill failed: {error}")),
+            Err(error) => {
+                prompter.end_work(false, &label);
+                prompter.failure(&format!("Backfill failed: {error}"));
+            }
         }
     }
     prompter.success(&format!(
@@ -1151,15 +1300,21 @@ fn run_backfill_for(
 
     // Imported events are not searchable until indexed; build the lexical index
     // now so search works immediately after import.
-    prompter.status(true, "Indexing for search…");
+    prompter.begin_work("Indexing for search…");
     match actions.index(home) {
-        Ok(indexed) => prompter.success(&format!(
-            "Indexed {} — your history is searchable now",
-            plural(indexed, "event"),
-        )),
-        Err(error) => prompter.warn(&format!(
-            "Imported, but indexing failed: {error}. Run `nabu index --once` to make it searchable."
-        )),
+        Ok(indexed) => prompter.end_work(
+            true,
+            &format!(
+                "Indexed {} — your history is searchable now",
+                plural(indexed, "event"),
+            ),
+        ),
+        Err(error) => {
+            prompter.end_work(false, "Indexing for search");
+            prompter.warn(&format!(
+                "Imported, but indexing failed: {error}. Run `nabu index --once` to make it searchable."
+            ));
+        }
     }
     Ok(())
 }
@@ -1241,8 +1396,9 @@ fn backfill_tool_scope_label(tool: BackfillTool) -> &'static str {
     }
 }
 
-/// Run the fast doctor as a live, aligned checklist — one line per sub-check as
-/// it completes — then an aggregate verdict. Read-only; no consent needed.
+/// Run the fast doctor as a live, animated checklist — spinner while each
+/// sub-check runs, then a settled status line — and an aggregate verdict.
+/// Read-only; no consent needed.
 fn health_step(
     prompter: &mut dyn Prompter,
     actions: &mut dyn WizardActions,
@@ -1253,8 +1409,13 @@ fn health_step(
     // disjoint mutable borrows. The block ends the closure borrow before the
     // aggregate verdict reuses `prompter`.
     let report = {
-        let mut on_stage = |stage: DoctorStage, ok: bool| {
-            prompter.status(ok, doctor_stage_label(stage));
+        let mut on_stage = |event: DoctorStageEvent| match event {
+            DoctorStageEvent::Started(stage) => {
+                prompter.begin_work(doctor_stage_label(stage));
+            }
+            DoctorStageEvent::Finished(stage, ok) => {
+                prompter.end_work(ok, doctor_stage_label(stage));
+            }
         };
         actions.doctor(home, &mut on_stage)
     };
@@ -2009,19 +2170,18 @@ mod tests {
         fn doctor(
             &mut self,
             _home: &Path,
-            on_stage: &mut dyn FnMut(DoctorStage, bool),
+            on_stage: &mut dyn FnMut(DoctorStageEvent),
         ) -> Result<DoctorReport> {
             self.calls.push("doctor".to_string());
-            // Drive the checklist-rendering path the wizard exercises.
+            // Drive the checklist-rendering path the wizard exercises (wizard
+            // fast path: storage/index/backfill only).
             for stage in [
                 DoctorStage::Storage,
                 DoctorStage::Index,
                 DoctorStage::Backfill,
-                DoctorStage::Coverage,
-                DoctorStage::Footprint,
-                DoctorStage::LatestEvents,
             ] {
-                on_stage(stage, true);
+                on_stage(DoctorStageEvent::Started(stage));
+                on_stage(DoctorStageEvent::Finished(stage, true));
             }
             Ok(canned_doctor())
         }
