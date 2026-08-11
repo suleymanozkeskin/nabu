@@ -108,10 +108,12 @@ pub(crate) fn initialize_database(path: &Path) -> Result<()> {
             source,
         })?;
     ensure_checkpoint_schema(&conn, path)?;
-    ensure_events_schema(&conn, path)?;
+    ensure_events_schema(&mut conn, path)?;
+    ensure_memory_event_schema(&mut conn, path)?;
     ensure_events_fts_schema(&mut conn, path)?;
     ensure_supporting_indexes(&conn, path)?;
     ensure_event_refs_schema(&mut conn, path)?;
+    ensure_memories_schema(&conn, path)?;
     ensure_semantic_vector_schema(&conn, path)?;
     conn.execute_batch(
         "PRAGMA user_version = 1;
@@ -148,15 +150,179 @@ pub(crate) fn open_index(path: &Path) -> Result<Connection> {
         source,
     })?;
     ensure_checkpoint_schema(&conn, path)?;
-    ensure_events_schema(&conn, path)?;
+    ensure_events_schema(&mut conn, path)?;
+    ensure_memory_event_schema(&mut conn, path)?;
     ensure_events_fts_schema(&mut conn, path)?;
     ensure_supporting_indexes(&conn, path)?;
     ensure_event_refs_schema(&mut conn, path)?;
+    ensure_memories_schema(&conn, path)?;
     Ok(conn)
 }
 
-fn ensure_events_schema(conn: &Connection, path: &Path) -> Result<()> {
+fn ensure_events_schema(conn: &mut Connection, path: &Path) -> Result<()> {
     ensure_table_column(conn, path, "events", "tool_invocation_id", "TEXT")
+}
+
+/// The events-table definition the memory migration rebuilds into. The CHECK
+/// constraints must match `schema.sql` exactly; keep both in sync.
+const EVENTS_TABLE_WITH_MEMORY: &str = r#"
+CREATE TABLE events_rebuilt (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tool TEXT NOT NULL CHECK (tool IN ('codex', 'claude', 'opencode')),
+  session_id TEXT NOT NULL,
+  dedupe_key TEXT NOT NULL UNIQUE,
+  schema_version INTEGER NOT NULL,
+  captured_at TEXT NOT NULL,
+  tool_version TEXT,
+  turn_id TEXT,
+  message_id TEXT,
+  project_root TEXT,
+  cwd TEXT,
+  source TEXT NOT NULL CHECK (
+    source IN (
+      'hook',
+      'event_stream',
+      'transcript_tail',
+      'sdk_session_store',
+      'backfill',
+      'exec_json',
+      'app_server',
+      'memory_sync'
+    )
+  ),
+  source_event_type TEXT NOT NULL,
+  source_event_id TEXT,
+  tool_invocation_id TEXT,
+  canonical_type TEXT NOT NULL CHECK (
+    canonical_type IN (
+      'session.started',
+      'session.resumed',
+      'session.ended',
+      'user.message',
+      'assistant.delta',
+      'assistant.message',
+      'tool.call',
+      'tool.result',
+      'permission.requested',
+      'permission.replied',
+      'file.changed',
+      'compaction.before',
+      'compaction.after',
+      'source.discontinuity',
+      'error',
+      'memory.file'
+    )
+  ),
+  sequence INTEGER,
+  raw_file TEXT NOT NULL,
+  raw_line INTEGER,
+  raw_offset INTEGER,
+  payload_json TEXT,
+  payload_ref TEXT,
+  searchable_text TEXT NOT NULL DEFAULT '',
+  compaction_state TEXT NOT NULL DEFAULT 'unknown' CHECK (
+    compaction_state IN ('pre_compaction', 'post_compaction', 'none', 'unknown')
+  ),
+  FOREIGN KEY (tool, session_id) REFERENCES sessions(tool, session_id)
+);
+"#;
+
+/// SQLite cannot alter a CHECK constraint in place, so admitting the
+/// `memory_sync` source and `memory.file` canonical type requires rebuilding
+/// the events table once. Runs on first open of a pre-memory database; the
+/// rebuild preserves every row id, so all foreign keys (messages, tool_events,
+/// compactions, event_files, event_refs, vector_units, memories) and the
+/// contentless events_fts rowids keep pointing at the same events.
+///
+/// Foreign-key enforcement is toggled off for the duration (a connection-level
+/// pragma that cannot change inside a transaction), then back on; nothing in
+/// the copy changes referential relationships.
+fn ensure_memory_event_schema(conn: &mut Connection, path: &Path) -> Result<()> {
+    let sql: String = conn
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'events'",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|source| Error::Sqlite {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    if sql.contains("'memory.file'") {
+        return Ok(());
+    }
+
+    conn.execute_batch("PRAGMA foreign_keys = OFF;")
+        .map_err(|source| Error::Sqlite {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    let rebuild = conn.execute_batch(&format!(
+        r#"BEGIN;
+{E}
+INSERT INTO events_rebuilt (
+  id, tool, session_id, dedupe_key, schema_version, captured_at, tool_version,
+  turn_id, message_id, project_root, cwd, source, source_event_type,
+  source_event_id, tool_invocation_id, canonical_type, sequence, raw_file,
+  raw_line, raw_offset, payload_json, payload_ref, searchable_text, compaction_state
+) SELECT
+  id, tool, session_id, dedupe_key, schema_version, captured_at, tool_version,
+  turn_id, message_id, project_root, cwd, source, source_event_type,
+  source_event_id, tool_invocation_id, canonical_type, sequence, raw_file,
+  raw_line, raw_offset, payload_json, payload_ref, searchable_text, compaction_state
+FROM events;
+DROP TABLE events;
+ALTER TABLE events_rebuilt RENAME TO events;
+INSERT INTO schema_migrations(version, name, applied_at)
+VALUES (2, 'memory_events', strftime('%Y-%m-%dT%H:%M:%SZ', 'now'));
+COMMIT;
+"#,
+        E = EVENTS_TABLE_WITH_MEMORY
+    ));
+    let foreign_keys = conn.execute_batch("PRAGMA foreign_keys = ON;");
+    match (rebuild, foreign_keys) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(source), _) => Err(Error::Sqlite {
+            path: path.to_path_buf(),
+            source,
+        }),
+        (Ok(()), Err(source)) => Err(Error::Sqlite {
+            path: path.to_path_buf(),
+            source,
+        }),
+    }
+}
+
+const MEMORIES_SCHEMA: &str = r#"
+CREATE TABLE IF NOT EXISTS memories (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  event_id INTEGER NOT NULL UNIQUE,
+  tool TEXT NOT NULL CHECK (tool IN ('codex', 'claude', 'opencode')),
+  session_id TEXT NOT NULL,
+  project TEXT,
+  name TEXT NOT NULL,
+  native_path TEXT NOT NULL,
+  size INTEGER NOT NULL DEFAULT 0,
+  modified_at TEXT,
+  captured_at TEXT NOT NULL,
+  FOREIGN KEY (event_id) REFERENCES events(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_memories_tool_project ON memories(tool, project);
+CREATE INDEX IF NOT EXISTS idx_memories_tool_name_project ON memories(tool, name, project);
+CREATE INDEX IF NOT EXISTS idx_memories_native_path ON memories(native_path);
+"#;
+
+/// Create the derived `memories` metadata table on open (mirrors the
+/// event_refs pattern: `IF NOT EXISTS`, so it is a no-op on databases that
+/// already carry it; rows are populated at index time like tool_events).
+fn ensure_memories_schema(conn: &Connection, path: &Path) -> Result<()> {
+    conn.execute_batch(MEMORIES_SCHEMA)
+        .map_err(|source| Error::Sqlite {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    Ok(())
 }
 
 fn register_semantic_extension_if_enabled() {
@@ -384,8 +550,14 @@ fn events_fts_missing_boundary_rows(conn: &Connection, path: &Path) -> Result<bo
 }
 
 fn ensure_supporting_indexes(conn: &Connection, path: &Path) -> Result<()> {
+    // Full events index set from schema.sql. Must be complete: DROP TABLE events
+    // during the memory migration destroys every index on events, and this is
+    // the only open-path recreation for existing installs.
     conn.execute_batch(
-        "CREATE INDEX IF NOT EXISTS idx_events_tool_captured ON events(tool, captured_at);
+        "CREATE INDEX IF NOT EXISTS idx_events_tool_session_raw ON events(tool, session_id, raw_line, raw_offset);
+         CREATE INDEX IF NOT EXISTS idx_events_canonical_captured ON events(canonical_type, captured_at);
+         CREATE INDEX IF NOT EXISTS idx_events_session_captured ON events(tool, session_id, captured_at);
+         CREATE INDEX IF NOT EXISTS idx_events_tool_captured ON events(tool, captured_at);
          CREATE INDEX IF NOT EXISTS idx_tool_events_session ON tool_events(tool, session_id);
          CREATE INDEX IF NOT EXISTS idx_compactions_session ON compactions(tool, session_id);",
     )

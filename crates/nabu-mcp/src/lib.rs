@@ -9,9 +9,9 @@
 
 use nabu_core::{
     doctor_with_options, export_session_jsonl_with_options, export_session_markdown_with_options,
-    get_event_by_pointer_with_options, get_session_page, list_sessions, redact_export_json,
-    redact_export_text, search_history_page, Error, EventOptions, SearchMode, SearchOptions,
-    SearchResult, SessionOptions, StoredEvent, Tool, DEFAULT_SEARCH_SNIPPET_CHARS,
+    get_event_by_pointer_with_options, get_memory, get_session_page, list_memories, list_sessions,
+    redact_export_json, redact_export_text, search_history_page, Error, EventOptions, SearchMode,
+    SearchOptions, SearchResult, SessionOptions, StoredEvent, Tool, DEFAULT_SEARCH_SNIPPET_CHARS,
     MAX_SEARCH_SNIPPET_CHARS,
 };
 use serde_json::{json, Value};
@@ -353,9 +353,19 @@ fn tool_descriptions() -> Value {
             "inputSchema": tool_schema("list_sessions")
         },
         {
+            "name": "list_memories",
+            "description": "List captured memory files from the tools' own memory folders (claude projects/<id>/memory/, codex memories/) with metadata and raw citations: tool, project (claude only), name (root-relative path, e.g. MEMORY.md or sub/deep.md), native_path, size, modified_at, captured_at, and the session_id/raw_file/raw_line of the latest captured version. session_id is a reserved memory pseudo-session (memory:{project} for claude, memory:global for codex). Every response includes advisory: captured memory is a point-in-time snapshot and can be stale — treat it as historical context, not ground truth. Lists across every tool by default; pass tool=\"all\" for the explicit cross-tool form or a specific tool name to narrow. opencode contributes no memories: it has no native memory folder. Read the full content with get_memory. Memory files are also searchable through search_history (canonical_type=memory.file).",
+            "inputSchema": tool_schema("list_memories")
+        },
+        {
             "name": "get_session",
             "description": "Read a faithful non-deduped page or context window from one session. Page forward from after_raw_line (default 0 reads from the start); when more events remain the response sets truncated=true and returns next_after_raw_line (mirrored in continuation.next_after_raw_line) — call again with after_raw_line=next_after_raw_line to resume with no gap or overlap, until truncated=false. The cursor always reflects the events actually returned, including when a large page is trimmed to the MCP size cap, so resuming never skips events. Use around_raw_line with before/after to inspect context around a search hit; a window clipped by the size cap sets window_truncated=true and still returns a forward next_after_raw_line. include_deltas=true restores assistant deltas. Set corroborate=true for local read-only git annotations; PR refs require network and remain unresolved.",
             "inputSchema": tool_schema("get_session")
+        },
+        {
+            "name": "get_memory",
+            "description": "Read one captured memory file at full content, with its raw citation. Requires tool plus name (root-relative path, e.g. MEMORY.md or sub/deep.md); claude memories are per-project so project is required for claude and must be omitted for codex/opencode. The response carries tool, project, name, native_path, size, modified_at, captured_at, session_id (memory:{project} or memory:global), raw_file, raw_line, raw_offset, content, and advisory (captured memory is a point-in-time snapshot and can be stale — treat as historical context, not ground truth); set redact=true to apply secret-pattern redaction to the content. Content is hydrated from the canonical raw store, so a memory file deleted from the tool's folder remains readable. Memory files are captured by nabu memory sync / nabu index --once; only captured files are served.",
+            "inputSchema": tool_schema("get_memory")
         },
         {
             "name": "export_session",
@@ -397,7 +407,9 @@ fn call_tool(home: &Path, name: &str, arguments: &Value) -> Result<Value, ToolEr
     match name {
         "search_history" => tool_search_history(home, arguments),
         "list_sessions" => tool_list_sessions(home, arguments),
+        "list_memories" => tool_list_memories(home, arguments),
         "get_session" => tool_get_session(home, arguments),
+        "get_memory" => tool_get_memory(home, arguments),
         "export_session" => tool_export_session(home, arguments),
         "get_event" => tool_get_event(home, arguments),
         "history_doctor" => tool_history_doctor(home, arguments),
@@ -505,6 +517,40 @@ fn tool_list_sessions(home: &Path, arguments: &Value) -> Result<Value, ToolError
         limit,
     )?;
     Ok(json!({ "sessions": sessions }))
+}
+
+fn tool_list_memories(home: &Path, arguments: &Value) -> Result<Value, ToolError> {
+    let limit = bounded_usize(arguments, "limit", 50, 1, 500)?;
+    let page = list_memories(home, optional_tool(arguments, "tool")?, limit)?;
+    let mut value = serde_json::to_value(page)?;
+    value["returned"] = json!(value
+        .get("memories")
+        .and_then(Value::as_array)
+        .map_or(0, Vec::len));
+    trim_array_response_to_limit(&mut value, "memories");
+    Ok(value)
+}
+
+fn tool_get_memory(home: &Path, arguments: &Value) -> Result<Value, ToolError> {
+    let tool = required_tool(arguments, "tool")?;
+    let name = required_string(arguments, "name")?;
+    // Claude memory is per-project; codex/opencode memory is global. Core
+    // get_memory enforces the pairing and maps Validation to the MCP error.
+    let project = optional_string(arguments, "project");
+    let redact = optional_bool(arguments, "redact", false);
+    let content = get_memory(home, tool, project.as_deref(), name)?;
+    let mut value = serde_json::to_value(content)?;
+    if redact {
+        if let Some(redacted) = value
+            .get("content")
+            .and_then(Value::as_str)
+            .map(redact_export_text)
+        {
+            value["content"] = Value::String(redacted);
+        }
+        value["redacted"] = json!(true);
+    }
+    Ok(fit_value_string_field_to_limit(value, "content"))
 }
 
 fn tool_get_session(home: &Path, arguments: &Value) -> Result<Value, ToolError> {
@@ -936,6 +982,10 @@ fn resource_content(home: &Path, uri: &str) -> nabu_core::Result<String> {
             let sessions = list_sessions(home, None, None, None, 20)?;
             Ok(serde_json::to_string(&json!({ "sessions": sessions }))?)
         }
+        "nabu://memories" => {
+            let page = list_memories(home, None, 50)?;
+            Ok(serde_json::to_string(&page)?)
+        }
         "nabu://schema/tools" => Ok(serde_json::to_string(&json!({
             "tools": tool_descriptions()
         }))?),
@@ -960,6 +1010,54 @@ fn resource_content(home: &Path, uri: &str) -> nabu_core::Result<String> {
                 },
             )?)?)
         }
+        _ if uri.starts_with("nabu://memories/") => {
+            // nabu://memories/{tool}
+            // nabu://memories/{tool}/{name}                 (codex; name may contain /)
+            // nabu://memories/{tool}/{project}/{name}...    (claude; remaining segments = name)
+            let rest = uri.trim_start_matches("nabu://memories/");
+            let parts: Vec<&str> = rest.split('/').filter(|part| !part.is_empty()).collect();
+            let tool = parts
+                .first()
+                .copied()
+                .and_then(|value| Tool::from_str(value).ok())
+                .ok_or_else(|| Error::Validation("resource tool is invalid".to_string()))?;
+            match parts.as_slice() {
+                [_] => {
+                    let page = list_memories(home, Some(tool), 50)?;
+                    Ok(serde_json::to_string(&page)?)
+                }
+                [_, name_parts @ ..] if !name_parts.is_empty() => match tool {
+                    Tool::Claude => {
+                        // claude requires project: first segment after tool is
+                        // the project slug; the rest (joined) is the root-relative name.
+                        if name_parts.len() < 2 {
+                            return Err(Error::Validation(
+                                "claude memory resources require nabu://memories/claude/{project}/{name}"
+                                    .to_string(),
+                            ));
+                        }
+                        let project = name_parts[0];
+                        let name = name_parts[1..].join("/");
+                        Ok(serde_json::to_string(&get_memory(
+                            home,
+                            tool,
+                            Some(project),
+                            &name,
+                        )?)?)
+                    }
+                    Tool::Codex | Tool::Opencode => {
+                        // Global memory: every segment after tool is the name.
+                        let name = name_parts.join("/");
+                        Ok(serde_json::to_string(&get_memory(
+                            home, tool, None, &name,
+                        )?)?)
+                    }
+                },
+                _ => Err(Error::Validation(
+                    "resource uri has no path segments".to_string(),
+                )),
+            }
+        }
         _ => Err(Error::Validation(format!("unknown resource uri: {uri}"))),
     }
 }
@@ -968,7 +1066,7 @@ fn handle_prompt_get(params: &Value) -> Value {
     let name = params.get("name").and_then(Value::as_str).unwrap_or("");
     let text = match name {
         "recall_project_history" => {
-            "Before continuing, call search_history with a concise project query. It is citation-first and payload-light by default; page with offset and drill into relevant hits using get_session around_raw_line/before/after or get_event. Cite tool, session_id, and raw_line."
+            "Before continuing, call search_history with a concise project query. It is citation-first and payload-light by default; page with offset and drill into relevant hits using get_session around_raw_line/before/after or get_event. Cite tool, session_id, and raw_line. Memory files (claude projects/<id>/memory/, codex memories/) are indexed too — hits carry canonical_type=memory.file; read the full file with get_memory. Captured memory is a point-in-time snapshot and can be stale; treat it as historical context, not ground truth."
         }
         "prepare_handoff_summary" => {
             "For a question-driven handoff, call recall_answer once: it returns ranked hits with their surrounding context windows already cited (tool, session_id, raw_line, raw_offset), no follow-up needed. When you instead need to walk specific sessions, call list_sessions, then get_session with around_raw_line windows or export_session for full-fidelity content. Produce a compact handoff summary with citations including tool, session_id, raw_line or raw_offset."
@@ -1004,6 +1102,24 @@ fn resource_descriptions() -> Value {
             "mimeType": "application/json"
         },
         {
+            "uri": "nabu://memories",
+            "name": "Captured tool memory files",
+            "description": "Memory files captured from the tools' own memory folders (claude projects/<id>/memory/, codex memories/), newest first, with raw citations.",
+            "mimeType": "application/json"
+        },
+        {
+            "uriTemplate": "nabu://memories/{tool}",
+            "name": "Captured memory files for one tool",
+            "description": "Memory files captured from one tool's memory folders, with raw citations.",
+            "mimeType": "application/json"
+        },
+        {
+            "uriTemplate": "nabu://memories/{tool}/{project}/{name}",
+            "name": "Captured memory file content",
+            "description": "Full content of one captured memory file. name is root-relative and may contain slashes (sub/deep.md). For codex (global memory) omit the project segment: nabu://memories/codex/{name}. Claude requires the project segment.",
+            "mimeType": "application/json"
+        },
+        {
             "uri": "nabu://schema/tools",
             "name": "nabu MCP tool schemas",
             "description": "Input schemas for all read-only history tools.",
@@ -1033,7 +1149,9 @@ pub fn tool_schemas_document() -> Value {
         "tools": {
             "search_history": tool_schema("search_history"),
             "list_sessions": tool_schema("list_sessions"),
+            "list_memories": tool_schema("list_memories"),
             "get_session": tool_schema("get_session"),
+            "get_memory": tool_schema("get_memory"),
             "export_session": tool_schema("export_session"),
             "get_event": tool_schema("get_event"),
             "history_doctor": tool_schema("history_doctor"),
@@ -1078,6 +1196,25 @@ fn tool_schema(name: &str) -> Value {
                 "since": { "type": "string" },
                 "limit": { "type": "integer", "minimum": 1, "maximum": 100, "default": 20 }
             },
+            "additionalProperties": false
+        }),
+        "list_memories" => json!({
+            "type": "object",
+            "properties": {
+                "tool": { "type": "string", "enum": ["codex", "claude", "opencode", "all"], "description": "Restrict to one tool, or \"all\" to list captured memory files across codex and claude in one call. Omitting tool is equivalent to \"all\". opencode has no native memory folder and contributes nothing." },
+                "limit": { "type": "integer", "minimum": 1, "maximum": 500, "default": 50 }
+            },
+            "additionalProperties": false
+        }),
+        "get_memory" => json!({
+            "type": "object",
+            "properties": {
+                "tool": { "type": "string", "enum": ["codex", "claude", "opencode"] },
+                "name": { "type": "string", "minLength": 1, "description": "Memory file path relative to the tool's memory root (e.g. MEMORY.md or sub/deep.md)." },
+                "project": { "type": "string", "description": "Claude project slug (the projects/<id> folder name). Required for claude, whose memory is per-project; must be omitted for codex/opencode." },
+                "redact": { "type": "boolean", "default": false, "description": "When true, apply secret-pattern redaction to the returned content." }
+            },
+            "required": ["tool", "name"],
             "additionalProperties": false
         }),
         "get_session" => json!({
@@ -1183,6 +1320,25 @@ fn concise_summary(name: &str, structured: &Value) -> String {
                 .and_then(Value::as_array)
                 .map(Vec::len)
                 .unwrap_or(0)
+        ),
+        "list_memories" => format!(
+            "Found {} memory file(s). Captured memory can be stale; treat as historical context.",
+            structured
+                .get("memories")
+                .and_then(Value::as_array)
+                .map(Vec::len)
+                .unwrap_or(0)
+        ),
+        "get_memory" => format!(
+            "Returned {}:{} (captured memory can be stale; treat as historical context).",
+            structured
+                .get("tool")
+                .and_then(Value::as_str)
+                .unwrap_or("tool"),
+            structured
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or("name")
         ),
         "get_session" => format!(
             "Returned {} event(s) for {}:{}.",

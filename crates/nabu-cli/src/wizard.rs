@@ -570,8 +570,14 @@ impl WizardActions for LiveActions {
     fn index(&mut self, home: &Path) -> Result<usize> {
         // FTS only: makes imported events searchable immediately. Embedding is
         // the slow, opt-in path and is left to an explicit `nabu index`.
-        index_once_with_options(home, IndexOptions { embed: false })
-            .map(|report| report.indexed_events)
+        index_once_with_options(
+            home,
+            IndexOptions {
+                embed: false,
+                sync_memory: true,
+            },
+        )
+        .map(|report| report.indexed_events)
     }
 
     fn doctor(

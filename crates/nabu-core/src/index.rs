@@ -8,9 +8,9 @@ use crate::{
     ensure_semantic_vector_schema, extract_refs, file_paths_for_payload, hash_line, init_home,
     insert_vector_unit_rows, load_checkpoint_from_conn, message_text_for_document, open_index,
     resolved_payload_for_envelope, role_for, search_document_for_event, source_file_metadata,
-    string_field, tool_invocation_id_for_payload, tool_status_for, write_raw_index_checkpoint,
-    CanonicalType, EmbeddingIndexProgress, Error, EventEnvelope, IndexOptions, IndexReport, Result,
-    SearchDocument, SourceCheckpoint, SourceFileMetadata, Tool,
+    string_field, sync_memory, tool_invocation_id_for_payload, tool_status_for,
+    write_raw_index_checkpoint, CanonicalType, EmbeddingIndexProgress, Error, EventEnvelope,
+    IndexOptions, IndexReport, Result, SearchDocument, SourceCheckpoint, SourceFileMetadata, Tool,
 };
 use fs2::FileExt;
 use rusqlite::{params, Connection, OptionalExtension};
@@ -125,6 +125,16 @@ where
     F: FnMut(EmbeddingIndexProgress),
 {
     init_home(home)?;
+    // Optionally refresh memory captures before scanning raw files so this
+    // pass indexes newly synced memory events. Off by default (library
+    // index_once, hook single-flight, index --watch ticks); the CLI opts in
+    // for explicit `index --once` and the wizard so a deliberate index also
+    // captures memory without re-walking the tree on every watch tick.
+    if options.sync_memory {
+        for tool in Tool::all() {
+            sync_memory(home, tool)?;
+        }
+    }
     let db_path = home.join("index").join("harness.db");
     let mut conn = open_index(&db_path)?;
     ensure_semantic_vector_schema(&conn, &db_path)?;
@@ -578,6 +588,31 @@ fn insert_derived_rows(
                 path.display().to_string(),
                 raw_line,
                 raw_offset,
+                &envelope.captured_at,
+            ),
+        )
+        .map_err(|source| Error::Sqlite {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    }
+
+    if envelope.canonical_type == CanonicalType::MemoryFile {
+        conn.execute(
+            "INSERT INTO memories(event_id, tool, session_id, project, name, native_path, size, modified_at, captured_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            (
+                event_id,
+                envelope.tool.as_str(),
+                &envelope.session_id,
+                string_field(payload, "project"),
+                string_field(payload, "name").unwrap_or_default(),
+                string_field(payload, "native_path").unwrap_or_default(),
+                payload
+                    .get("size")
+                    .and_then(serde_json::Value::as_i64)
+                    .unwrap_or(0),
+                string_field(payload, "modified_at"),
                 &envelope.captured_at,
             ),
         )

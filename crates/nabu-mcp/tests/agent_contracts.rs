@@ -985,6 +985,193 @@ fn concurrent_requests_all_receive_exactly_one_response() {
     assert_eq!(ids, (1..=count).collect::<Vec<_>>());
 }
 
+/// Serialize env-mutating tests (memory sync reads tool env roots) and
+/// restore the prior values on drop.
+struct EnvGuard {
+    _lock: std::sync::MutexGuard<'static, ()>,
+    vars: Vec<(&'static str, Option<std::ffi::OsString>)>,
+}
+
+impl EnvGuard {
+    fn set(vars: &[(&'static str, &std::ffi::OsStr)]) -> EnvGuard {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _lock = LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let previous = vars
+            .iter()
+            .map(|(name, _)| (*name, std::env::var_os(name)))
+            .collect();
+        for (name, value) in vars {
+            std::env::set_var(name, value);
+        }
+        EnvGuard {
+            _lock,
+            vars: previous,
+        }
+    }
+}
+
+impl Drop for EnvGuard {
+    fn drop(&mut self) {
+        for (name, value) in &self.vars {
+            match value {
+                Some(value) => std::env::set_var(name, value),
+                None => std::env::remove_var(name),
+            }
+        }
+    }
+}
+
+#[test]
+fn memory_tools_serve_captured_memory_files_with_citations() {
+    let temp = tempdir().unwrap();
+    let home = temp.path().join("home");
+    init_home(&home).unwrap();
+
+    let claude_config = temp.path().join("claude-config");
+    let memory_dir = claude_config
+        .join("projects")
+        .join("-Users-me-project")
+        .join("memory");
+    std::fs::create_dir_all(&memory_dir).unwrap();
+    std::fs::write(memory_dir.join("MEMORY.md"), "# the salt is immutable").unwrap();
+    let codex_home = temp.path().join("codex");
+    let codex_memories = codex_home.join("memories");
+    std::fs::create_dir_all(&codex_memories).unwrap();
+    std::fs::write(
+        codex_memories.join("prefs.md"),
+        "prefer cargo test\nAPI_KEY=sk-abcdefghijklmnopqrstuvwxyz123456",
+    )
+    .unwrap();
+    let _guard = EnvGuard::set(&[
+        ("HOME", temp.path().as_os_str()),
+        ("CLAUDE_CONFIG_DIR", claude_config.as_os_str()),
+        ("CODEX_HOME", codex_home.as_os_str()),
+    ]);
+
+    nabu_mcp::core::sync_memory(&home, Tool::Claude).unwrap();
+    nabu_mcp::core::sync_memory(&home, Tool::Codex).unwrap();
+    index_once(&home).unwrap();
+
+    let output = run_mcp(
+        &home,
+        vec![
+            json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_memories","arguments":{}}}),
+            json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"get_memory","arguments":{"tool":"claude","project":"-Users-me-project","name":"MEMORY.md"}}}),
+            json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"get_memory","arguments":{"tool":"codex","name":"prefs.md","redact":true}}}),
+            json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"get_memory","arguments":{"tool":"claude","name":"MEMORY.md"}}}),
+            json!({"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"list_memories","arguments":{"tool":"codex"}}}),
+            json!({"jsonrpc":"2.0","id":6,"method":"resources/read","params":{"uri":"nabu://memories/codex/prefs.md"}}),
+            json!({"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"search_history","arguments":{"query":"immutable","limit":5}}}),
+        ],
+    );
+    // Responses arrive in completion order from the worker pool; key by id.
+    let by_id: std::collections::BTreeMap<i64, Value> = output
+        .into_iter()
+        .map(|response| (response["id"].as_i64().unwrap(), response))
+        .collect();
+
+    let list_body = &by_id[&1]["result"]["structuredContent"];
+    let list_advisory = list_body["advisory"].as_str().unwrap();
+    assert!(list_advisory.contains("stale"), "{list_advisory}");
+    assert!(list_advisory.contains("ground truth"), "{list_advisory}");
+    let listed = &list_body["memories"];
+    let names: Vec<_> = listed
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| {
+            (
+                entry["tool"].as_str().unwrap().to_string(),
+                entry["name"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    assert!(names.contains(&("claude".to_string(), "MEMORY.md".to_string())));
+    assert!(names.contains(&("codex".to_string(), "prefs.md".to_string())));
+    let claude_entry = listed
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["tool"] == "claude")
+        .unwrap();
+    assert_eq!(claude_entry["project"], "-Users-me-project");
+    assert_eq!(claude_entry["session_id"], "memory:-Users-me-project");
+    assert!(claude_entry["raw_line"].as_i64().unwrap() >= 1);
+
+    let claude_memory = &by_id[&2]["result"]["structuredContent"];
+    assert_eq!(claude_memory["name"], "MEMORY.md");
+    assert!(claude_memory["content"].as_str().unwrap().contains("salt"));
+    assert!(claude_memory.get("redacted").is_none());
+    let get_advisory = claude_memory["advisory"].as_str().unwrap();
+    assert!(get_advisory.contains("stale"), "{get_advisory}");
+
+    let codex_memory = &by_id[&3]["result"]["structuredContent"];
+    assert_eq!(codex_memory["redacted"], true);
+    let content = codex_memory["content"].as_str().unwrap();
+    assert!(content.contains("prefer cargo test"));
+    assert!(content.contains("[REDACTED:ENV_VALUE]"));
+    assert!(!content.contains("sk-abcdef"));
+
+    // Claude memory without a project is a validation error, not a lookup.
+    assert_eq!(by_id[&4]["result"]["isError"], true);
+    assert_eq!(
+        by_id[&4]["result"]["structuredContent"]["error"]["code"],
+        "VALIDATION_ERROR"
+    );
+
+    // Tool-scoped list returns only that tool's memories.
+    let codex_listed = &by_id[&5]["result"]["structuredContent"]["memories"];
+    assert_eq!(codex_listed.as_array().unwrap().len(), 1);
+    assert_eq!(codex_listed[0]["tool"], "codex");
+
+    // Resource read hydrates content with the same citation.
+    let resource = &by_id[&6]["result"]["contents"][0]["text"];
+    let resource = resource.as_str().unwrap();
+    assert!(resource.contains("prefer cargo test"));
+    assert!(resource.contains("prefs.md"));
+
+    // Memory files are searchable through search_history with a memory.file hit.
+    let hits = &by_id[&7]["result"]["structuredContent"]["results"];
+    assert_eq!(hits.as_array().unwrap().len(), 1);
+    assert_eq!(hits[0]["canonical_type"], "memory.file");
+    assert_eq!(hits[0]["tool"], "claude");
+}
+
+#[test]
+fn memory_tools_report_not_found_and_require_project_for_claude() {
+    let temp = tempdir().unwrap();
+    let home = temp.path().join("home");
+    init_home(&home).unwrap();
+
+    let codex_home = temp.path().join("codex");
+    let codex_memories = codex_home.join("memories");
+    std::fs::create_dir_all(&codex_memories).unwrap();
+    std::fs::write(codex_memories.join("prefs.md"), "content").unwrap();
+    let _guard = EnvGuard::set(&[
+        ("HOME", temp.path().as_os_str()),
+        ("CLAUDE_CONFIG_DIR", temp.path().join("claude").as_os_str()),
+        ("CODEX_HOME", codex_home.as_os_str()),
+    ]);
+    nabu_mcp::core::sync_memory(&home, Tool::Codex).unwrap();
+    index_once(&home).unwrap();
+
+    let output = run_mcp(
+        &home,
+        vec![
+            json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"get_memory","arguments":{"tool":"codex","name":"missing.md"}}}),
+            json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"get_memory","arguments":{"tool":"claude","project":"-Users-x","name":"MEMORY.md"}}}),
+        ],
+    );
+    for response in &output {
+        assert_eq!(response["result"]["isError"], true);
+        let error = &response["result"]["structuredContent"]["error"];
+        assert!(error["message"]
+            .as_str()
+            .unwrap()
+            .contains("memory file not found"));
+    }
+}
+
 fn run_mcp(home: &std::path::Path, messages: Vec<Value>) -> Vec<Value> {
     run_mcp_lines(
         home,

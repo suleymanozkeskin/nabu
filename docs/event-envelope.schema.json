@@ -71,7 +71,8 @@
         "sdk_session_store",
         "backfill",
         "exec_json",
-        "app_server"
+        "app_server",
+        "memory_sync"
       ]
     },
     "source_event_type": {
@@ -95,7 +96,8 @@
         "compaction.before",
         "compaction.after",
         "source.discontinuity",
-        "error"
+        "error",
+        "memory.file"
       ]
     },
     "source_event_id": {

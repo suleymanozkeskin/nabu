@@ -369,17 +369,89 @@ pub struct IndexReport {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct IndexOptions {
     pub embed: bool,
+    /// Sync each tool's memory folder into the raw store before scanning raw
+    /// files. Off by default so library callers, hook single-flight passes,
+    /// and `index --watch` ticks never walk the memory tree. The CLI turns it
+    /// on for explicit `index --once` (and the wizard); use `nabu memory sync`
+    /// to refresh captures independently of indexing.
+    pub sync_memory: bool,
 }
 
 impl Default for IndexOptions {
     fn default() -> Self {
-        Self { embed: true }
+        Self {
+            embed: true,
+            // Off by default: memory sync walks each tool's native folders and
+            // must be opted into explicitly (CLI `index --once` and the wizard
+            // turn it on; watch ticks and hook passes keep it off).
+            sync_memory: false,
+        }
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct FileIngestReport {
     pub appended_events: usize,
+}
+
+/// One pass of the memory-folder sync for a single tool: how many files were
+/// found in the tool's native memory folders and how many were appended to the
+/// raw store (unchanged files dedupe to zero appends).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct MemorySyncReport {
+    pub tool: Tool,
+    pub discovered: usize,
+    pub appended: usize,
+}
+
+/// A memory file as served by list surfaces: metadata plus the raw citation
+/// of its latest captured version. Content is hydrated on demand (`get_memory`)
+/// from the raw store.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct MemoryFileSummary {
+    pub tool: Tool,
+    /// Claude project slug (e.g. `-Users-...-project`); `None` for codex,
+    /// whose memories folder is global rather than per-project.
+    pub project: Option<String>,
+    pub name: String,
+    pub native_path: String,
+    pub size: i64,
+    pub modified_at: Option<String>,
+    pub captured_at: String,
+    /// The memory pseudo-session holding this file's captured history
+    /// (`memory:{project-slug}` for claude, `memory:global` for codex).
+    pub session_id: String,
+    pub raw_file: String,
+    pub raw_line: i64,
+    pub raw_offset: Option<i64>,
+}
+
+/// List surface for captured memory files, with a staleness advisory that
+/// agents and humans should read before treating the entries as current truth.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct MemoryListPage {
+    pub memories: Vec<MemoryFileSummary>,
+    pub advisory: String,
+}
+
+/// A memory file with its content, served by `get_memory` / `nabu memory show`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct MemoryFileContent {
+    pub tool: Tool,
+    pub project: Option<String>,
+    pub name: String,
+    pub native_path: String,
+    pub size: i64,
+    pub modified_at: Option<String>,
+    pub captured_at: String,
+    pub session_id: String,
+    pub raw_file: String,
+    pub raw_line: i64,
+    pub raw_offset: Option<i64>,
+    pub content: String,
+    /// Always present: captured memory is a point-in-time snapshot and may be
+    /// stale relative to the live tool folders and current project truth.
+    pub advisory: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]

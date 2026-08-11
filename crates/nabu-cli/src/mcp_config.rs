@@ -431,7 +431,13 @@ fn run_server_health_probe(probe_home: &Path) -> nabu_core::Result<Value> {
     )?;
     // Lexical index only: the probe verifies the query pipeline, not embeddings,
     // so it stays fast and offline-safe.
-    index_once_with_options(probe_home, IndexOptions { embed: false })?;
+    index_once_with_options(
+        probe_home,
+        IndexOptions {
+            embed: false,
+            sync_memory: false,
+        },
+    )?;
 
     let mut input = Vec::new();
     for message in [

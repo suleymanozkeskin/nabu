@@ -46,6 +46,12 @@ pub enum NotFound {
     Event { tool: String, session_id: String },
     /// No raw JSONL line `line` in the capture file at `path`.
     RawLine { line: i64, path: PathBuf },
+    /// No captured memory file for `tool` under `project` with `name`.
+    Memory {
+        tool: String,
+        project: Option<String>,
+        name: String,
+    },
 }
 
 impl std::fmt::Display for NotFound {
@@ -60,6 +66,17 @@ impl std::fmt::Display for NotFound {
             NotFound::RawLine { line, path } => {
                 write!(formatter, "raw line {line} not found in {}", path.display())
             }
+            NotFound::Memory {
+                tool,
+                project,
+                name,
+            } => match project {
+                Some(project) => write!(
+                    formatter,
+                    "memory file not found for {tool}:{project}:{name}"
+                ),
+                None => write!(formatter, "memory file not found for {tool}:{name}"),
+            },
         }
     }
 }

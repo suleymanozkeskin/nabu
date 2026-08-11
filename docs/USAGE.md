@@ -184,7 +184,9 @@ nabu index --watch --json-progress
 Indexing records derived checkpoints for canonical raw JSONL files. A repeated
 `index --once` skips unchanged raw files by source identity, size, and mtime;
 changed files are re-scanned from the top and remain idempotent through
-`dedupe_key`.
+`dedupe_key`. Explicit `index --once` also runs a memory-folder sync before
+scanning raw files; `index --watch` ticks do not (use `nabu memory sync` or a
+fresh `--once` to refresh captures).
 
 Long-running index commands write progress to stderr. When semantic mode is built
 and the local model is present, the embedding pass first emits an
@@ -345,6 +347,91 @@ nabu show codex SESSION_ID --around-line 420 --before 10 --after 10
 ```
 
 Session views hide `assistant.delta` by default. Use `--include-deltas` for the full normalized stream; `export` always preserves full raw fidelity.
+
+### `nabu memory` — capture and read the tools' own memory folders
+
+Three subcommands: `list`, `show`, `sync`.
+
+Each tool keeps long-term memory files in its own folders: claude
+`projects/<id>/memory/` (per project), codex `memories/` (global). opencode has
+no native memory folder. `nabu memory sync` captures those files into the raw
+store as `memory.file` events; `nabu index --once` syncs them too, so the
+wizard flow reaches the same state. `index --watch` does **not** re-walk memory
+folders on every tick — use `nabu memory sync` or a fresh `--once` to refresh
+captures. Nested files keep a root-relative name (`sub/deep.md`). Captures are
+content-addressed: an unchanged file never appends a duplicate, and editing a
+file appends its new version (append-only, like sessions). Binary and files
+larger than 1 MiB are skipped. Captured memory is searchable through
+`nabu search` (`--type memory.file`) and the MCP `search_history` surfaces,
+with the same raw-line citations as sessions. Memory lives in reserved
+pseudo-sessions (`memory:{project}` for claude, `memory:global` for codex)
+that do not appear in `list_sessions`.
+
+#### `nabu memory list` — list captured memory files
+
+```shell
+nabu memory list [--tool codex|claude|opencode] [--limit N] [--json]
+```
+
+| Flag | Description | Default |
+| --- | --- | --- |
+| `--tool <TOOL>` | Restrict to one tool. | all |
+| `--limit <N>` | Maximum files. | `50` |
+| `--json` | Emit structured JSON. | off |
+
+```shell
+nabu memory list
+nabu memory list --tool claude --json
+```
+
+Each entry carries tool, project (claude), name, size, modified/captured
+timestamps, and the raw citation of the latest captured version. Files deleted
+from the tool's folders stay listed: the capture is durable history, not a
+mirror. List and show responses always include an `advisory` that captured
+memory is a point-in-time snapshot and can be stale — treat it as historical
+context, not ground truth.
+
+#### `nabu memory show` — read one captured memory file
+
+```shell
+nabu memory show TOOL NAME [--project PROJECT] [--redact] [--format human|json|markdown]
+```
+
+| Flag | Description | Default |
+| --- | --- | --- |
+| `<TOOL>` | `codex`, `claude`, or `opencode`. Required positional. | — |
+| `<NAME>` | Memory file path relative to the tool's memory root, e.g. `MEMORY.md` or `sub/deep.md`. Required positional. | — |
+| `--project <PROJECT>` | Claude project slug (the `projects/<id>` folder name). Required for claude, whose memory is per-project; omit for codex/opencode. | — |
+| `--redact` | Apply secret-pattern redaction to the content. | off |
+| `--format <FORMAT>` | `human`, `json`, or `markdown`. | `human` |
+
+```shell
+nabu memory show claude MEMORY.md --project=-Users-...-project
+nabu memory show codex prefs.md --redact
+```
+
+Content is hydrated from the canonical raw store, so a file deleted from the
+tool's folder remains readable.
+
+#### `nabu memory sync` — capture the tools' current memory folders
+
+```shell
+nabu memory sync [--tool codex|claude|opencode|all]
+```
+
+| Flag | Description | Default |
+| --- | --- | --- |
+| `--tool <TOOL>` | `codex`, `claude`, `opencode`, or `all`. | `all` |
+
+```shell
+nabu memory sync
+nabu memory sync --tool codex
+```
+
+Appends new/edited memory files and reports discovered vs. appended counts.
+Unchanged files dedupe to zero appends. Captures are searchable and readable
+after the next `nabu index --once` (or immediately, since `index --once` runs
+the sync itself).
 
 ### `nabu tail` — read a session's raw JSONL
 
@@ -564,7 +651,9 @@ MVP MCP tools:
 
 - `search_history`
 - `list_sessions`
+- `list_memories`
 - `get_session`
+- `get_memory`
 - `export_session`
 - `get_event`
 - `history_doctor`
@@ -576,10 +665,29 @@ MVP MCP tools:
 
 `recall_answer` runs search, pulls bounded `get_session` context windows around top hits, dedupes overlapping context, and returns cited material. It does not generate prose, call an LLM, mutate history, or make network requests.
 
+Captured memory files (claude `projects/<id>/memory/`, codex `memories/`) are
+indexed like sessions: `search_history` and `recall_answer` find them (hits
+carry `canonical_type=memory.file` plus tool, session_id, and raw-line
+citations), `list_memories` lists them with metadata, and `get_memory` returns
+one file at full content (set `redact=true` for secret-pattern redaction).
+`name` is the root-relative path (`MEMORY.md`, `sub/deep.md`). Claude memory
+is per-project, so `get_memory` requires `project` for claude and forbids it
+for codex/opencode. session_id values are reserved pseudo-sessions
+(`memory:{project}`, `memory:global`) and never appear in `list_sessions`.
+opencode has no native memory folder and contributes nothing to these
+surfaces. Memory is captured by `nabu memory sync` / `nabu index --once`
+(not by `index --watch` ticks); only captured files are served. Every
+`list_memories` / `get_memory` response carries an `advisory`: captured memory
+is a point-in-time snapshot and can be stale relative to the live tool folders
+and current project truth.
+
 MVP MCP resources:
 
 - `nabu://sessions`
 - `nabu://sessions/{tool}/{session_id}`
+- `nabu://memories`
+- `nabu://memories/{tool}`
+- `nabu://memories/{tool}/{project}/{name}` (codex form: `nabu://memories/codex/{name}`)
 - `nabu://schema/tools`
 
 MVP MCP prompts:

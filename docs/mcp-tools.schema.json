@@ -36,6 +36,14 @@
       },
       "additionalProperties": false
     },
+    "list_memories": {
+      "type": "object",
+      "properties": {
+        "tool": { "type": "string", "enum": ["codex", "claude", "opencode", "all"], "description": "Restrict to one tool, or \"all\" to list captured memory files across codex and claude in one call. Omitting tool is equivalent to \"all\". opencode has no native memory folder and contributes nothing." },
+        "limit": { "type": "integer", "minimum": 1, "maximum": 500, "default": 50 }
+      },
+      "additionalProperties": false
+    },
     "get_session": {
       "type": "object",
       "properties": {
@@ -52,6 +60,17 @@
         "redact": { "type": "boolean", "default": false }
       },
       "required": ["tool", "session_id"],
+      "additionalProperties": false
+    },
+    "get_memory": {
+      "type": "object",
+      "properties": {
+        "tool": { "type": "string", "enum": ["codex", "claude", "opencode"] },
+        "name": { "type": "string", "minLength": 1, "description": "Memory file path relative to the tool's memory root (e.g. MEMORY.md or sub/deep.md)." },
+        "project": { "type": "string", "description": "Claude project slug (the projects/<id> folder name). Required for claude, whose memory is per-project; must be omitted for codex/opencode." },
+        "redact": { "type": "boolean", "default": false, "description": "When true, apply secret-pattern redaction to the returned content." }
+      },
+      "required": ["tool", "name"],
       "additionalProperties": false
     },
     "export_session": {
