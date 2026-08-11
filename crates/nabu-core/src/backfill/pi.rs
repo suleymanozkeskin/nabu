@@ -714,7 +714,10 @@ fn message_envelope(
         sequence: None,
         raw_file: None,
         raw_offset: None,
-        payload: pi_payload(entry, "message", flattened),
+        // pi_type is the same discriminator as source_event_type (the locked
+        // mapping table column), so every payload carries its real entry kind:
+        // `message.user`, `compaction`, `model_change`, `custom_message`, ...
+        payload: pi_payload(entry, source_event_type, flattened),
         payload_ref: None,
     }
 }
@@ -912,7 +915,9 @@ mod tests {
         );
         assert_eq!(events[0].cwd.as_deref(), Some(FIXTURE_CWD));
         assert_eq!(events[0].project_root.as_deref(), Some(FIXTURE_CWD));
+        assert_eq!(events[0].payload["pi_type"], "session");
         assert_eq!(events[1].payload["text"], "first prompt");
+        assert_eq!(events[1].payload["pi_type"], "message.user");
         assert_eq!(events[1].payload["entry_id"], "a1b2c3d4");
         assert_eq!(events[1].payload["parent_id"], Value::Null);
         assert_eq!(events[2].payload["text"], "hello there");
@@ -951,6 +956,7 @@ mod tests {
             ]
         );
         assert_eq!(events[3].source_event_id.as_deref(), Some("call_123"));
+        assert_eq!(events[3].payload["pi_type"], "message.assistant.toolCall");
         assert_eq!(events[3].payload["tool_name"], "read");
         assert_eq!(events[3].payload["parent_message_entry_id"], "b2c3d4e5");
         assert_eq!(events[3].payload["arguments"]["path"], "/tmp/x");
@@ -1015,6 +1021,7 @@ mod tests {
         let events = parse(&[&header(), custom, custom_message]);
         assert_eq!(events.len(), 2);
         assert_eq!(events[1].canonical_type, CanonicalType::UserMessage);
+        assert_eq!(events[1].payload["pi_type"], "custom_message");
         assert_eq!(events[1].payload["text"], "injected context");
         assert_eq!(events[1].payload["custom_type"], "my-extension");
     }
@@ -1026,6 +1033,7 @@ mod tests {
         let events = parse(&[&header(), &compaction]);
         assert_eq!(events.len(), 2);
         assert_eq!(events[1].canonical_type, CanonicalType::CompactionAfter);
+        assert_eq!(events[1].payload["pi_type"], "compaction");
         assert_eq!(events[1].payload["summary"], "User discussed X, Y, Z");
         assert_eq!(events[1].payload["tokens_before"], 50000);
         assert_eq!(events[1].payload["retained_tail"][0]["role"], "user");
@@ -1042,9 +1050,13 @@ mod tests {
         for event in &events[1..] {
             assert_eq!(event.canonical_type, CanonicalType::SessionResumed);
         }
+        assert_eq!(events[1].payload["pi_type"], "model_change");
         assert_eq!(events[1].payload["text"], "model change: openai/gpt-4o");
+        assert_eq!(events[2].payload["pi_type"], "session_info");
         assert_eq!(events[2].payload["name"], "Refactor auth module");
+        assert_eq!(events[3].payload["pi_type"], "label");
         assert_eq!(events[3].payload["label"], "checkpoint-1");
+        assert_eq!(events[4].payload["pi_type"], "branch_summary");
         assert_eq!(events[4].payload["summary"], "Branch explored approach A");
         assert_eq!(events[4].payload["from_id"], "f6g7h8i9");
     }
