@@ -61,10 +61,10 @@ fn validate_memory_identity(tool: Tool, project: Option<&str>, name: &str) -> Re
         (Tool::Claude, _) => Err(Error::Validation(
             "project is required for claude memories (the projects/<id> folder name)".to_string(),
         )),
-        (Tool::Codex | Tool::Opencode, Some(project)) if !project.is_empty() => Err(
+        (Tool::Codex | Tool::Opencode | Tool::Pi, Some(project)) if !project.is_empty() => Err(
             Error::Validation(format!("project must be omitted for {tool} memories")),
         ),
-        (Tool::Codex | Tool::Opencode, _) => Ok(()),
+        (Tool::Codex | Tool::Opencode | Tool::Pi, _) => Ok(()),
     }
 }
 
@@ -149,7 +149,7 @@ fn memory_roots(tool: Tool) -> Result<Vec<(PathBuf, Option<String>)>> {
                 Ok(Vec::new())
             }
         }
-        Tool::Opencode => Ok(Vec::new()),
+        Tool::Opencode | Tool::Pi => Ok(Vec::new()),
     }
 }
 

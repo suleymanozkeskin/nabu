@@ -1045,7 +1045,7 @@ fn resource_content(home: &Path, uri: &str) -> nabu_core::Result<String> {
                             &name,
                         )?)?)
                     }
-                    Tool::Codex | Tool::Opencode => {
+                    Tool::Codex | Tool::Opencode | Tool::Pi => {
                         // Global memory: every segment after tool is the name.
                         let name = name_parts.join("/");
                         Ok(serde_json::to_string(&get_memory(
@@ -1166,7 +1166,7 @@ fn tool_schema(name: &str) -> Value {
             "type": "object",
             "properties": {
                 "query": { "type": "string", "minLength": 1, "description": "Search terms, OR-joined. Prefer distinctive literal tokens from the work itself — identifiers, filenames, error strings, command fragments — over concept wording; extra terms sharpen ranking without erasing recall. If only concept wording is available, set expand_concepts=true." },
-                "tool": { "type": "string", "enum": ["codex", "claude", "opencode", "all"], "description": "Restrict to one tool, or \"all\" for a single cross-tool search over codex, claude, and opencode. Omitting tool is equivalent to \"all\". Each hit still carries its own tool plus raw_file/raw_line/raw_offset/session_id coordinates." },
+                "tool": { "type": "string", "enum": ["codex", "claude", "opencode", "pi", "all"], "description": "Restrict to one tool, or \"all\" for a single cross-tool search over codex, claude, and opencode. Omitting tool is equivalent to \"all\". Each hit still carries its own tool plus raw_file/raw_line/raw_offset/session_id coordinates." },
                 "session_id": { "type": "string" },
                 "cwd": { "type": "string" },
                 "since": { "type": "string" },
@@ -1191,7 +1191,7 @@ fn tool_schema(name: &str) -> Value {
         "list_sessions" => json!({
             "type": "object",
             "properties": {
-                "tool": { "type": "string", "enum": ["codex", "claude", "opencode", "all"], "description": "Restrict to one tool, or \"all\" to list sessions across codex, claude, and opencode in one call. Omitting tool is equivalent to \"all\"; each session still carries its own tool." },
+                "tool": { "type": "string", "enum": ["codex", "claude", "opencode", "pi", "all"], "description": "Restrict to one tool, or \"all\" to list sessions across codex, claude, and opencode in one call. Omitting tool is equivalent to \"all\"; each session still carries its own tool." },
                 "cwd": { "type": "string" },
                 "since": { "type": "string" },
                 "limit": { "type": "integer", "minimum": 1, "maximum": 100, "default": 20 }
@@ -1201,7 +1201,7 @@ fn tool_schema(name: &str) -> Value {
         "list_memories" => json!({
             "type": "object",
             "properties": {
-                "tool": { "type": "string", "enum": ["codex", "claude", "opencode", "all"], "description": "Restrict to one tool, or \"all\" to list captured memory files across codex and claude in one call. Omitting tool is equivalent to \"all\". opencode has no native memory folder and contributes nothing." },
+                "tool": { "type": "string", "enum": ["codex", "claude", "opencode", "pi", "all"], "description": "Restrict to one tool, or \"all\" to list captured memory files across codex and claude in one call. Omitting tool is equivalent to \"all\". opencode has no native memory folder and contributes nothing." },
                 "limit": { "type": "integer", "minimum": 1, "maximum": 500, "default": 50 }
             },
             "additionalProperties": false
@@ -1209,7 +1209,7 @@ fn tool_schema(name: &str) -> Value {
         "get_memory" => json!({
             "type": "object",
             "properties": {
-                "tool": { "type": "string", "enum": ["codex", "claude", "opencode"] },
+                "tool": { "type": "string", "enum": ["codex", "claude", "opencode", "pi"] },
                 "name": { "type": "string", "minLength": 1, "description": "Memory file path relative to the tool's memory root (e.g. MEMORY.md or sub/deep.md)." },
                 "project": { "type": "string", "description": "Claude project slug (the projects/<id> folder name). Required for claude, whose memory is per-project; must be omitted for codex/opencode." },
                 "redact": { "type": "boolean", "default": false, "description": "When true, apply secret-pattern redaction to the returned content." }
@@ -1220,7 +1220,7 @@ fn tool_schema(name: &str) -> Value {
         "get_session" => json!({
             "type": "object",
             "properties": {
-                "tool": { "type": "string", "enum": ["codex", "claude", "opencode"] },
+                "tool": { "type": "string", "enum": ["codex", "claude", "opencode", "pi"] },
                 "session_id": { "type": "string", "minLength": 1 },
                 "limit_events": { "type": "integer", "minimum": 1, "maximum": 500, "default": 100 },
                 "after_raw_line": { "type": "integer", "minimum": 0, "description": "Page forward: return events with raw_line greater than this. Pass the response's next_after_raw_line to fetch the next page with no gap or overlap; 0 (default) reads from the start." },
@@ -1238,7 +1238,7 @@ fn tool_schema(name: &str) -> Value {
         "export_session" => json!({
             "type": "object",
             "properties": {
-                "tool": { "type": "string", "enum": ["codex", "claude", "opencode"] },
+                "tool": { "type": "string", "enum": ["codex", "claude", "opencode", "pi"] },
                 "session_id": { "type": "string", "minLength": 1 },
                 "format": { "type": "string", "enum": ["markdown", "jsonl"], "default": "markdown" },
                 "redact": { "type": "boolean", "default": false }
@@ -1249,7 +1249,7 @@ fn tool_schema(name: &str) -> Value {
         "get_event" => json!({
             "type": "object",
             "properties": {
-                "tool": { "type": "string", "enum": ["codex", "claude", "opencode"] },
+                "tool": { "type": "string", "enum": ["codex", "claude", "opencode", "pi"] },
                 "session_id": { "type": "string", "minLength": 1 },
                 "raw_line": { "type": "integer", "minimum": 1 },
                 "raw_offset": { "type": "integer", "minimum": 0 },
@@ -1262,7 +1262,7 @@ fn tool_schema(name: &str) -> Value {
         "history_doctor" => json!({
             "type": "object",
             "properties": {
-                "tool": { "type": "string", "enum": ["codex", "claude", "opencode", "all"], "default": "all" },
+                "tool": { "type": "string", "enum": ["codex", "claude", "opencode", "pi", "all"], "default": "all" },
                 "deep": { "type": "boolean", "default": false, "description": "Runs full SQLite integrity_check. Over MCP this is refused when the index database exceeds NABU_MCP_DEEP_DOCTOR_MAX_BYTES (default 500 MiB; 0 disables the guard)." }
             },
             "additionalProperties": false
@@ -1271,7 +1271,7 @@ fn tool_schema(name: &str) -> Value {
             "type": "object",
             "properties": {
                 "query": { "type": "string", "minLength": 1, "description": "Search terms, OR-joined. Prefer distinctive literal tokens from the work itself — identifiers, filenames, error strings, command fragments — over concept wording; extra terms sharpen ranking without erasing recall. If only concept wording is available, set expand_concepts=true." },
-                "tool": { "type": "string", "enum": ["codex", "claude", "opencode", "all"], "description": "Restrict to one tool, or \"all\" to gather cited context across codex, claude, and opencode in one call. Omitting tool is equivalent to \"all\"; each hit still carries its own tool and coordinates." },
+                "tool": { "type": "string", "enum": ["codex", "claude", "opencode", "pi", "all"], "description": "Restrict to one tool, or \"all\" to gather cited context across codex, claude, and opencode in one call. Omitting tool is equivalent to \"all\"; each hit still carries its own tool and coordinates." },
                 "session_id": { "type": "string" },
                 "cwd": { "type": "string" },
                 "since": { "type": "string" },

@@ -921,6 +921,9 @@ fn backfill_event_name_for_payload(tool: Tool, source_path: &Path, payload: &Val
                 "message.updated".to_string()
             }
         }
+        // Pi envelopes are fully built by its own parser (PR2); backfill does
+        // not reach this fallback for pi until then.
+        Tool::Pi => "pi.unknown".to_string(),
     }
 }
 
@@ -939,6 +942,8 @@ fn canonical_type_for_backfill_payload(
         Tool::Claude => canonical_type_for_claude_native(payload),
         Tool::Codex => canonical_type_for_payload(tool, source_event_type, payload),
         Tool::Opencode => canonical_type_for_opencode_native(source_event_type, payload),
+        // Pi envelopes carry their canonical type from the pi parser (PR2).
+        Tool::Pi => CanonicalType::Error,
     }
 }
 
@@ -1231,6 +1236,8 @@ fn backfill_tool_root(source_root: &Path, tool: Tool) -> PathBuf {
         Tool::Codex => source_root.join("codex"),
         Tool::Claude => source_root.join("claude-code"),
         Tool::Opencode => source_root.join("opencode"),
+        // Pi backfill roots are resolved in PR2; keep the nested path shape.
+        Tool::Pi => source_root.join("pi"),
     };
     if candidate.exists() {
         candidate
@@ -1268,6 +1275,8 @@ fn is_backfill_candidate(tool: Tool, path: &Path) -> bool {
             path.extension().and_then(|value| value.to_str()),
             Some("json") | Some("jsonl")
         ),
+        // Pi session parsing lands with PR2; nothing is a candidate yet.
+        Tool::Pi => false,
     }
 }
 

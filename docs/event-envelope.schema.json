@@ -36,7 +36,7 @@
     },
     "tool": {
       "type": "string",
-      "enum": ["codex", "claude", "opencode"]
+      "enum": ["codex", "claude", "opencode", "pi"]
     },
     "tool_version": {
       "type": ["string", "null"]

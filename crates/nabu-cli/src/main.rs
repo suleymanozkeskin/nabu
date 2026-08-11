@@ -24,8 +24,8 @@ use crate::render::{
 };
 use clap::{Parser, Subcommand, ValueEnum};
 use nabu_adapters::{
-    install_claude, install_codex, install_opencode, uninstall_claude, uninstall_codex,
-    uninstall_opencode, ConfigChangeReport,
+    install_claude, install_codex, install_opencode, install_pi, uninstall_claude, uninstall_codex,
+    uninstall_opencode, uninstall_pi, ConfigChangeReport,
 };
 #[cfg(test)]
 use nabu_core::index_once;
@@ -406,6 +406,7 @@ enum BackfillTool {
     Codex,
     Claude,
     Opencode,
+    Pi,
     All,
 }
 
@@ -415,6 +416,7 @@ impl BackfillTool {
             BackfillTool::Codex => Some(Tool::Codex),
             BackfillTool::Claude => Some(Tool::Claude),
             BackfillTool::Opencode => Some(Tool::Opencode),
+            BackfillTool::Pi => Some(Tool::Pi),
             BackfillTool::All => None,
         }
     }
@@ -425,6 +427,7 @@ enum AgentTool {
     Codex,
     Claude,
     Opencode,
+    Pi,
     All,
 }
 
@@ -433,6 +436,7 @@ enum MemoryTool {
     Codex,
     Claude,
     Opencode,
+    Pi,
     All,
 }
 
@@ -442,6 +446,7 @@ impl MemoryTool {
             MemoryTool::Codex => Some(Tool::Codex),
             MemoryTool::Claude => Some(Tool::Claude),
             MemoryTool::Opencode => Some(Tool::Opencode),
+            MemoryTool::Pi => Some(Tool::Pi),
             MemoryTool::All => None,
         }
     }
@@ -452,6 +457,7 @@ enum DoctorTool {
     Codex,
     Claude,
     Opencode,
+    Pi,
     All,
 }
 
@@ -767,6 +773,7 @@ fn run(cli: Cli) -> nabu_core::Result<()> {
                     install_codex(&home, dry_run)?,
                     install_claude(&home, dry_run)?,
                     install_opencode(&home, dry_run)?,
+                    install_pi(&home, dry_run)?,
                 ] {
                     print_config_change(&report);
                 }
@@ -777,6 +784,10 @@ fn run(cli: Cli) -> nabu_core::Result<()> {
             }
             AgentTool::Codex => {
                 let report = install_codex(&home, dry_run)?;
+                print_config_change(&report);
+            }
+            AgentTool::Pi => {
+                let report = install_pi(&home, dry_run)?;
                 print_config_change(&report);
             }
         },
@@ -790,6 +801,7 @@ fn run(cli: Cli) -> nabu_core::Result<()> {
                     uninstall_codex(&home, dry_run)?,
                     uninstall_claude(&home, dry_run)?,
                     uninstall_opencode(&home, dry_run)?,
+                    uninstall_pi(&home, dry_run)?,
                 ] {
                     print_config_change(&report);
                 }
@@ -800,6 +812,10 @@ fn run(cli: Cli) -> nabu_core::Result<()> {
             }
             AgentTool::Codex => {
                 let report = uninstall_codex(&home, dry_run)?;
+                print_config_change(&report);
+            }
+            AgentTool::Pi => {
+                let report = uninstall_pi(&home, dry_run)?;
                 print_config_change(&report);
             }
         },

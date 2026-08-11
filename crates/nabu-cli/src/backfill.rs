@@ -123,7 +123,8 @@ fn selected_backfill_tools(selection: BackfillTool) -> &'static [Tool] {
         BackfillTool::Codex => &[Tool::Codex],
         BackfillTool::Claude => &[Tool::Claude],
         BackfillTool::Opencode => &[Tool::Opencode],
-        BackfillTool::All => &[Tool::Codex, Tool::Claude, Tool::Opencode],
+        BackfillTool::Pi => &[Tool::Pi],
+        BackfillTool::All => &[Tool::Codex, Tool::Claude, Tool::Opencode, Tool::Pi],
     }
 }
 
