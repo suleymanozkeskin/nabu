@@ -244,7 +244,8 @@ pub fn install_codex(home: &Path, dry_run: bool) -> Result<ConfigChangeReport> {
         summary: if dry_run {
             "dry-run: Codex hooks.json diff only".to_string()
         } else if changed {
-            "installed Codex hook settings".to_string()
+            "installed Codex hook settings; run `/hooks` in Codex to review and trust the changed hooks"
+                .to_string()
         } else {
             "Codex hook settings already installed".to_string()
         },
@@ -358,7 +359,7 @@ pub fn codex_status(home: &Path) -> Result<CodexStatus> {
         hooks_installed,
         hooks_path,
         codex_installed: command_in_path("codex"),
-        trust_guidance: "Codex compatibility mode captures turn-boundary hooks and reconciles transcripts; assistant deltas require streaming mode.".to_string(),
+        trust_guidance: "Run `/hooks` in Codex to review and trust new or changed nabu hooks. Codex compatibility mode captures turn-boundary hooks and reconciles transcripts; assistant deltas require streaming mode.".to_string(),
         storage_writable: home.join("raw").join("codex").is_dir(),
         parse_error,
     })
@@ -624,14 +625,14 @@ fn add_claude_hooks(mut settings: Value, command: &str) -> Result<Value> {
         // Replace-then-add: prune stale nabu hooks (marker match, different
         // command — e.g. pre-quoting or previous --home installs) so upgrades
         // converge to exactly one canonical hook instead of stacking duplicates.
-        prune_claude_hook_entries(entries_array, |hook| {
+        prune_grouped_hook_entries(entries_array, |hook| {
             hook_command_contains(hook, CLAUDE_HOOK_MARKER) && hook_command(hook) != Some(command)
         });
         // Claude allows multiple inner hooks per entry; the nabu command is
         // present if any inner hook of any entry carries it.
         let already_present = entries_array
             .iter()
-            .flat_map(claude_inner_hooks)
+            .flat_map(grouped_inner_hooks)
             .any(|hook| hook_command(hook) == Some(command));
         if !already_present {
             entries_array.push(json!({
@@ -664,21 +665,20 @@ fn add_codex_hooks(mut settings: Value, command: &str) -> Result<Value> {
             .or_insert_with(|| Value::Array(Vec::new()));
         require_event_array(entries, event)?;
         let entries_array = entries.as_array_mut().expect("hook entries");
-        // Replace-then-add: drop stale nabu entries (marker match, different
-        // command) so upgrades converge to exactly one canonical hook.
-        entries_array.retain(|entry| {
-            !(hook_command_contains(entry, CODEX_HOOK_MARKER)
-                && hook_command(entry) != Some(command))
+        migrate_codex_hook_entries(entries_array, event)?;
+        // Replace-then-add: remove every old nabu handler, including duplicate
+        // or stale commands co-located with a user handler. Then add one group.
+        prune_grouped_hook_entries(entries_array, |hook| {
+            hook_command_contains(hook, CODEX_HOOK_MARKER)
         });
-        let already_present = entries_array
-            .iter()
-            .any(|entry| hook_command(entry) == Some(command));
-        if !already_present {
-            entries_array.push(json!({
-                "type": "command",
-                "command": command
-            }));
-        }
+        entries_array.push(json!({
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": command
+                }
+            ]
+        }));
     }
 
     Ok(settings)
@@ -695,7 +695,7 @@ fn remove_claude_hooks(mut settings: Value) -> Value {
             continue;
         };
         let before_len = entries.len();
-        prune_claude_hook_entries(entries, |hook| {
+        prune_grouped_hook_entries(entries, |hook| {
             hook_command_contains(hook, CLAUDE_HOOK_MARKER)
         });
         // Track only event keys our filtering emptied, so user-created empty
@@ -722,7 +722,17 @@ fn remove_codex_hooks(mut settings: Value) -> Value {
             continue;
         };
         let before_len = entries.len();
-        entries.retain(|entry| !hook_command_contains(entry, CODEX_HOOK_MARKER));
+        entries.retain_mut(|entry| {
+            if hook_command_contains(entry, CODEX_HOOK_MARKER) {
+                return false;
+            }
+            let Some(inner) = entry.get_mut("hooks").and_then(Value::as_array_mut) else {
+                return true;
+            };
+            let inner_before = inner.len();
+            inner.retain(|hook| !hook_command_contains(hook, CODEX_HOOK_MARKER));
+            !(inner.is_empty() && inner_before > 0)
+        });
         if entries.is_empty() && before_len > 0 {
             emptied_events.push(event.to_string());
         }
@@ -752,10 +762,38 @@ fn settings_contains_harness_codex_hooks(settings: &Value) -> bool {
         .all(|event| codex_event_has_nabu_hook(hooks_object.get(*event)))
 }
 
-/// Remove inner hooks matching `is_stale` from each Claude entry, keeping
-/// co-located user hooks; drop an entry only when the pruning emptied its
-/// `hooks` array. Entries without a `hooks` array are not ours — left untouched.
-fn prune_claude_hook_entries(entries: &mut Vec<Value>, is_stale: impl Fn(&Value) -> bool) {
+/// Convert Codex's legacy flat handler entries to the current matcher-group
+/// shape. Unknown shapes are rejected so install never discards user config.
+fn migrate_codex_hook_entries(entries: &mut [Value], event: &str) -> Result<()> {
+    for entry in entries {
+        if let Some(hooks) = entry.get("hooks") {
+            if !hooks.is_array() {
+                return Err(Error::Validation(format!(
+                    "expected `hooks` in Codex hook event `{event}` to be a JSON array, found {}",
+                    json_type_name(hooks)
+                )));
+            }
+            continue;
+        }
+
+        let is_legacy_handler = entry
+            .get("type")
+            .and_then(Value::as_str)
+            .is_some_and(|kind| !kind.is_empty());
+        if !is_legacy_handler {
+            return Err(Error::Validation(format!(
+                "expected Codex hook event `{event}` entry to be a matcher group or legacy handler"
+            )));
+        }
+        let handler = std::mem::take(entry);
+        *entry = json!({ "hooks": [handler] });
+    }
+    Ok(())
+}
+
+/// Remove matching handlers from grouped hook entries and keep co-located user
+/// handlers. Drop a group only when this removal empties its `hooks` array.
+fn prune_grouped_hook_entries(entries: &mut Vec<Value>, is_stale: impl Fn(&Value) -> bool) {
     entries.retain_mut(|entry| {
         let Some(inner) = entry.get_mut("hooks").and_then(Value::as_array_mut) else {
             return true;
@@ -766,9 +804,8 @@ fn prune_claude_hook_entries(entries: &mut Vec<Value>, is_stale: impl Fn(&Value)
     });
 }
 
-/// Inner hooks of a Claude entry (`{matcher?, hooks: [...]}`); empty slice when
-/// the entry has no valid `hooks` array.
-fn claude_inner_hooks(entry: &Value) -> &[Value] {
+/// Inner hooks of a matcher group (`{matcher?, hooks: [...]}`).
+fn grouped_inner_hooks(entry: &Value) -> &[Value] {
     entry
         .get("hooks")
         .and_then(Value::as_array)
@@ -788,7 +825,7 @@ fn claude_event_has_nabu_hook(event: Option<&Value>) -> bool {
     event.and_then(Value::as_array).is_some_and(|entries| {
         entries
             .iter()
-            .flat_map(claude_inner_hooks)
+            .flat_map(grouped_inner_hooks)
             .any(|hook| hook_command_contains(hook, CLAUDE_HOOK_MARKER))
     })
 }
@@ -797,7 +834,8 @@ fn codex_event_has_nabu_hook(event: Option<&Value>) -> bool {
     event.and_then(Value::as_array).is_some_and(|entries| {
         entries
             .iter()
-            .any(|entry| hook_command_contains(entry, CODEX_HOOK_MARKER))
+            .flat_map(grouped_inner_hooks)
+            .any(|hook| hook_command_contains(hook, CODEX_HOOK_MARKER))
     })
 }
 
@@ -811,7 +849,7 @@ fn claude_hook_change_summary(before: &Value, after: &Value) -> String {
             .map(|entries| {
                 entries
                     .iter()
-                    .flat_map(claude_inner_hooks)
+                    .flat_map(grouped_inner_hooks)
                     .filter(|hook| hook_command_contains(hook, CLAUDE_HOOK_MARKER))
                     .filter_map(hook_command)
                     .map(str::to_string)
@@ -828,9 +866,20 @@ fn codex_hook_change_summary(before: &Value, after: &Value) -> String {
             .map(|entries| {
                 entries
                     .iter()
-                    .filter(|entry| hook_command_contains(entry, CODEX_HOOK_MARKER))
-                    .filter_map(hook_command)
-                    .map(str::to_string)
+                    .flat_map(|entry| {
+                        if hook_command_contains(entry, CODEX_HOOK_MARKER) {
+                            return hook_command(entry)
+                                .map(|command| format!("legacy:{command}"))
+                                .into_iter()
+                                .collect::<Vec<_>>();
+                        }
+                        grouped_inner_hooks(entry)
+                            .iter()
+                            .filter(|hook| hook_command_contains(hook, CODEX_HOOK_MARKER))
+                            .filter_map(hook_command)
+                            .map(|command| format!("grouped:{command}"))
+                            .collect()
+                    })
                     .collect()
             })
             .unwrap_or_default()
@@ -1289,6 +1338,10 @@ mod tests {
             serde_json::from_str(&fs::read_to_string(&codex_hooks).unwrap()).unwrap();
         assert_eq!(codex["theme"], "dark");
         assert!(codex.to_string().contains("keep-codex"));
+        assert_eq!(
+            codex.pointer("/hooks/Stop/0/hooks/0/command"),
+            Some(&json!("echo keep-codex"))
+        );
         assert!(settings_contains_harness_codex_hooks(&codex));
         let claude: Value =
             serde_json::from_str(&fs::read_to_string(&claude_settings).unwrap()).unwrap();
@@ -1503,6 +1556,72 @@ mod tests {
         assert_eq!(fs::read_to_string(&settings_path).unwrap(), original);
     }
 
+    #[test]
+    fn add_codex_hooks_migrates_legacy_flat_handlers() {
+        let command = "nabu ingest hook --tool codex --home '/home'";
+        let mut legacy = json!({ "hooks": {} });
+        for event in CODEX_HOOK_EVENTS {
+            legacy["hooks"][event] = json!([
+                { "type": "command", "command": command }
+            ]);
+        }
+        legacy["hooks"]["Stop"]
+            .as_array_mut()
+            .unwrap()
+            .insert(0, json!({ "type": "command", "command": "echo user" }));
+
+        assert!(!settings_contains_harness_codex_hooks(&legacy));
+        let migrated = add_codex_hooks(legacy.clone(), command).unwrap();
+        assert!(settings_contains_harness_codex_hooks(&migrated));
+        assert_eq!(
+            migrated.pointer("/hooks/Stop/0/hooks/0/command"),
+            Some(&json!("echo user"))
+        );
+        assert_single_codex_nabu_hook(&migrated, command);
+        assert!(codex_hook_change_summary(&legacy, &migrated).contains("replaced"));
+    }
+
+    #[test]
+    fn uninstall_codex_preserves_colocated_user_handler() {
+        let command = "nabu ingest hook --tool codex --home '/home'";
+        let before = json!({
+            "hooks": {
+                "Stop": [{
+                    "hooks": [
+                        { "type": "command", "command": "echo user" },
+                        { "type": "command", "command": command }
+                    ]
+                }]
+            }
+        });
+
+        let after = remove_codex_hooks(before);
+        assert_eq!(
+            after.pointer("/hooks/Stop/0/hooks/0/command"),
+            Some(&json!("echo user"))
+        );
+        assert_eq!(
+            after
+                .pointer("/hooks/Stop/0/hooks")
+                .and_then(Value::as_array)
+                .map(Vec::len),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn add_codex_hooks_refuses_unknown_group_shapes() {
+        for settings in [
+            json!({ "hooks": { "Stop": [{ "matcher": "tool" }] } }),
+            json!({ "hooks": { "Stop": [{ "hooks": null }] } }),
+        ] {
+            assert!(matches!(
+                add_codex_hooks(settings, "nabu ingest hook --tool codex"),
+                Err(Error::Validation(_))
+            ));
+        }
+    }
+
     // Exactly one nabu hook per claude event, carrying `expected_command`.
     fn assert_single_claude_nabu_hook(settings: &Value, expected_command: &str) {
         for event in CLAUDE_HOOK_EVENTS {
@@ -1511,8 +1630,23 @@ mod tests {
                 .and_then(Value::as_array)
                 .unwrap()
                 .iter()
-                .flat_map(claude_inner_hooks)
+                .flat_map(grouped_inner_hooks)
                 .filter(|hook| hook_command_contains(hook, CLAUDE_HOOK_MARKER))
+                .filter_map(hook_command)
+                .collect();
+            assert_eq!(nabu_commands, vec![expected_command], "{event}");
+        }
+    }
+
+    fn assert_single_codex_nabu_hook(settings: &Value, expected_command: &str) {
+        for event in CODEX_HOOK_EVENTS {
+            let nabu_commands: Vec<&str> = settings
+                .pointer(&format!("/hooks/{event}"))
+                .and_then(Value::as_array)
+                .unwrap()
+                .iter()
+                .flat_map(grouped_inner_hooks)
+                .filter(|hook| hook_command_contains(hook, CODEX_HOOK_MARKER))
                 .filter_map(hook_command)
                 .collect();
             assert_eq!(nabu_commands, vec![expected_command], "{event}");
@@ -1613,17 +1747,7 @@ mod tests {
             "nabu ingest hook --tool codex --home {}",
             shell_single_quote(&new_home)
         );
-        for event in CODEX_HOOK_EVENTS {
-            let nabu_commands: Vec<&str> = codex
-                .pointer(&format!("/hooks/{event}"))
-                .and_then(Value::as_array)
-                .unwrap()
-                .iter()
-                .filter(|entry| hook_command_contains(entry, CODEX_HOOK_MARKER))
-                .filter_map(hook_command)
-                .collect();
-            assert_eq!(nabu_commands, vec![expected_codex.as_str()], "{event}");
-        }
+        assert_single_codex_nabu_hook(&codex, &expected_codex);
     }
 
     #[test]

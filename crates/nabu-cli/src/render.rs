@@ -12,8 +12,9 @@ use crate::mcp_config::{
 use crate::{DoctorTool, OutputFormat};
 use nabu_adapters::{claude_status, codex_status, opencode_status, pi_status, ConfigChangeReport};
 use nabu_core::{
-    doctor_with_options, index_freshness, latest_event, Corroboration, Error, IndexFreshness,
-    PurgeAction, PurgeAllReport, PurgeTier, SearchPage, SessionPage, SummaryKind, Tool,
+    capture_freshness, doctor_with_options, index_freshness, latest_event, CaptureFreshness,
+    Corroboration, Error, IndexFreshness, PurgeAction, PurgeAllReport, PurgeTier, SearchPage,
+    SessionPage, SummaryKind, Tool,
 };
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
@@ -271,6 +272,7 @@ pub(crate) fn print_tool_doctor_human(home: &Path, tool: DoctorTool) -> nabu_cor
     // Freshness only — the full doctor pipeline (footprint walk, coverage,
     // latest-event queries) is not displayed here, so do not pay for it.
     let freshness = index_freshness(home);
+    let capture = capture_freshness(home);
     if matches!(tool, DoctorTool::Claude | DoctorTool::All) {
         let status = claude_status(home)?;
         println!("claude.installed={}", status.claude_installed);
@@ -292,6 +294,7 @@ pub(crate) fn print_tool_doctor_human(home: &Path, tool: DoctorTool) -> nabu_cor
         println!("codex.storage_writable={}", status.storage_writable);
         println!("codex.hooks_path={}", status.hooks_path.display());
         println!("codex.trust_guidance={}", status.trust_guidance);
+        print_capture_freshness_human(&capture, "codex");
         print_freshness_human(&freshness, "codex");
     }
     if matches!(tool, DoctorTool::Opencode | DoctorTool::All) {
@@ -319,6 +322,35 @@ pub(crate) fn print_tool_doctor_human(home: &Path, tool: DoctorTool) -> nabu_cor
         print_freshness_human(&freshness, "pi");
     }
     Ok(())
+}
+
+fn print_capture_freshness_human(freshness: &BTreeMap<String, CaptureFreshness>, tool: &str) {
+    let Some(freshness) = freshness.get(tool) else {
+        return;
+    };
+    println!(
+        "{tool}.capture_stale={}{}",
+        freshness.stale,
+        if freshness.stale {
+            format!(
+                "  STALE missing={} of {} native session(s)",
+                freshness.missing_sessions, freshness.source_sessions
+            )
+        } else {
+            String::new()
+        }
+    );
+    println!("{tool}.source_sessions={}", freshness.source_sessions);
+    println!("{tool}.captured_sessions={}", freshness.captured_sessions);
+    if !freshness.missing_session_ids.is_empty() {
+        println!(
+            "{tool}.missing_session_ids={}",
+            freshness.missing_session_ids.join(",")
+        );
+    }
+    if let Some(error) = &freshness.scan_error {
+        println!("{tool}.capture_scan_error={error}");
+    }
 }
 
 /// Print one `<tool>.index_*` line group from the freshness map. When the index

@@ -102,26 +102,27 @@ mod options;
 pub(crate) use options::RankedSearchResult;
 pub use options::{
     native_jsonl_line_command, AppendReport, BackfillCoverageSession, BackfillDryRunReport,
-    BackfillImportPreview, BackfillProgress, BackfillReport, CorroboratedRef, Corroboration,
-    CoverageSummary, DoctorCheck, DoctorReport, DoctorStats, EmbeddingDownloadProgress,
-    EmbeddingDownloadReport, EmbeddingIndexProgress, EmbeddingModelDisclosure,
-    EmbeddingModelStatus, EventOptions, EventPointer, FileIngestReport, FileTouch, IndexFreshness,
-    IndexOptions, IndexReport, InitReport, MemoryFileContent, MemoryFileSummary, MemoryListPage,
-    MemorySyncReport, PurgeAction, PurgeAllArtifact, PurgeAllOptions, PurgeAllReport, PurgeReport,
-    PurgeTier, SearchContinuation, SearchMode, SearchOptions, SearchPage, SearchResult,
-    SessionOptions, SessionPage, SessionSummary, StorageFootprint, StoredEvent, ToolUsage,
-    SESSION_PROMPT_SNIPPET_CHARS, SESSION_TOP_FILES, SESSION_TOP_TOOLS,
+    BackfillImportPreview, BackfillProgress, BackfillReport, CaptureFreshness, CorroboratedRef,
+    Corroboration, CoverageSummary, DoctorCheck, DoctorReport, DoctorStats,
+    EmbeddingDownloadProgress, EmbeddingDownloadReport, EmbeddingIndexProgress,
+    EmbeddingModelDisclosure, EmbeddingModelStatus, EventOptions, EventPointer, FileIngestReport,
+    FileTouch, IndexFreshness, IndexOptions, IndexReport, InitReport, MemoryFileContent,
+    MemoryFileSummary, MemoryListPage, MemorySyncReport, PurgeAction, PurgeAllArtifact,
+    PurgeAllOptions, PurgeAllReport, PurgeReport, PurgeTier, SearchContinuation, SearchMode,
+    SearchOptions, SearchPage, SearchResult, SessionOptions, SessionPage, SessionSummary,
+    StorageFootprint, StoredEvent, ToolUsage, SESSION_PROMPT_SNIPPET_CHARS, SESSION_TOP_FILES,
+    SESSION_TOP_TOOLS,
 };
 
 mod purge;
 pub use purge::{purge_all, purge_before, purge_session};
 
 mod doctor;
-pub(crate) use doctor::{directory_size, storage_footprint};
 pub use doctor::{
-    doctor, doctor_with_options, doctor_with_progress, index_freshness, DoctorOptions, DoctorStage,
-    DoctorStageEvent,
+    capture_freshness, doctor, doctor_with_options, doctor_with_progress, index_freshness,
+    DoctorOptions, DoctorStage, DoctorStageEvent,
 };
+pub(crate) use doctor::{directory_size, storage_footprint};
 mod json;
 pub(crate) use json::{i64_pointer, required_string, string_pointer};
 
@@ -135,7 +136,8 @@ pub(crate) use backfill::{
     append_prepared_events, checkpoint_is_current, load_checkpoint_from_conn,
     message_id_for_payload, normalize_date_or_duration, opencode_hook_session_id,
     opencode_server_events_from_payload, parse_ingest_file_source, raw_index_checkpoint_offset,
-    source_file_metadata, write_raw_index_checkpoint, SourceCheckpoint, SourceFileMetadata,
+    session_id_from_source_path, source_file_metadata, write_raw_index_checkpoint,
+    SourceCheckpoint, SourceFileMetadata,
 };
 #[cfg(test)]
 pub(crate) use backfill::{backfill_dry_run, backfill_since};

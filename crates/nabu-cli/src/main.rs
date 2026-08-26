@@ -1030,6 +1030,7 @@ fn run(cli: Cli) -> nabu_core::Result<()> {
                 println!("storage.ok={}", report.storage.ok);
                 println!("index.ok={}", report.index.ok);
                 println!("backfill.ok={}", report.backfill.ok);
+                println!("capture.ok={}", report.capture.ok);
                 print_tool_doctor_human(&home, tool)?;
             }
         }
@@ -1994,6 +1995,11 @@ mod tests {
         assert!(codex
             .pointer("/tools/codex/latest_captured_event/session_id")
             .is_some());
+        assert_eq!(codex.pointer("/capture/ok"), Some(&json!(true)));
+        assert_eq!(
+            codex.pointer("/capture_freshness/codex/source_sessions"),
+            Some(&json!(0))
+        );
         assert_eq!(
             opencode.pointer("/tools/opencode/plugin_installed"),
             Some(&json!(true))
@@ -2646,12 +2652,17 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .iter()
-                .filter(|entry| {
+                .flat_map(|entry| {
                     entry
-                        .get("command")
+                        .get("hooks")
+                        .and_then(Value::as_array)
+                        .map(Vec::as_slice)
+                        .unwrap_or(&[])
+                })
+                .filter(|hook| {
+                    hook.get("command")
                         .and_then(Value::as_str)
-                        .map(|command| command.contains("nabu"))
-                        .unwrap_or(false)
+                        .is_some_and(|command| command.contains("nabu"))
                 })
                 .count();
             assert_eq!(count, 1);
