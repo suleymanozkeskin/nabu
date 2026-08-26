@@ -139,6 +139,9 @@ nabu ingest hook --tool codex|claude|opencode
 echo "$HOOK_JSON" | nabu ingest hook --tool claude
 ```
 
+Successful hook ingestion writes no output. Hook stdout is reserved for agent
+control and context messages. Capture errors are written to stderr.
+
 #### `nabu ingest file` — ingest a file of native records
 
 ```shell
