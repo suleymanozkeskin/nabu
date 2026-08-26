@@ -5,6 +5,11 @@ in `docs/release-notes.md`.
 
 ## Unreleased
 
+## 0.1.9
+
+- Keep successful `nabu ingest hook` calls silent. Capture status text no longer
+  enters Codex chat context or causes invalid JSON failures in Stop hooks.
+
 ## 0.1.8
 
 - Write Codex hooks as matcher groups with nested command handlers. Install

@@ -612,9 +612,6 @@ fn run(cli: Cli) -> nabu_core::Result<()> {
                 })?;
             let payload = hook_stdin_payload(&input);
             match ingest_hook_events(&home, tool, payload) {
-                Ok(reports) if reports.is_empty() => {
-                    println!("no events");
-                }
                 Ok(reports) => {
                     let appended = reports.iter().filter(|report| report.appended).count();
                     if appended > 0 {
@@ -626,24 +623,10 @@ fn run(cli: Cli) -> nabu_core::Result<()> {
                         // in-flight pass.
                         spawn_background_index(&home);
                     }
-                    if reports.len() == 1 {
-                        let report = &reports[0];
-                        if report.appended {
-                            println!(
-                                "appended {} at offset {}",
-                                report.raw_file.display(),
-                                report.raw_offset
-                            );
-                        } else {
-                            println!(
-                                "skipped duplicate {} at offset {}",
-                                report.raw_file.display(),
-                                report.raw_offset
-                            );
-                        }
-                    } else {
-                        println!("appended {} events ({appended} new)", reports.len());
-                    }
+                    // Hook stdout is a control and context channel, not a log.
+                    // A successful capture has no decision or context to send
+                    // back to the calling agent, so keep stdout empty. This is
+                    // also the valid continue result for Codex Stop hooks.
                 }
                 Err(error @ Error::Io { .. }) => {
                     eprintln!("{error}");
