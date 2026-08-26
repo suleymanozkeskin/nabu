@@ -16,6 +16,8 @@ in `docs/release-notes.md`.
   session IDs without a non-empty canonical raw file now set `capture.ok=false`
   and list the most recent missing session IDs.
 
+- Update the locked `h2` dependency to 0.4.16 for RUSTSEC-2026-0258.
+
 ## 0.1.7
 
 - `nabu install pi` replaces inert non-factory stubs at the extension path
