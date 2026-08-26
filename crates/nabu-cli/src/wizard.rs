@@ -1452,12 +1452,14 @@ fn health_step(
     };
     match report {
         Ok(report) => {
-            let healthy = report.storage.ok && report.index.ok && report.backfill.ok;
+            let healthy =
+                report.storage.ok && report.index.ok && report.backfill.ok && report.capture.ok;
             let line = format!(
-                "storage {} · index {} · backfill {}",
+                "storage {} · index {} · backfill {} · capture {}",
                 ok_label(report.storage.ok),
                 ok_label(report.index.ok),
                 ok_label(report.backfill.ok),
+                ok_label(report.capture.ok),
             );
             prompter.blank();
             if healthy {
@@ -1477,6 +1479,7 @@ fn doctor_stage_label(stage: DoctorStage) -> &'static str {
         DoctorStage::Storage => "Storage",
         DoctorStage::Index => "Index",
         DoctorStage::Backfill => "Backfill",
+        DoctorStage::Capture => "Capture",
         DoctorStage::Coverage => "Coverage",
         DoctorStage::Footprint => "Footprint",
         DoctorStage::LatestEvents => "Latest events",
@@ -2118,6 +2121,10 @@ mod tests {
                 ok: true,
                 message: "ok".to_string(),
             },
+            capture: DoctorCheck {
+                ok: true,
+                message: "ok".to_string(),
+            },
             coverage: CoverageSummary {
                 checkpointed_sources: 0,
                 captured_sessions: 0,
@@ -2136,6 +2143,7 @@ mod tests {
             },
             latest_captured_events: Default::default(),
             index_freshness: Default::default(),
+            capture_freshness: Default::default(),
             stats: None,
         }
     }
@@ -2218,6 +2226,7 @@ mod tests {
                 DoctorStage::Storage,
                 DoctorStage::Index,
                 DoctorStage::Backfill,
+                DoctorStage::Capture,
             ] {
                 on_stage(DoctorStageEvent::Started(stage));
                 on_stage(DoctorStageEvent::Finished(stage, true));

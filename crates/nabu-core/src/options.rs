@@ -300,6 +300,7 @@ pub struct DoctorReport {
     pub storage: DoctorCheck,
     pub index: DoctorCheck,
     pub backfill: DoctorCheck,
+    pub capture: DoctorCheck,
     pub coverage: CoverageSummary,
     pub storage_footprint: StorageFootprint,
     /// Per-tool latest event as recorded in the SQLite index. This is the
@@ -310,7 +311,24 @@ pub struct DoctorReport {
     /// frontier. Surfaces index lag loudly: capture writes raw files in real
     /// time, but events are invisible to search until indexed.
     pub index_freshness: BTreeMap<String, IndexFreshness>,
+    /// Per-tool comparison of native session files against canonical raw
+    /// session files. This detects a break before the raw-capture frontier.
+    pub capture_freshness: BTreeMap<String, CaptureFreshness>,
     pub stats: Option<DoctorStats>,
+}
+
+/// Native-source-to-raw coverage for one tool. `source_sessions` is the count
+/// of unique native session IDs. `captured_sessions` have a non-empty canonical
+/// raw file. `missing_session_ids` contains the most recently modified missing
+/// native sessions and is capped so doctor output stays bounded.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CaptureFreshness {
+    pub source_sessions: usize,
+    pub captured_sessions: usize,
+    pub missing_sessions: usize,
+    pub missing_session_ids: Vec<String>,
+    pub scan_error: Option<String>,
+    pub stale: bool,
 }
 
 /// Raw-vs-index freshness for one tool, measured in bytes rather than clocks.

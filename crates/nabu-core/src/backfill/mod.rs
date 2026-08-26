@@ -1015,7 +1015,7 @@ pub fn malformed_native_payload(
     })
 }
 
-fn session_id_from_source_path(source_path: &Path) -> Option<String> {
+pub(crate) fn session_id_from_source_path(source_path: &Path) -> Option<String> {
     let stem = source_path.file_stem()?.to_str()?.trim();
     if stem.is_empty() {
         return None;

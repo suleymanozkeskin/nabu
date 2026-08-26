@@ -4,6 +4,8 @@
 
 Codex compatibility mode captures supported hook events at session, prompt, tool, compaction, subagent, and stop boundaries. It also reconciles local transcript files from `$CODEX_HOME/sessions` and `$CODEX_HOME/archived_sessions` when backfill is run.
 
+`nabu install codex` writes Codex matcher groups with nested command handlers. Run `/hooks` in Codex to review and trust new or changed nabu hooks. Codex does not run an untrusted hook definition.
+
 This mode is not guaranteed to capture assistant deltas as they appear. For exact append-as-message-appears capture, the recommended Codex path is streaming ingestion from `codex exec --json` or app-server notifications, recorded with raw event source `exec_json` or `app_server`.
 
 Raw payloads are preserved before normalization. If a transcript shape changes, ingestion must keep the raw payload and index a best-effort canonical event or an `error` event instead of crashing.

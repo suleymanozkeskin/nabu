@@ -520,7 +520,7 @@ nabu doctor --tool claude --deep
 nabu doctor --json
 ```
 
-`doctor --json` includes `storage_footprint` so users can see local raw, index, vector, spool, blob, model, canonical, derived, and total byte usage.
+`doctor --json` includes `storage_footprint` so users can see local raw, index, vector, spool, blob, model, canonical, derived, and total byte usage. It also includes `capture` and `capture_freshness`. For Codex, this compares native session IDs in `$CODEX_HOME/sessions` and `$CODEX_HOME/archived_sessions` with non-empty canonical files in `raw/codex`. A missing raw session sets `capture.ok=false` and `capture_freshness.codex.stale=true`.
 
 Doctor is fast by default and reports `integrity=structural` — an O(1) check that the index opens and its core tables are present, independent of database size. Use `--deep` for full SQLite `integrity_check` (scans the whole index) and counts.
 
@@ -541,6 +541,8 @@ nabu install all --dry-run
 nabu install claude
 nabu uninstall codex
 ```
+
+After `nabu install codex`, run `/hooks` in Codex. Review and trust the nabu hooks. Repeat this step after a hook definition changes.
 
 #### pi: live capture extension
 

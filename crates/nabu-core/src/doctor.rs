@@ -2,14 +2,20 @@
 //! and storage-footprint summaries, and the staged doctor report.
 
 use crate::{
-    latest_event, open_index, raw_index_checkpoint_offset, table_count, table_exists,
-    CoverageSummary, DoctorCheck, DoctorReport, DoctorStats, Error, IndexFreshness, Result,
-    StorageFootprint, StoredEvent, Tool, MAX_DIRECTORY_SIZE_DEPTH, SEMANTIC_VECTOR_DIMENSIONS,
+    canonical_raw_path, latest_event, open_index, raw_index_checkpoint_offset,
+    session_id_from_source_path, table_count, table_exists, CaptureFreshness, CoverageSummary,
+    DoctorCheck, DoctorReport, DoctorStats, Error, IndexFreshness, Result, StorageFootprint,
+    StoredEvent, Tool, MAX_DIRECTORY_SIZE_DEPTH, SEMANTIC_VECTOR_DIMENSIONS,
 };
 use rusqlite::Connection;
 use std::collections::BTreeMap;
+use std::env;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::time::SystemTime;
+
+const MAX_MISSING_SESSION_IDS: usize = 20;
+const MAX_CAPTURE_SCAN_ERRORS: usize = 3;
 
 pub fn doctor(home: &Path) -> DoctorReport {
     doctor_with_options(home, false)
@@ -23,6 +29,7 @@ pub enum DoctorStage {
     Storage,
     Index,
     Backfill,
+    Capture,
     Coverage,
     Footprint,
     LatestEvents,
@@ -95,6 +102,12 @@ pub fn doctor_with_progress(
     });
 
     let backfill_ok = run(DoctorStage::Backfill, &mut || backfill_is_healthy(home));
+
+    let mut capture_status = BTreeMap::new();
+    let capture_ok = run(DoctorStage::Capture, &mut || {
+        capture_status = capture_freshness(home);
+        capture_status.values().all(|status| !status.stale)
+    });
 
     let (coverage, storage_footprint, latest_captured_events, index_freshness) = if options.metrics
     {
@@ -190,11 +203,165 @@ pub fn doctor_with_progress(
                 "no checkpoint rows found".to_string()
             },
         },
+        capture: DoctorCheck {
+            ok: capture_ok,
+            message: capture_check_message(&capture_status),
+        },
         coverage,
         storage_footprint,
         latest_captured_events,
         index_freshness,
+        capture_freshness: capture_status,
         stats,
+    }
+}
+
+fn capture_check_message(freshness: &BTreeMap<String, CaptureFreshness>) -> String {
+    let Some(codex) = freshness.get("codex") else {
+        return "native session coverage was not checked".to_string();
+    };
+    match (
+        &codex.scan_error,
+        codex.missing_sessions,
+        codex.source_sessions,
+    ) {
+        (Some(error), _, _) => format!("native Codex session scan failed: {error}"),
+        (None, 0, 0) => "no native Codex sessions found".to_string(),
+        (None, 0, _) => "native Codex sessions have canonical raw capture".to_string(),
+        (None, missing, _) => {
+            format!("{missing} native Codex session(s) have no canonical raw capture")
+        }
+    }
+}
+
+/// Compare native Codex session IDs against non-empty canonical raw files.
+/// This checks the source-to-raw boundary that raw-vs-index freshness cannot
+/// see. Missing IDs are capped, but the counts cover all discovered sessions.
+pub fn capture_freshness(home: &Path) -> BTreeMap<String, CaptureFreshness> {
+    let status = match codex_transcript_roots() {
+        Ok(roots) => codex_capture_freshness_from_roots(home, &roots),
+        Err(error) => CaptureFreshness {
+            source_sessions: 0,
+            captured_sessions: 0,
+            missing_sessions: 0,
+            missing_session_ids: Vec::new(),
+            scan_error: Some(error.to_string()),
+            stale: true,
+        },
+    };
+    BTreeMap::from([("codex".to_string(), status)])
+}
+
+fn codex_transcript_roots() -> Result<Vec<PathBuf>> {
+    let codex_home = match env::var_os("CODEX_HOME") {
+        Some(path) => PathBuf::from(path),
+        None => env::var_os("HOME")
+            .map(PathBuf::from)
+            .ok_or(Error::HomeUnavailable)?
+            .join(".codex"),
+    };
+    Ok(vec![
+        codex_home.join("sessions"),
+        codex_home.join("archived_sessions"),
+    ])
+}
+
+fn codex_capture_freshness_from_roots(home: &Path, roots: &[PathBuf]) -> CaptureFreshness {
+    let mut source_sessions_by_id = BTreeMap::new();
+    let mut errors = Vec::new();
+    for root in roots {
+        collect_codex_session_ids(root, &mut source_sessions_by_id, &mut errors);
+    }
+
+    let mut missing: Vec<(String, SystemTime)> = source_sessions_by_id
+        .iter()
+        .filter(|(session_id, _)| {
+            fs::metadata(canonical_raw_path(home, Tool::Codex, session_id.as_str()))
+                .map(|metadata| metadata.len() == 0)
+                .unwrap_or(true)
+        })
+        .map(|(session_id, modified)| (session_id.clone(), *modified))
+        .collect();
+    missing.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| right.0.cmp(&left.0)));
+    let source_sessions = source_sessions_by_id.len();
+    let missing_sessions = missing.len();
+    let captured_sessions = source_sessions.saturating_sub(missing_sessions);
+    let scan_error = (!errors.is_empty()).then(|| errors.join("; "));
+
+    CaptureFreshness {
+        source_sessions,
+        captured_sessions,
+        missing_sessions,
+        missing_session_ids: missing
+            .into_iter()
+            .take(MAX_MISSING_SESSION_IDS)
+            .map(|(session_id, _)| session_id)
+            .collect(),
+        stale: missing_sessions > 0 || scan_error.is_some(),
+        scan_error,
+    }
+}
+
+fn collect_codex_session_ids(
+    directory: &Path,
+    sessions_by_id: &mut BTreeMap<String, SystemTime>,
+    errors: &mut Vec<String>,
+) {
+    if !directory.exists() {
+        return;
+    }
+    let entries = match fs::read_dir(directory) {
+        Ok(entries) => entries,
+        Err(error) => {
+            push_capture_scan_error(errors, directory, &error);
+            return;
+        }
+    };
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                push_capture_scan_error(errors, directory, &error);
+                continue;
+            }
+        };
+        let path = entry.path();
+        let file_type = match entry.file_type() {
+            Ok(file_type) => file_type,
+            Err(error) => {
+                push_capture_scan_error(errors, &path, &error);
+                continue;
+            }
+        };
+        match (
+            file_type.is_dir(),
+            path.extension().and_then(|value| value.to_str()),
+        ) {
+            (true, _) => collect_codex_session_ids(&path, sessions_by_id, errors),
+            (false, Some("jsonl")) => {
+                let Some(session_id) = session_id_from_source_path(&path) else {
+                    continue;
+                };
+                let modified = match entry.metadata().and_then(|metadata| metadata.modified()) {
+                    Ok(modified) => modified,
+                    Err(error) => {
+                        push_capture_scan_error(errors, &path, &error);
+                        continue;
+                    }
+                };
+                sessions_by_id
+                    .entry(session_id)
+                    .and_modify(|current| *current = (*current).max(modified))
+                    .or_insert(modified);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn push_capture_scan_error(errors: &mut Vec<String>, path: &Path, error: &std::io::Error) {
+    if errors.len() < MAX_CAPTURE_SCAN_ERRORS {
+        errors.push(format!("{}: {error}", path.display()));
     }
 }
 
@@ -456,4 +623,57 @@ fn directory_size_inner(path: &Path, depth: usize) -> Result<u64> {
         total = total.saturating_add(directory_size_inner(&entry.path(), depth + 1)?);
     }
     Ok(total)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn codex_capture_freshness_detects_native_sessions_missing_from_raw() {
+        let temp = tempdir().unwrap();
+        let home = temp.path().join("nabu");
+        let sessions = temp.path().join("codex/sessions/2026/08/26");
+        let archived = temp.path().join("codex/archived_sessions");
+        fs::create_dir_all(&sessions).unwrap();
+        fs::create_dir_all(&archived).unwrap();
+
+        let captured_id = "01a03dac-d1c1-7cd1-8ecd-3958d3944a4f";
+        let missing_id = "01a03ae1-a307-7810-a375-034b2d08c97a";
+        fs::write(
+            sessions.join(format!("rollout-2026-08-26T12-45-31-{captured_id}.jsonl")),
+            "{}\n",
+        )
+        .unwrap();
+        let missing_path = sessions.join(format!("rollout-2026-08-25T23-44-21-{missing_id}.jsonl"));
+        fs::write(&missing_path, "{}\n").unwrap();
+        fs::write(
+            archived.join(format!("rollout-2026-08-25T23-44-21-{missing_id}.jsonl")),
+            "{}\n",
+        )
+        .unwrap();
+
+        let raw_path = canonical_raw_path(&home, Tool::Codex, captured_id);
+        fs::create_dir_all(raw_path.parent().unwrap()).unwrap();
+        fs::write(raw_path, "{}\n").unwrap();
+
+        let freshness = codex_capture_freshness_from_roots(
+            &home,
+            &[temp.path().join("codex/sessions"), archived],
+        );
+        assert_eq!(freshness.source_sessions, 2);
+        assert_eq!(freshness.captured_sessions, 1);
+        assert_eq!(freshness.missing_sessions, 1);
+        assert_eq!(freshness.missing_session_ids, vec![missing_id]);
+        assert!(freshness.stale);
+
+        let missing_raw = canonical_raw_path(&home, Tool::Codex, missing_id);
+        fs::write(missing_raw, "{}\n").unwrap();
+        let freshness =
+            codex_capture_freshness_from_roots(&home, &[temp.path().join("codex/sessions")]);
+        assert_eq!(freshness.captured_sessions, 2);
+        assert_eq!(freshness.missing_sessions, 0);
+        assert!(!freshness.stale);
+    }
 }
