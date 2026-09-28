@@ -973,6 +973,13 @@ pub(crate) fn source_event_id_for_payload(
             return Some(format!("{message_id}:{sequence}:delta"));
         }
     }
+    if tool == Tool::Codex {
+        match codex_event_identity(source_event_type, payload) {
+            CodexEventIdentity::Native(id) => return Some(id),
+            CodexEventIdentity::Positional => return None,
+            CodexEventIdentity::Generic => {}
+        }
+    }
     if tool == Tool::Opencode
         && matches!(
             source_event_type,
@@ -1038,6 +1045,76 @@ pub(crate) fn source_event_id_for_payload(
         }
     }
     None
+}
+
+/// How a Codex event is identified for dedupe.
+///
+/// Codex hook payloads and rollout lines carry the turn's `turn_id`. The
+/// generic probe order picks it before any item id, so every event of one
+/// kind in a turn shared one identity and dedupe kept only the first.
+enum CodexEventIdentity {
+    /// A native id of this one event.
+    Native(String),
+    /// A rollout line with no per-line id: identity is its content and its
+    /// position in the rollout file, which never changes for a given line.
+    Positional,
+    /// One event per turn (prompt, stop, compaction hooks) or a stream
+    /// payload: the generic probes apply, unchanged.
+    Generic,
+}
+
+/// Rollout-line id fields: the generic probe order for `/payload`, without
+/// `/payload/turn_id`. Lines that matched an earlier field keep their
+/// identity.
+const CODEX_ROLLOUT_ID_POINTERS: [&str; 5] = [
+    "/payload/event_id",
+    "/payload/message_id",
+    "/payload/call_id",
+    "/payload/id",
+    "/payload/item/id",
+];
+
+fn codex_event_identity(source_event_type: &str, payload: &Value) -> CodexEventIdentity {
+    let native_or_generic = |pointer: &str| {
+        string_pointer(payload, pointer)
+            .map(CodexEventIdentity::Native)
+            .unwrap_or(CodexEventIdentity::Generic)
+    };
+    match source_event_type {
+        "PreToolUse" | "PostToolUse" | "PostToolUseFailure" | "PermissionRequest" => {
+            native_or_generic("/tool_use_id")
+        }
+        "SubagentStart" | "SubagentStop" => native_or_generic("/agent_id"),
+        _ if is_codex_rollout_line(payload) => codex_rollout_line_identity(payload),
+        _ => CodexEventIdentity::Generic,
+    }
+}
+
+/// A completed rollout item shares its id with the hook `tool_use_id` of
+/// the same tool run. The prefix keeps both captures; search merges them
+/// through the tool-invocation id.
+fn codex_rollout_line_identity(payload: &Value) -> CodexEventIdentity {
+    let completed_item_id = match string_pointer(payload, "/payload/type").as_deref() {
+        Some("item_completed") => string_pointer(payload, "/payload/item/id"),
+        _ => None,
+    };
+    match completed_item_id {
+        Some(item_id) => CodexEventIdentity::Native(format!("item_completed:{item_id}")),
+        None => CODEX_ROLLOUT_ID_POINTERS
+            .iter()
+            .find_map(|pointer| string_pointer(payload, pointer))
+            .map(CodexEventIdentity::Native)
+            .unwrap_or(CodexEventIdentity::Positional),
+    }
+}
+
+/// A line of a Codex rollout file: `{"timestamp", "type", "payload": {..}}`.
+/// Hook payloads carry `hook_event_name`; `exec --json` and app-server
+/// payloads have no object-valued `payload` field.
+fn is_codex_rollout_line(payload: &Value) -> bool {
+    payload.get("hook_event_name").is_none()
+        && payload.get("type").and_then(Value::as_str).is_some()
+        && payload.get("payload").is_some_and(Value::is_object)
 }
 
 pub(crate) fn sequence_for_payload(

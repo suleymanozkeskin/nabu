@@ -28,14 +28,15 @@ use nabu_adapters::{
     uninstall_opencode, uninstall_pi, ConfigChangeReport,
 };
 use nabu_core::{
-    canonical_raw_path, doctor_with_options, download_embedding_model_with_progress,
-    embedding_model_disclosure, embedding_model_status, export_session_jsonl_with_options,
-    export_session_markdown_with_options, get_memory, index_once_single_flight,
-    index_once_with_options_and_progress, ingest_file, ingest_hook_events, init_home,
-    list_memories, list_sessions, malformed_native_payload, prune_embedding_cache, purge_all,
-    purge_before, purge_session, redact_export_text, resolve_home, search_history_page,
-    sync_memory, Error, IndexOptions, PurgeAllOptions, SearchMode, SearchOptions, SessionOptions,
-    SingleFlightOutcome, Source, Tool,
+    canonical_raw_path, codex_rollouts_for_hook, doctor_with_options,
+    download_embedding_model_with_progress, embedding_model_disclosure, embedding_model_status,
+    export_session_jsonl_with_options, export_session_markdown_with_options, get_memory,
+    index_once_single_flight, index_once_with_options_and_progress, ingest_file,
+    ingest_hook_events, init_home, list_memories, list_sessions, malformed_native_payload,
+    prune_embedding_cache, purge_all, purge_before, purge_session, reconcile_codex_rollout,
+    redact_export_text, resolve_home, search_history_page, sync_memory, CodexRollout,
+    CodexRolloutClaim, CodexRolloutReconcile, Error, IndexOptions, PurgeAllOptions, SearchMode,
+    SearchOptions, SessionOptions, SingleFlightOutcome, Source, Tool,
 };
 #[cfg(test)]
 use nabu_core::{index_once, ingest_hook_event};
@@ -306,6 +307,17 @@ enum IngestCommand {
         #[arg(long)]
         tool: Tool,
     },
+    /// Import the new lines of one Codex rollout file, then index them.
+    /// Codex `Stop` and `SubagentStop` hooks start this in the background;
+    /// run it by hand to repair one session.
+    CodexRollout {
+        /// Absolute path of `rollout-<timestamp>-<thread id>.jsonl`.
+        #[arg(long)]
+        path: PathBuf,
+        /// Thread id the file name must carry.
+        #[arg(long)]
+        thread_id: String,
+    },
     File {
         #[arg(long)]
         tool: Tool,
@@ -558,6 +570,37 @@ fn spawn_background_index(home: &Path) {
     }
 }
 
+/// Start `nabu ingest codex-rollout` for one rollout in a detached child, so
+/// reading the rollout and indexing it never delay the Codex turn.
+fn spawn_background_rollout_reconcile(home: &Path, rollout: &CodexRollout) {
+    let exe = match std::env::current_exe() {
+        Ok(exe) => exe,
+        Err(error) => {
+            eprintln!("nabu: could not locate executable to reconcile Codex rollout: {error}");
+            return;
+        }
+    };
+    if let Err(error) = std::process::Command::new(exe)
+        .arg("--home")
+        .arg(home)
+        .arg("ingest")
+        .arg("codex-rollout")
+        .arg("--path")
+        .arg(rollout.path())
+        .arg("--thread-id")
+        .arg(rollout.thread_id())
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        eprintln!(
+            "nabu: failed to start Codex rollout reconcile for {}: {error}",
+            rollout.path().display()
+        );
+    }
+}
+
 /// Synthetic session id for hook payloads that failed to parse. Grouping them
 /// under one name (rather than a random one per occurrence) keeps parse
 /// failures out of the way of real sessions while still landing in a single,
@@ -611,6 +654,10 @@ fn run(cli: Cli) -> nabu_core::Result<()> {
                     source,
                 })?;
             let payload = hook_stdin_payload(&input);
+            let rollout_claims = match tool {
+                Tool::Codex => codex_rollouts_for_hook(&payload),
+                Tool::Claude | Tool::Opencode | Tool::Pi => Vec::new(),
+            };
             match ingest_hook_events(&home, tool, payload) {
                 Ok(reports) => {
                     let appended = reports.iter().filter(|report| report.appended).count();
@@ -632,6 +679,48 @@ fn run(cli: Cli) -> nabu_core::Result<()> {
                     eprintln!("{error}");
                 }
                 Err(error) => return Err(error),
+            }
+            for claim in rollout_claims {
+                match claim {
+                    CodexRolloutClaim::Accepted(rollout) => {
+                        spawn_background_rollout_reconcile(&home, &rollout)
+                    }
+                    CodexRolloutClaim::Rejected(rejection) => {
+                        eprintln!("nabu: skipped Codex rollout reconcile: {rejection}")
+                    }
+                }
+            }
+        }
+        Command::Ingest {
+            command: IngestCommand::CodexRollout { path, thread_id },
+        } => {
+            let rollout = CodexRollout::parse(path, &thread_id)
+                .map_err(|rejection| Error::Validation(rejection.to_string()))?;
+            match reconcile_codex_rollout(&home, &rollout)? {
+                CodexRolloutReconcile::Imported {
+                    appended_events,
+                    discontinuities,
+                } => {
+                    if appended_events > 0 || discontinuities > 0 {
+                        let index_options = IndexOptions {
+                            embed: false,
+                            sync_memory: false,
+                        };
+                        let _outcome: SingleFlightOutcome =
+                            index_once_single_flight(&home, index_options)?;
+                    }
+                    println!(
+                        "imported {} new events from {}",
+                        appended_events,
+                        rollout.path().display()
+                    );
+                }
+                CodexRolloutReconcile::SourceMissing => {
+                    println!(
+                        "rollout {} no longer exists; nothing imported",
+                        rollout.path().display()
+                    );
+                }
             }
         }
         Command::Ingest {

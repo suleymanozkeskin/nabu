@@ -6264,3 +6264,477 @@ fn doctor_freshness_counts_partially_indexed_delta() {
         freshness.raw_bytes - indexed_after_first
     );
 }
+
+// ---- Codex rollout reconcile ----
+
+const ROLLOUT_THREAD_ID: &str = "01a0d482-236c-7731-9447-cfcaa7c28964";
+
+fn rollout_path(dir: &Path, thread_id: &str) -> PathBuf {
+    dir.join(format!("rollout-2026-09-24T19-41-33-{thread_id}.jsonl"))
+}
+
+/// Captured envelopes of one session; empty when nothing was captured.
+fn session_envelopes(home: &Path, tool: Tool, session_id: &str) -> Vec<EventEnvelope> {
+    let raw_file = canonical_raw_path(home, tool, session_id);
+    if raw_file.exists() {
+        raw_envelopes(&raw_file)
+    } else {
+        Vec::new()
+    }
+}
+
+fn rollout_line(value: Value) -> String {
+    format!("{}\n", serde_json::to_string(&value).unwrap())
+}
+
+fn rollout_session_meta(thread_id: &str, session_id: &str) -> String {
+    rollout_line(json!({
+        "timestamp": "2026-09-24T17:44:24.810Z",
+        "type": "session_meta",
+        "payload": {"id": thread_id, "session_id": session_id, "cwd": "/tmp/nabu-fixture", "source": "cli"}
+    }))
+}
+
+fn rollout_assistant_message(text: &str) -> String {
+    rollout_line(json!({
+        "timestamp": "2026-09-24T17:45:00.000Z",
+        "type": "response_item",
+        "payload": {
+            "type": "message",
+            "role": "assistant",
+            "phase": "final_answer",
+            "content": [{"type": "output_text", "text": text}]
+        }
+    }))
+}
+
+fn accepted_rollout(path: &Path, thread_id: &str) -> CodexRollout {
+    CodexRollout::parse(path.to_path_buf(), thread_id).unwrap()
+}
+
+#[test]
+fn codex_stop_hook_claims_its_session_rollout() {
+    let path = format!("/Users/me/.codex/sessions/2026/09/24/rollout-2026-09-24T19-41-33-{ROLLOUT_THREAD_ID}.jsonl");
+    let claims = codex_rollouts_for_hook(&json!({
+        "hook_event_name": "Stop",
+        "session_id": ROLLOUT_THREAD_ID,
+        "transcript_path": path,
+        "last_assistant_message": "done"
+    }));
+    match claims.as_slice() {
+        [CodexRolloutClaim::Accepted(rollout)] => {
+            assert_eq!(rollout.path(), Path::new(&path));
+            assert_eq!(rollout.thread_id(), ROLLOUT_THREAD_ID);
+        }
+        other => panic!("expected one accepted claim, got {other:?}"),
+    }
+}
+
+#[test]
+fn codex_subagent_stop_hook_claims_the_subagent_rollout() {
+    let agent_id = "01a0aa82-77d8-7b71-8102-3359a040fdbd";
+    let agent_path = format!("/c/sessions/rollout-2026-09-16T15-57-52-{agent_id}.jsonl");
+    let claims = codex_rollouts_for_hook(&json!({
+        "hook_event_name": "SubagentStop",
+        "session_id": ROLLOUT_THREAD_ID,
+        "agent_id": agent_id,
+        "agent_transcript_path": agent_path,
+        "transcript_path": format!("/c/sessions/rollout-2026-08-31T10-27-15-{ROLLOUT_THREAD_ID}.jsonl")
+    }));
+    match claims.as_slice() {
+        [CodexRolloutClaim::Accepted(rollout)] => assert_eq!(rollout.thread_id(), agent_id),
+        other => panic!("expected one accepted claim, got {other:?}"),
+    }
+}
+
+#[test]
+fn codex_stop_hook_rejects_a_rollout_of_another_thread() {
+    let other_thread = "01a0aa82-77d8-7b71-8102-3359a040fdbd";
+    let claims = codex_rollouts_for_hook(&json!({
+        "hook_event_name": "Stop",
+        "session_id": ROLLOUT_THREAD_ID,
+        "transcript_path": format!("/c/rollout-2026-09-24T19-41-33-{other_thread}.jsonl")
+    }));
+    match claims.as_slice() {
+        [CodexRolloutClaim::Rejected(rejection)] => assert_eq!(
+            rejection.reason,
+            CodexRolloutRejectReason::ThreadMismatch {
+                expected: ROLLOUT_THREAD_ID.to_string(),
+                found: other_thread.to_string(),
+            }
+        ),
+        other => panic!("expected one rejected claim, got {other:?}"),
+    }
+}
+
+#[test]
+fn codex_stop_hook_rejects_a_relative_rollout_path() {
+    let claims = codex_rollouts_for_hook(&json!({
+        "hook_event_name": "Stop",
+        "session_id": ROLLOUT_THREAD_ID,
+        "transcript_path": format!("rollout-2026-09-24T19-41-33-{ROLLOUT_THREAD_ID}.jsonl")
+    }));
+    match claims.as_slice() {
+        [CodexRolloutClaim::Rejected(rejection)] => {
+            assert_eq!(rejection.reason, CodexRolloutRejectReason::RelativePath)
+        }
+        other => panic!("expected one rejected claim, got {other:?}"),
+    }
+}
+
+#[test]
+fn codex_stop_hook_rejects_a_file_that_is_not_a_rollout() {
+    let claims = codex_rollouts_for_hook(&json!({
+        "hook_event_name": "Stop",
+        "session_id": ROLLOUT_THREAD_ID,
+        "transcript_path": "/etc/passwd"
+    }));
+    match claims.as_slice() {
+        [CodexRolloutClaim::Rejected(rejection)] => {
+            assert_eq!(
+                rejection.reason,
+                CodexRolloutRejectReason::NotARolloutFileName
+            )
+        }
+        other => panic!("expected one rejected claim, got {other:?}"),
+    }
+}
+
+#[test]
+fn codex_hooks_other_than_stop_claim_no_rollout() {
+    for payload in [
+        json!({"hook_event_name": "PreToolUse", "session_id": ROLLOUT_THREAD_ID,
+               "transcript_path": format!("/c/rollout-2026-09-24T19-41-33-{ROLLOUT_THREAD_ID}.jsonl")}),
+        json!({"hook_event_name": "Stop", "session_id": ROLLOUT_THREAD_ID}),
+    ] {
+        assert!(codex_rollouts_for_hook(&payload).is_empty(), "{payload}");
+    }
+}
+
+#[test]
+fn codex_rollout_reconcile_imports_replies_once() {
+    let temp = tempdir().unwrap();
+    let home = temp.path().join("home");
+    init_home(&home).unwrap();
+    let path = rollout_path(temp.path(), ROLLOUT_THREAD_ID);
+    fs::write(
+        &path,
+        format!(
+            "{}{}",
+            rollout_session_meta(ROLLOUT_THREAD_ID, ROLLOUT_THREAD_ID),
+            rollout_assistant_message("rollout reconcile final answer marker")
+        ),
+    )
+    .unwrap();
+    let rollout = accepted_rollout(&path, ROLLOUT_THREAD_ID);
+
+    let first = reconcile_codex_rollout(&home, &rollout).unwrap();
+    assert_eq!(
+        first,
+        CodexRolloutReconcile::Imported {
+            appended_events: 2,
+            discontinuities: 0
+        }
+    );
+    let second = reconcile_codex_rollout(&home, &rollout).unwrap();
+    assert_eq!(
+        second,
+        CodexRolloutReconcile::Imported {
+            appended_events: 0,
+            discontinuities: 0
+        }
+    );
+
+    index_once(&home).unwrap();
+    let page = search_history_page(
+        &home,
+        "rollout reconcile final answer marker",
+        SearchOptions::default(),
+    )
+    .unwrap();
+    let hit = &page.results[0];
+    assert_eq!(hit.tool, Tool::Codex);
+    assert_eq!(hit.session_id, ROLLOUT_THREAD_ID);
+    assert_eq!(hit.canonical_type, "assistant.message");
+}
+
+#[test]
+fn codex_rollout_reconcile_leaves_a_half_written_line_for_the_next_pass() {
+    let temp = tempdir().unwrap();
+    let home = temp.path().join("home");
+    init_home(&home).unwrap();
+    let path = rollout_path(temp.path(), ROLLOUT_THREAD_ID);
+    let complete = rollout_assistant_message("second reply after partial write");
+    let (head, tail) = complete.split_at(complete.len() / 2);
+    fs::write(
+        &path,
+        format!(
+            "{}{}",
+            rollout_session_meta(ROLLOUT_THREAD_ID, ROLLOUT_THREAD_ID),
+            head
+        ),
+    )
+    .unwrap();
+    let rollout = accepted_rollout(&path, ROLLOUT_THREAD_ID);
+
+    let first = reconcile_codex_rollout(&home, &rollout).unwrap();
+    assert_eq!(
+        first,
+        CodexRolloutReconcile::Imported {
+            appended_events: 1,
+            discontinuities: 0
+        }
+    );
+    let mut file = OpenOptions::new().append(true).open(&path).unwrap();
+    std::io::Write::write_all(&mut file, tail.as_bytes()).unwrap();
+    drop(file);
+
+    let second = reconcile_codex_rollout(&home, &rollout).unwrap();
+    assert_eq!(
+        second,
+        CodexRolloutReconcile::Imported {
+            appended_events: 1,
+            discontinuities: 0
+        }
+    );
+    let types: Vec<CanonicalType> = session_envelopes(&home, Tool::Codex, ROLLOUT_THREAD_ID)
+        .into_iter()
+        .map(|envelope| envelope.canonical_type)
+        .collect();
+    assert_eq!(
+        types,
+        vec![
+            CanonicalType::SessionStarted,
+            CanonicalType::AssistantMessage
+        ]
+    );
+}
+
+#[test]
+fn codex_rollout_reconcile_reports_a_missing_rollout() {
+    let temp = tempdir().unwrap();
+    let home = temp.path().join("home");
+    init_home(&home).unwrap();
+    let path = rollout_path(temp.path(), ROLLOUT_THREAD_ID);
+    let rollout = accepted_rollout(&path, ROLLOUT_THREAD_ID);
+
+    assert_eq!(
+        reconcile_codex_rollout(&home, &rollout).unwrap(),
+        CodexRolloutReconcile::SourceMissing
+    );
+    assert!(session_envelopes(&home, Tool::Codex, ROLLOUT_THREAD_ID).is_empty());
+}
+
+#[test]
+fn codex_subagent_rollout_lines_stay_in_the_subagent_session() {
+    let temp = tempdir().unwrap();
+    let home = temp.path().join("home");
+    init_home(&home).unwrap();
+    let agent_id = "01a0aa82-77d8-7b71-8102-3359a040fdbd";
+    let path = rollout_path(temp.path(), agent_id);
+    fs::write(
+        &path,
+        format!(
+            "{}{}",
+            rollout_session_meta(agent_id, ROLLOUT_THREAD_ID),
+            rollout_assistant_message("subagent reply")
+        ),
+    )
+    .unwrap();
+
+    reconcile_codex_rollout(&home, &accepted_rollout(&path, agent_id)).unwrap();
+
+    assert_eq!(session_envelopes(&home, Tool::Codex, agent_id).len(), 2);
+    assert!(session_envelopes(&home, Tool::Codex, ROLLOUT_THREAD_ID).is_empty());
+}
+
+#[test]
+fn codex_completed_tool_items_are_tool_results_linked_to_the_hook_call() {
+    let temp = tempdir().unwrap();
+    let home = temp.path().join("home");
+    init_home(&home).unwrap();
+    let path = rollout_path(temp.path(), ROLLOUT_THREAD_ID);
+    let turn_id = "01a0d484-be08-7011-b52e-6c71c28f02af";
+    let command_item = |id: &str, command: &str| {
+        rollout_line(json!({
+            "type": "event_msg",
+            "payload": {
+                "type": "item_completed",
+                "thread_id": ROLLOUT_THREAD_ID,
+                "turn_id": turn_id,
+                "item": {"type": "CommandExecution", "id": id, "command": ["/bin/zsh", "-lc", command],
+                         "aggregated_output": format!("{command} output"), "exit_code": 0}
+            }
+        }))
+    };
+    fs::write(
+        &path,
+        format!(
+            "{}{}{}{}{}",
+            command_item("exec-aaaa", "echo first"),
+            command_item("exec-bbbb", "echo second"),
+            rollout_line(json!({
+                "type": "event_msg",
+                "payload": {"type": "item_completed", "turn_id": turn_id,
+                            "item": {"type": "AgentMessage", "id": "msg_1",
+                                     "content": [{"type": "Text", "text": "twin of response_item"}]}}
+            })),
+            rollout_line(json!({
+                "type": "event_msg",
+                "payload": {"type": "token_count", "turn_id": turn_id, "info": null}
+            })),
+            rollout_line(json!({
+                "type": "event_msg",
+                "payload": {"type": "task_complete", "turn_id": turn_id}
+            })),
+        ),
+    )
+    .unwrap();
+
+    reconcile_codex_rollout(&home, &accepted_rollout(&path, ROLLOUT_THREAD_ID)).unwrap();
+
+    let envelopes = session_envelopes(&home, Tool::Codex, ROLLOUT_THREAD_ID);
+    let summary: Vec<(CanonicalType, Option<String>)> = envelopes
+        .iter()
+        .map(|envelope| (envelope.canonical_type, envelope.source_event_id.clone()))
+        .collect();
+    assert_eq!(
+        summary,
+        vec![
+            (
+                CanonicalType::ToolResult,
+                Some("item_completed:exec-aaaa".to_string())
+            ),
+            (
+                CanonicalType::ToolResult,
+                Some("item_completed:exec-bbbb".to_string())
+            ),
+            (
+                CanonicalType::Unclassified,
+                Some("item_completed:msg_1".to_string())
+            ),
+            (CanonicalType::Unclassified, None),
+            (CanonicalType::Unclassified, None),
+        ]
+    );
+    assert_eq!(
+        tool_invocation_id_for_payload(CanonicalType::ToolResult, &envelopes[0].payload),
+        Some("exec-aaaa".to_string())
+    );
+}
+
+#[test]
+fn codex_hook_tool_calls_of_one_turn_are_all_kept() {
+    let temp = tempdir().unwrap();
+    let home = temp.path().join("home");
+    init_home(&home).unwrap();
+    let turn_id = "01a0d484-be08-7011-b52e-6c71c28f02af";
+    for (tool_use_id, command) in [("exec-1111", "ls"), ("exec-2222", "pwd")] {
+        let report = ingest_hook_event(
+            &home,
+            Tool::Codex,
+            json!({
+                "hook_event_name": "PreToolUse",
+                "session_id": ROLLOUT_THREAD_ID,
+                "turn_id": turn_id,
+                "tool_name": "Bash",
+                "tool_use_id": tool_use_id,
+                "tool_input": {"command": command}
+            }),
+        )
+        .unwrap();
+        assert!(report.appended, "{tool_use_id} must not dedupe");
+    }
+    assert_eq!(
+        session_envelopes(&home, Tool::Codex, ROLLOUT_THREAD_ID).len(),
+        2
+    );
+}
+
+#[test]
+fn unclassified_event_keeps_the_identity_it_had_as_error() {
+    let payload = json!({"type": "event_msg", "payload": {"type": "token_count"}});
+    let key = |canonical_type| {
+        dedupe_key(DedupeParts {
+            tool: Tool::Codex,
+            session_id: ROLLOUT_THREAD_ID,
+            canonical_type,
+            source_event_id: None,
+            sequence: Some(42),
+            payload: &payload,
+        })
+        .unwrap()
+    };
+    assert_eq!(key(CanonicalType::Unclassified), key(CanonicalType::Error));
+}
+
+#[test]
+fn unknown_native_records_are_unclassified_and_parse_failures_stay_errors() {
+    assert_eq!(
+        canonical_type_for_payload(
+            Tool::Codex,
+            "world_state",
+            &json!({"type": "world_state", "payload": {}})
+        ),
+        CanonicalType::Unclassified
+    );
+    assert_eq!(
+        canonical_type_for_payload(
+            Tool::Codex,
+            "response_item",
+            &json!({"type": "response_item", "payload": {"type": "message", "role": "developer"}})
+        ),
+        CanonicalType::Unclassified
+    );
+    assert_eq!(
+        canonical_type_for_payload(Tool::Claude, "SomeFutureHook", &json!({})),
+        CanonicalType::Unclassified
+    );
+    assert_eq!(
+        canonical_type_for_payload(Tool::Opencode, "session.error", &json!({})),
+        CanonicalType::Error
+    );
+}
+
+#[test]
+fn codex_hook_tool_result_and_rollout_item_are_both_kept_and_merged_in_search() {
+    let temp = tempdir().unwrap();
+    let home = temp.path().join("home");
+    init_home(&home).unwrap();
+    ingest_hook_event(
+        &home,
+        Tool::Codex,
+        json!({
+            "hook_event_name": "PostToolUse",
+            "session_id": ROLLOUT_THREAD_ID,
+            "turn_id": "01a0d484-be08-7011-b52e-6c71c28f02af",
+            "tool_name": "Bash",
+            "tool_use_id": "exec-cccc",
+            "tool_input": {"command": "echo twin merge marker"},
+            "tool_response": "twin merge marker"
+        }),
+    )
+    .unwrap();
+    let path = rollout_path(temp.path(), ROLLOUT_THREAD_ID);
+    fs::write(
+        &path,
+        rollout_line(json!({
+            "type": "event_msg",
+            "payload": {"type": "item_completed", "turn_id": "01a0d484-be08-7011-b52e-6c71c28f02af",
+                        "item": {"type": "CommandExecution", "id": "exec-cccc",
+                                 "command": ["/bin/zsh", "-lc", "echo twin merge marker"],
+                                 "aggregated_output": "twin merge marker"}}
+        })),
+    )
+    .unwrap();
+    reconcile_codex_rollout(&home, &accepted_rollout(&path, ROLLOUT_THREAD_ID)).unwrap();
+
+    assert_eq!(
+        session_envelopes(&home, Tool::Codex, ROLLOUT_THREAD_ID).len(),
+        2
+    );
+    index_once(&home).unwrap();
+    let page = search_history_page(&home, "twin merge marker", SearchOptions::default()).unwrap();
+    assert_eq!(page.results.len(), 1);
+    assert_eq!(page.results[0].also_at.len(), 1);
+}

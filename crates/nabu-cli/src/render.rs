@@ -342,6 +342,7 @@ fn print_capture_freshness_human(freshness: &BTreeMap<String, CaptureFreshness>,
     );
     println!("{tool}.source_sessions={}", freshness.source_sessions);
     println!("{tool}.captured_sessions={}", freshness.captured_sessions);
+    println!("{tool}.hookless_sessions={}", freshness.hookless_sessions);
     if !freshness.missing_session_ids.is_empty() {
         println!(
             "{tool}.missing_session_ids={}",

@@ -164,6 +164,19 @@ nabu ingest file --tool codex --source app_server --path app-server-notification
 
 `exec_json` and `app_server` preserve native stream records as raw payloads. `item/agentMessage/delta` records are stored as `assistant.delta` in source order; `turn.completed` usage objects remain available in raw export and search.
 
+#### `nabu ingest codex-rollout` — import new lines of one Codex rollout
+
+```shell
+nabu ingest codex-rollout --path ROLLOUT_PATH --thread-id THREAD_ID
+```
+
+| Flag | Description | Default |
+| --- | --- | --- |
+| `--path <PATH>` | Absolute path of `rollout-<timestamp>-<thread id>.jsonl`. Required. | — |
+| `--thread-id <ID>` | Thread id the file name must carry. Required. | — |
+
+Codex `Stop` and `SubagentStop` hooks run this command in a detached process. It reads only the lines that no earlier pass or `backfill` read, appends them, and indexes them. Run it by hand to repair one session. A path whose file name does not carry the thread id is refused with a non-zero exit.
+
 ### `nabu index` — build the derived index from raw files
 
 ```shell

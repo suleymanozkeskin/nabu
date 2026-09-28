@@ -8,9 +8,11 @@ use crate::{
     StoredEvent, Tool, MAX_DIRECTORY_SIZE_DEPTH, SEMANTIC_VECTOR_DIMENSIONS,
 };
 use rusqlite::Connection;
+use serde_json::Value;
 use std::collections::BTreeMap;
 use std::env;
-use std::fs;
+use std::fs::{self, File};
+use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -220,6 +222,10 @@ fn capture_check_message(freshness: &BTreeMap<String, CaptureFreshness>) -> Stri
     let Some(codex) = freshness.get("codex") else {
         return "native session coverage was not checked".to_string();
     };
+    let hookless = match codex.hookless_sessions {
+        0 => String::new(),
+        count => format!("; {count} guardian review session(s) run without hooks"),
+    };
     match (
         &codex.scan_error,
         codex.missing_sessions,
@@ -227,9 +233,9 @@ fn capture_check_message(freshness: &BTreeMap<String, CaptureFreshness>) -> Stri
     ) {
         (Some(error), _, _) => format!("native Codex session scan failed: {error}"),
         (None, 0, 0) => "no native Codex sessions found".to_string(),
-        (None, 0, _) => "native Codex sessions have canonical raw capture".to_string(),
+        (None, 0, _) => format!("native Codex sessions have canonical raw capture{hookless}"),
         (None, missing, _) => {
-            format!("{missing} native Codex session(s) have no canonical raw capture")
+            format!("{missing} native Codex session(s) have no canonical raw capture{hookless}")
         }
     }
 }
@@ -244,6 +250,7 @@ pub fn capture_freshness(home: &Path) -> BTreeMap<String, CaptureFreshness> {
             source_sessions: 0,
             captured_sessions: 0,
             missing_sessions: 0,
+            hookless_sessions: 0,
             missing_session_ids: Vec::new(),
             scan_error: Some(error.to_string()),
             stale: true,
@@ -273,25 +280,35 @@ fn codex_capture_freshness_from_roots(home: &Path, roots: &[PathBuf]) -> Capture
         collect_codex_session_ids(root, &mut source_sessions_by_id, &mut errors);
     }
 
-    let mut missing: Vec<(String, SystemTime)> = source_sessions_by_id
-        .iter()
-        .filter(|(session_id, _)| {
-            fs::metadata(canonical_raw_path(home, Tool::Codex, session_id.as_str()))
-                .map(|metadata| metadata.len() == 0)
-                .unwrap_or(true)
-        })
-        .map(|(session_id, modified)| (session_id.clone(), *modified))
-        .collect();
+    let mut missing: Vec<(String, SystemTime)> = Vec::new();
+    let mut hookless_sessions = 0usize;
+    for (session_id, source) in &source_sessions_by_id {
+        let captured = fs::metadata(canonical_raw_path(home, Tool::Codex, session_id.as_str()))
+            .map(|metadata| metadata.len() > 0)
+            .unwrap_or(false);
+        if captured {
+            continue;
+        }
+        match codex_capture_expectation(&source.path) {
+            CodexCaptureExpectation::LiveCapture => {
+                missing.push((session_id.clone(), source.modified));
+            }
+            CodexCaptureExpectation::NoHooks => hookless_sessions += 1,
+        }
+    }
     missing.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| right.0.cmp(&left.0)));
     let source_sessions = source_sessions_by_id.len();
     let missing_sessions = missing.len();
-    let captured_sessions = source_sessions.saturating_sub(missing_sessions);
+    let captured_sessions = source_sessions
+        .saturating_sub(missing_sessions)
+        .saturating_sub(hookless_sessions);
     let scan_error = (!errors.is_empty()).then(|| errors.join("; "));
 
     CaptureFreshness {
         source_sessions,
         captured_sessions,
         missing_sessions,
+        hookless_sessions,
         missing_session_ids: missing
             .into_iter()
             .take(MAX_MISSING_SESSION_IDS)
@@ -302,9 +319,52 @@ fn codex_capture_freshness_from_roots(home: &Path, roots: &[PathBuf]) -> Capture
     }
 }
 
+/// Newest rollout file seen for one native Codex session id.
+struct CodexSourceSession {
+    path: PathBuf,
+    modified: SystemTime,
+}
+
+/// Whether nabu can expect live hook capture for an uncaptured Codex session.
+enum CodexCaptureExpectation {
+    /// Codex fires hooks for this session, or its origin could not be read;
+    /// a session without capture is reported as missing.
+    LiveCapture,
+    /// A Codex guardian review session: Codex runs it without hooks, so it
+    /// has live capture only after a backfill.
+    NoHooks,
+}
+
+/// Upper bound on the first rollout line (`session_meta`) the doctor reads to
+/// find a session's origin. Observed lines are below 32 KiB.
+const MAX_SESSION_META_LINE_BYTES: u64 = 64 * 1024;
+
+fn codex_capture_expectation(path: &Path) -> CodexCaptureExpectation {
+    let Ok(file) = File::open(path) else {
+        return CodexCaptureExpectation::LiveCapture;
+    };
+    let mut line = String::new();
+    if BufReader::new(file.take(MAX_SESSION_META_LINE_BYTES))
+        .read_line(&mut line)
+        .is_err()
+    {
+        return CodexCaptureExpectation::LiveCapture;
+    }
+    let Ok(meta) = serde_json::from_str::<Value>(line.trim_end()) else {
+        return CodexCaptureExpectation::LiveCapture;
+    };
+    match meta
+        .pointer("/payload/source/subagent/other")
+        .and_then(Value::as_str)
+    {
+        Some("guardian") => CodexCaptureExpectation::NoHooks,
+        _ => CodexCaptureExpectation::LiveCapture,
+    }
+}
+
 fn collect_codex_session_ids(
     directory: &Path,
-    sessions_by_id: &mut BTreeMap<String, SystemTime>,
+    sessions_by_id: &mut BTreeMap<String, CodexSourceSession>,
     errors: &mut Vec<String>,
 ) {
     if !directory.exists() {
@@ -349,10 +409,17 @@ fn collect_codex_session_ids(
                         continue;
                     }
                 };
-                sessions_by_id
-                    .entry(session_id)
-                    .and_modify(|current| *current = (*current).max(modified))
-                    .or_insert(modified);
+                let newest =
+                    sessions_by_id
+                        .entry(session_id)
+                        .or_insert_with(|| CodexSourceSession {
+                            path: path.clone(),
+                            modified,
+                        });
+                if modified > newest.modified {
+                    newest.path = path.clone();
+                    newest.modified = modified;
+                }
             }
             _ => {}
         }
@@ -673,6 +740,54 @@ mod tests {
         let freshness =
             codex_capture_freshness_from_roots(&home, &[temp.path().join("codex/sessions")]);
         assert_eq!(freshness.captured_sessions, 2);
+        assert_eq!(freshness.missing_sessions, 0);
+        assert!(!freshness.stale);
+    }
+
+    #[test]
+    fn codex_capture_freshness_counts_guardian_sessions_as_hookless() {
+        let temp = tempdir().unwrap();
+        let home = temp.path().join("nabu");
+        let sessions = temp.path().join("codex/sessions/2026/09/25");
+        fs::create_dir_all(&sessions).unwrap();
+
+        let guardian_id = "01a0d8f0-7131-70d0-af03-57768209ac7b";
+        let cli_id = "01a0d8ee-eb9b-7531-bf9b-9a56fafba84a";
+        let meta = |id: &str, source: Value| {
+            format!(
+                "{}\n",
+                serde_json::json!({"type": "session_meta", "payload": {"id": id, "source": source}})
+            )
+        };
+        fs::write(
+            sessions.join(format!("rollout-2026-09-25T16-20-31-{guardian_id}.jsonl")),
+            meta(
+                guardian_id,
+                serde_json::json!({"subagent": {"other": "guardian"}}),
+            ),
+        )
+        .unwrap();
+        fs::write(
+            sessions.join(format!("rollout-2026-09-25T16-10-00-{cli_id}.jsonl")),
+            meta(cli_id, Value::String("cli".to_string())),
+        )
+        .unwrap();
+
+        let freshness =
+            codex_capture_freshness_from_roots(&home, &[temp.path().join("codex/sessions")]);
+        assert_eq!(freshness.source_sessions, 2);
+        assert_eq!(freshness.captured_sessions, 0);
+        assert_eq!(freshness.hookless_sessions, 1);
+        assert_eq!(freshness.missing_sessions, 1);
+        assert_eq!(freshness.missing_session_ids, vec![cli_id]);
+        assert!(freshness.stale);
+
+        let raw_path = canonical_raw_path(&home, Tool::Codex, cli_id);
+        fs::create_dir_all(raw_path.parent().unwrap()).unwrap();
+        fs::write(raw_path, "{}\n").unwrap();
+        let freshness =
+            codex_capture_freshness_from_roots(&home, &[temp.path().join("codex/sessions")]);
+        assert_eq!(freshness.hookless_sessions, 1);
         assert_eq!(freshness.missing_sessions, 0);
         assert!(!freshness.stale);
     }

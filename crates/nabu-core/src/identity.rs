@@ -16,7 +16,8 @@ pub fn dedupe_key(parts: DedupeParts<'_>) -> Result<String> {
     hasher.update(b"harness-raven-dedupe-v2\0");
     hash_part(&mut hasher, parts.tool.as_str());
     hash_part(&mut hasher, parts.session_id);
-    hash_part(&mut hasher, parts.canonical_type.as_str());
+    let identity_type = parts.canonical_type.identity_type();
+    hash_part(&mut hasher, identity_type.as_str());
 
     if let Some(source_event_id) = parts.source_event_id {
         hash_part(&mut hasher, "native-id");
@@ -25,7 +26,7 @@ pub fn dedupe_key(parts: DedupeParts<'_>) -> Result<String> {
         hash_part(&mut hasher, "content");
         hash_part(
             &mut hasher,
-            &identity_content_hash(parts.canonical_type, parts.payload)?,
+            &identity_content_hash(identity_type, parts.payload)?,
         );
         if let Some(sequence) = parts.sequence {
             hash_part(&mut hasher, "sequence");

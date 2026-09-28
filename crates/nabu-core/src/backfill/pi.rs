@@ -21,7 +21,7 @@ use std::path::Path;
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 
-use super::ParsedBackfillSource;
+use super::{ParsedBackfillSource, ParsedExtent};
 
 /// True when `path` is a pi session file: a `.jsonl` whose first non-empty
 /// line parses as JSON with `type == "session"` and a non-empty string `id`.
@@ -96,11 +96,12 @@ pub(crate) fn parse_pi_session_jsonl(source_path: &Path) -> Result<ParsedBackfil
                     "raw_line".to_string(),
                     Value::String(line.trim_end().to_string()),
                 );
-                events.push(error_envelope(
+                events.push(fallback_envelope(
                     source_path,
                     &session_id,
                     Some(format!("malformed:{line_start}")),
                     payload,
+                    CanonicalType::Error,
                 ));
                 continue;
             }
@@ -113,20 +114,22 @@ pub(crate) fn parse_pi_session_jsonl(source_path: &Path) -> Result<ParsedBackfil
         match entry_type {
             "session" => {
                 if session_id.is_some() {
-                    events.push(error_envelope(
+                    events.push(fallback_envelope(
                         source_path,
                         &session_id,
                         entry_id(&entry).map(|id| format!("duplicate-header:{id}")),
                         json_map(&[("pi_type", Value::String("session".to_string()))]),
+                        CanonicalType::Error,
                     ));
                     continue;
                 }
                 let Some(id) = entry.get("id").and_then(Value::as_str) else {
-                    events.push(error_envelope(
+                    events.push(fallback_envelope(
                         source_path,
                         &session_id,
                         None,
                         json_map(&[("pi_type", Value::String("session".to_string()))]),
+                        CanonicalType::Error,
                     ));
                     continue;
                 };
@@ -144,20 +147,22 @@ pub(crate) fn parse_pi_session_jsonl(source_path: &Path) -> Result<ParsedBackfil
                 ));
             }
             "" => {
-                events.push(error_envelope(
+                events.push(fallback_envelope(
                     source_path,
                     &session_id,
                     entry_id(&entry),
                     json_map(&[("pi_type", Value::String("unknown".to_string()))]),
+                    CanonicalType::Unclassified,
                 ));
             }
             "message" => {
                 let Some(session_id) = session_id.clone() else {
-                    events.push(error_envelope(
+                    events.push(fallback_envelope(
                         source_path,
                         &None,
                         entry_id(&entry),
                         json_map(&[("pi_type", Value::String("message".to_string()))]),
+                        CanonicalType::Error,
                     ));
                     continue;
                 };
@@ -176,11 +181,12 @@ pub(crate) fn parse_pi_session_jsonl(source_path: &Path) -> Result<ParsedBackfil
             }
             "compaction" => {
                 let Some(session_id) = session_id.clone() else {
-                    events.push(error_envelope(
+                    events.push(fallback_envelope(
                         source_path,
                         &None,
                         entry_id(&entry),
                         json_map(&[("pi_type", Value::String("compaction".to_string()))]),
+                        CanonicalType::Error,
                     ));
                     continue;
                 };
@@ -342,7 +348,7 @@ pub(crate) fn parse_pi_session_jsonl(source_path: &Path) -> Result<ParsedBackfil
             // Extension private state: not conversation history, no envelope.
             "custom" => {}
             _ => {
-                events.push(error_envelope(
+                events.push(fallback_envelope(
                     source_path,
                     &session_id,
                     entry_id(&entry),
@@ -350,6 +356,7 @@ pub(crate) fn parse_pi_session_jsonl(source_path: &Path) -> Result<ParsedBackfil
                         ("pi_type", Value::String(entry_type.to_string())),
                         ("pi_entry", entry),
                     ]),
+                    CanonicalType::Unclassified,
                 ));
             }
         }
@@ -358,6 +365,7 @@ pub(crate) fn parse_pi_session_jsonl(source_path: &Path) -> Result<ParsedBackfil
     Ok(ParsedBackfillSource {
         events,
         last_session_id: session_id,
+        extent: ParsedExtent::WholeFile,
     })
 }
 
@@ -403,11 +411,15 @@ fn single_event_envelope(
     }
 }
 
-fn error_envelope(
+/// Envelope for a line that maps to no pi event: `Error` for a real failure
+/// (unparseable line, broken session header, entry before the header),
+/// `Unclassified` for an entry kind the mapper does not know.
+fn fallback_envelope(
     source_path: &Path,
     session_id: &Option<String>,
     source_event_id: Option<String>,
     flattened: Map<String, Value>,
+    canonical_type: CanonicalType,
 ) -> EventEnvelope {
     let session_id = session_id
         .clone()
@@ -436,7 +448,7 @@ fn error_envelope(
         cwd: None,
         source: Source::Backfill,
         source_event_type: "pi.unknown".to_string(),
-        canonical_type: CanonicalType::Error,
+        canonical_type,
         source_event_id,
         dedupe_key: String::new(),
         sequence: None,
@@ -746,6 +758,17 @@ mod tests {
             .unwrap()
             .starts_with("malformed:"));
         assert_eq!(events[3].payload["text"], "after");
+    }
+
+    #[test]
+    fn unknown_entry_kind_is_unclassified() {
+        let events = parse(&[
+            &header(),
+            r#"{"type":"future_kind","id":"d4e5f6a7","parentId":null}"#,
+        ]);
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[1].canonical_type, CanonicalType::Unclassified);
+        assert_eq!(events[1].payload["pi_type"], "future_kind");
     }
 
     #[test]
