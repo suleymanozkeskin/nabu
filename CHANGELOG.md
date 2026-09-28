@@ -5,6 +5,8 @@ in `docs/release-notes.md`.
 
 ## Unreleased
 
+## 0.1.10
+
 - Capture Codex replies and tool activity. At each `Stop` and `SubagentStop`
   hook, a detached `nabu ingest codex-rollout` imports the new lines of the
   session or subagent rollout and indexes them. Assistant messages become
