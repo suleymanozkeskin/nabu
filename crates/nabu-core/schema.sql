@@ -74,6 +74,7 @@ CREATE TABLE IF NOT EXISTS events (
       'compaction.after',
       'source.discontinuity',
       'error',
+      'unclassified',
       'memory.file'
     )
   ),

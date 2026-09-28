@@ -292,7 +292,7 @@ pub(crate) fn canonical_type_for_opencode_native(
     match string_pointer(payload, "/role").as_deref() {
         Some("user") => CanonicalType::UserMessage,
         Some("assistant") => CanonicalType::AssistantMessage,
-        _ => CanonicalType::Error,
+        _ => CanonicalType::Unclassified,
     }
 }
 

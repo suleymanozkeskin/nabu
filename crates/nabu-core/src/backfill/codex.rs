@@ -9,6 +9,7 @@ pub(crate) fn parse_codex_stream_source(source_path: &Path) -> Result<ParsedBack
         _ => Ok(ParsedBackfillSource {
             events: Vec::new(),
             last_session_id: None,
+            extent: ParsedExtent::WholeFile,
         }),
     }
 }
@@ -55,6 +56,7 @@ pub(crate) fn parse_codex_stream_jsonl(source_path: &Path) -> Result<ParsedBackf
     Ok(ParsedBackfillSource {
         events,
         last_session_id,
+        extent: ParsedExtent::WholeFile,
     })
 }
 
@@ -79,6 +81,7 @@ pub(crate) fn parse_codex_stream_json(source_path: &Path) -> Result<ParsedBackfi
             return Ok(ParsedBackfillSource {
                 last_session_id: Some(event.session_id.clone()),
                 events: vec![event],
+                extent: ParsedExtent::WholeFile,
             });
         }
     };
@@ -107,6 +110,7 @@ pub(crate) fn parse_codex_stream_json(source_path: &Path) -> Result<ParsedBackfi
     Ok(ParsedBackfillSource {
         events,
         last_session_id,
+        extent: ParsedExtent::WholeFile,
     })
 }
 
@@ -197,4 +201,196 @@ pub(crate) fn codex_session_meta_id(tool: Tool, payload: &Value) -> Option<Strin
         return string_pointer(payload, "/payload/id");
     }
     None
+}
+
+/// Thread id of a Codex rollout file, from its name
+/// `rollout-<timestamp>-<thread id>.jsonl`. `None` for any other file.
+/// One rollout file holds exactly one thread, so this id is the session of
+/// every line in it, including lines that carry a parent thread's
+/// `session_id` (spawned subagents repeat the parent id in `session_meta`).
+pub(crate) fn codex_rollout_thread_id(path: &Path) -> Option<String> {
+    let name = path.file_name()?.to_str()?;
+    let stem = name.strip_prefix("rollout-")?.strip_suffix(".jsonl")?;
+    let thread_id = stem.get(stem.len().checked_sub(36)?..)?;
+    looks_like_uuid(thread_id).then(|| thread_id.to_string())
+}
+
+/// A Codex rollout file named by a hook payload, bound to the thread the hook
+/// reported. Only [`codex_rollouts_for_hook`] constructs it: the path is
+/// absolute and its file name carries that thread id.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodexRollout {
+    path: PathBuf,
+    thread_id: String,
+}
+
+impl CodexRollout {
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn thread_id(&self) -> &str {
+        &self.thread_id
+    }
+
+    /// Rebuild a rollout reference from a path and thread id given on the
+    /// command line. Applies the same checks as the hook parser.
+    pub fn parse(
+        path: PathBuf,
+        thread_id: &str,
+    ) -> std::result::Result<Self, CodexRolloutRejection> {
+        codex_rollout_from_parts("path", path, thread_id)
+    }
+}
+
+/// Why a rollout path from a hook payload was not accepted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodexRolloutRejection {
+    /// The payload field or argument that named the path.
+    pub field: &'static str,
+    pub path: PathBuf,
+    pub reason: CodexRolloutRejectReason,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CodexRolloutRejectReason {
+    RelativePath,
+    NotARolloutFileName,
+    ThreadMismatch { expected: String, found: String },
+}
+
+impl std::fmt::Display for CodexRolloutRejection {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let path = self.path.display();
+        let field = self.field;
+        match &self.reason {
+            CodexRolloutRejectReason::RelativePath => {
+                write!(formatter, "{field} {path} is not an absolute path")
+            }
+            CodexRolloutRejectReason::NotARolloutFileName => write!(
+                formatter,
+                "{field} {path} is not named rollout-<timestamp>-<thread id>.jsonl"
+            ),
+            CodexRolloutRejectReason::ThreadMismatch { expected, found } => write!(
+                formatter,
+                "{field} {path} belongs to thread {found}, but the hook reported thread {expected}"
+            ),
+        }
+    }
+}
+
+/// One rollout path found in a hook payload.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CodexRolloutClaim {
+    Accepted(CodexRollout),
+    Rejected(CodexRolloutRejection),
+}
+
+/// The rollout files a Codex hook payload asks nabu to reconcile.
+///
+/// - `Stop` (end of a turn): the session rollout in `transcript_path`, bound
+///   to `session_id`.
+/// - `SubagentStop`: the subagent rollout in `agent_transcript_path`, bound
+///   to `agent_id`.
+///
+/// Every other hook, and a payload without these fields, yields no claim.
+/// Pure: it reads no file.
+pub fn codex_rollouts_for_hook(payload: &Value) -> Vec<CodexRolloutClaim> {
+    let (field, thread_field) = match string_pointer(payload, "/hook_event_name").as_deref() {
+        Some("Stop") => ("transcript_path", "session_id"),
+        Some("SubagentStop") => ("agent_transcript_path", "agent_id"),
+        _ => return Vec::new(),
+    };
+    let (Some(path), Some(thread_id)) = (
+        string_pointer(payload, &format!("/{field}")),
+        string_pointer(payload, &format!("/{thread_field}")),
+    ) else {
+        return Vec::new();
+    };
+    let claim = match codex_rollout_from_parts(field, PathBuf::from(path), &thread_id) {
+        Ok(rollout) => CodexRolloutClaim::Accepted(rollout),
+        Err(rejection) => CodexRolloutClaim::Rejected(rejection),
+    };
+    vec![claim]
+}
+
+fn codex_rollout_from_parts(
+    field: &'static str,
+    path: PathBuf,
+    thread_id: &str,
+) -> std::result::Result<CodexRollout, CodexRolloutRejection> {
+    let reject = |path: PathBuf, reason| CodexRolloutRejection {
+        field,
+        path,
+        reason,
+    };
+    if !path.is_absolute() {
+        return Err(reject(path, CodexRolloutRejectReason::RelativePath));
+    }
+    let Some(found) = codex_rollout_thread_id(&path) else {
+        return Err(reject(path, CodexRolloutRejectReason::NotARolloutFileName));
+    };
+    if found != thread_id {
+        return Err(reject(
+            path,
+            CodexRolloutRejectReason::ThreadMismatch {
+                expected: thread_id.to_string(),
+                found,
+            },
+        ));
+    }
+    Ok(CodexRollout {
+        path,
+        thread_id: found,
+    })
+}
+
+/// Result of one rollout reconcile pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CodexRolloutReconcile {
+    /// New complete lines were read and appended; `appended_events` counts
+    /// only lines not already captured. `discontinuities` counts truncation
+    /// or rotation markers written for this file.
+    Imported {
+        appended_events: usize,
+        discontinuities: usize,
+    },
+    /// The rollout file no longer exists. Nothing changed.
+    SourceMissing,
+}
+
+/// Import the lines of a Codex rollout file that no earlier pass consumed.
+///
+/// Uses the same per-file checkpoint as `nabu backfill`, so each call reads
+/// only new complete lines, and a later backfill skips them. A last line that
+/// Codex is still writing stays for the next call. Appends are deduped, so
+/// concurrent calls on one file append each line once.
+///
+/// Effects: creates the nabu home layout when it is missing, appends to the
+/// canonical raw file of the rollout's thread, and writes the checkpoint row.
+/// It does not index. On an error, lines appended
+/// before the failure stay and the checkpoint keeps its previous value; the
+/// next call reads those lines again and dedupe drops them.
+pub fn reconcile_codex_rollout(
+    home: &Path,
+    rollout: &CodexRollout,
+) -> Result<CodexRolloutReconcile> {
+    init_home(home)?;
+    match backfill_source_file(
+        home,
+        Tool::Codex,
+        rollout.path(),
+        &BackfillParseContext::default(),
+    ) {
+        Ok(report) => Ok(CodexRolloutReconcile::Imported {
+            appended_events: report.appended_events,
+            discontinuities: report.discontinuities,
+        }),
+        Err(Error::Io { path, source })
+            if path == rollout.path() && source.kind() == std::io::ErrorKind::NotFound =>
+        {
+            Ok(CodexRolloutReconcile::SourceMissing)
+        }
+        Err(error) => Err(error),
+    }
 }

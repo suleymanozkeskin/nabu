@@ -26,11 +26,11 @@ pub(crate) fn canonical_type_for_claude_native(payload: &Value) -> CanonicalType
             Some("PostToolUse") | Some("PostToolUseFailure") | Some("PostToolBatch") => {
                 CanonicalType::ToolResult
             }
-            _ => CanonicalType::Error,
+            _ => CanonicalType::Unclassified,
         },
         Some("queue-operation") => CanonicalType::SessionResumed,
         Some("system") => CanonicalType::SessionStarted,
-        _ => CanonicalType::Error,
+        _ => CanonicalType::Unclassified,
     }
 }
 

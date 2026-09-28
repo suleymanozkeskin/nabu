@@ -272,7 +272,7 @@ pub(crate) fn expand_pi_message(
             captured_at,
             json_map(&[("text", content_to_searchable(message.get("content")))]),
         )],
-        other => vec![error_envelope_from_parts(
+        other => vec![unclassified_envelope_from_parts(
             session_id,
             cwd,
             project_root,
@@ -498,9 +498,9 @@ fn message_id_for(entry_id: Option<&str>) -> Option<String> {
     entry_id.map(str::to_string)
 }
 
-/// Error envelope for an unrecognized message role (live path; backfill builds
-/// its own file-level error envelopes).
-fn error_envelope_from_parts(
+/// Unclassified envelope for an unrecognized message role (live path;
+/// backfill builds its own file-level fallback envelopes).
+fn unclassified_envelope_from_parts(
     session_id: &str,
     cwd: Option<&str>,
     project_root: Option<&str>,
@@ -526,7 +526,7 @@ fn error_envelope_from_parts(
         None,
         original,
         "pi.unknown",
-        CanonicalType::Error,
+        CanonicalType::Unclassified,
         entry_id.map(str::to_string),
         None,
         Source::Hook,

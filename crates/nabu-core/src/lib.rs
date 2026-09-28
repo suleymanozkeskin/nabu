@@ -142,7 +142,9 @@ pub(crate) use backfill::{
 #[cfg(test)]
 pub(crate) use backfill::{backfill_dry_run, backfill_since};
 pub use backfill::{
-    backfill_dry_run_with_progress, backfill_since_with_progress, malformed_native_payload,
+    backfill_dry_run_with_progress, backfill_since_with_progress, codex_rollouts_for_hook,
+    malformed_native_payload, reconcile_codex_rollout, CodexRollout, CodexRolloutClaim,
+    CodexRolloutReconcile, CodexRolloutRejectReason, CodexRolloutRejection,
 };
 mod ingest;
 pub(crate) use ingest::{

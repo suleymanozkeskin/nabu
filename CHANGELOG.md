@@ -5,6 +5,43 @@ in `docs/release-notes.md`.
 
 ## Unreleased
 
+- Capture Codex replies and tool activity. At each `Stop` and `SubagentStop`
+  hook, a detached `nabu ingest codex-rollout` imports the new lines of the
+  session or subagent rollout and indexes them. Assistant messages become
+  `assistant.message`; the commands, searches, patches, and image reads run
+  through the `exec` tool become `tool.result`.
+
+- Keep every Codex hook tool call of a turn. Hook tool events carry the turn's
+  `turn_id`, which was used as their identity, so only the first tool call of
+  each turn was stored. They now use `tool_use_id` (`agent_id` for subagent
+  hooks). Events stored before this change are not recovered by the hooks;
+  the rollout import above captures the same commands.
+
+- Keep every Codex rollout line that carries a `turn_id` but no id of its own
+  (`token_count`, `task_started`, `task_complete`, `token_usage_record`,
+  `turn_context`). All such lines of one turn shared one identity, so backfill
+  stored only the first. They are now identified by content and file position.
+  A completed rollout tool item and its hook `tool.result` are both stored;
+  search shows them as one hit.
+
+- Store rollout lines of a spawned Codex subagent in the subagent's session.
+  The `session_meta` and `token_usage_record` lines repeat the parent's
+  `session_id` and were filed under the parent session.
+
+- Add the `unclassified` canonical type for native records that no canonical
+  type models. These were stored as `error`. `error` now means a real failure.
+  On first open, the index schema (v4) widens the `events` CHECK list in
+  place: constant time, no table copy. A store with unexpected CHECK text is
+  rebuilt instead. Event identity is unchanged, so a re-read source appends no
+  duplicates. Events stored before this change keep their `error` type.
+
+- Backfill and rollout import leave a last line without a newline that is not
+  valid JSON for the next pass. Before, a line that the tool was still writing
+  was stored as a parse error and never read again.
+
+- Doctor counts Codex guardian review sessions as `hookless_sessions`. Codex
+  runs them without hooks, so they no longer mark capture as stale.
+
 ## 0.1.9
 
 - Keep successful `nabu ingest hook` calls silent. Capture status text no longer

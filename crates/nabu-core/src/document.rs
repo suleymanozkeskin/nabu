@@ -71,6 +71,7 @@ pub(crate) fn hook_event_name(payload: &Value) -> Result<&str> {
 
 // Harness-assigned tool-invocation id shared by a tool.call and its
 // tool.result twin(s): codex `call_id` (hook, rollout, and event_msg shapes),
+// codex `tool_use_id` and the matching rollout `item_completed` item id,
 // claude `tool_use_id` / legacy `toolUseID`. Deliberately separate from
 // `source_event_id_for_payload` — that feeds frozen capture identity, and for
 // codex event_msg twins its earlier probes (event_id/turn_id) win over
@@ -88,6 +89,7 @@ pub(crate) fn tool_invocation_id_for_payload(
             "/payload/tool_use_id",
             "/toolUseID",
             "/attachment/toolUseID",
+            "/payload/item/id",
         ]
         .iter()
         .find_map(|pointer| string_pointer(payload, pointer).filter(|value| !value.is_empty())),
@@ -121,14 +123,14 @@ pub(crate) fn canonical_type_for_payload(
                     Some("message") => match string_pointer(payload, "/payload/role").as_deref() {
                         Some("user") => CanonicalType::UserMessage,
                         Some("assistant") => CanonicalType::AssistantMessage,
-                        _ => CanonicalType::Error,
+                        _ => CanonicalType::Unclassified,
                     },
                     Some("function_call") | Some("custom_tool_call") => CanonicalType::ToolCall,
                     Some("function_call_output") | Some("custom_tool_call_output") => {
                         CanonicalType::ToolResult
                     }
                     Some("reasoning") => CanonicalType::AssistantDelta,
-                    _ => CanonicalType::Error,
+                    _ => CanonicalType::Unclassified,
                 };
             }
             "event_msg" => {
@@ -138,7 +140,8 @@ pub(crate) fn canonical_type_for_payload(
                     Some("agent_reasoning") => CanonicalType::AssistantDelta,
                     Some("exec_command_begin") | Some("tool_call") => CanonicalType::ToolCall,
                     Some("exec_command_end") | Some("tool_output") => CanonicalType::ToolResult,
-                    _ => CanonicalType::Error,
+                    Some("item_completed") => canonical_type_for_codex_completed_item(payload),
+                    _ => CanonicalType::Unclassified,
                 };
             }
             _ => {}
@@ -186,7 +189,23 @@ pub(crate) fn canonical_type_for_payload(
         (Tool::Opencode, "session.updated") => CanonicalType::SessionResumed,
         (Tool::Opencode, "file.edited") => CanonicalType::FileChanged,
         (Tool::Opencode, "session.error") => CanonicalType::Error,
-        _ => CanonicalType::Error,
+        _ => CanonicalType::Unclassified,
+    }
+}
+
+/// Rollout `event_msg` / `item_completed` records. Only the tool items carry
+/// facts no other rollout record has: the commands, searches, patches, and
+/// image reads that the outer `exec` code tool ran, with their output. Their
+/// `id` is the hook `tool_use_id`, so search merges them with the hook
+/// `tool.result` twin. Message, reasoning, and compaction items repeat a
+/// `response_item` record or a compaction hook of the same turn; mapping them
+/// too would count each message and each compaction twice in session counts.
+fn canonical_type_for_codex_completed_item(payload: &Value) -> CanonicalType {
+    match string_pointer(payload, "/payload/item/type").as_deref() {
+        Some("CommandExecution") | Some("Extension") | Some("FileChange") | Some("ImageView") => {
+            CanonicalType::ToolResult
+        }
+        _ => CanonicalType::Unclassified,
     }
 }
 
@@ -321,7 +340,7 @@ pub(crate) fn search_document_for_event(
             let usage = scalar_text_for_keys(payload, &["usage", "usage_metadata"]);
             document.metadata_text = join_non_empty([text.as_str(), usage.as_str()]);
         }
-        CanonicalType::Error => {
+        CanonicalType::Error | CanonicalType::Unclassified => {
             document.metadata_text =
                 preferred_text(payload, &["error", "message", "reason", "text", "details"]);
         }
@@ -358,10 +377,11 @@ pub(crate) fn search_document_for_event(
     document
 }
 
-// Claude's `Stop` hook fires per turn and carries the turn's full assistant
-// message (`last_assistant_message`) plus a transcript path. That text is
-// already indexed as the adjacent `assistant.message` event, so the
-// session.ended fallback dump must not duplicate it. The exclusion lives here
+// Claude's and Codex's `Stop` hooks fire per turn and carry the turn's final
+// assistant message (`last_assistant_message`) plus a transcript path. That
+// text is indexed as an `assistant.message` event: for Claude from the
+// adjacent hook event, for Codex from the rollout import the `Stop` hook
+// starts. The session.ended fallback dump must not duplicate it. The exclusion lives here
 // and not in `is_volatile_identity_key` because that list also feeds capture
 // identity hashing — extending it would re-key every historical Stop event.
 fn fallback_metadata_text(canonical_type: CanonicalType, payload: &Value) -> String {

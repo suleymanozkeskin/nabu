@@ -359,7 +359,7 @@ pub fn codex_status(home: &Path) -> Result<CodexStatus> {
         hooks_installed,
         hooks_path,
         codex_installed: command_in_path("codex"),
-        trust_guidance: "Run `/hooks` in Codex to review and trust new or changed nabu hooks. Codex compatibility mode captures turn-boundary hooks and reconciles transcripts; assistant deltas require streaming mode.".to_string(),
+        trust_guidance: "Run `/hooks` in Codex to review and trust new or changed nabu hooks. Codex compatibility mode captures turn-boundary hooks and imports the session rollout at each Stop; assistant deltas require streaming mode.".to_string(),
         storage_writable: home.join("raw").join("codex").is_dir(),
         parse_error,
     })

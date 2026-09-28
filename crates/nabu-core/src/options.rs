@@ -319,13 +319,18 @@ pub struct DoctorReport {
 
 /// Native-source-to-raw coverage for one tool. `source_sessions` is the count
 /// of unique native session IDs. `captured_sessions` have a non-empty canonical
-/// raw file. `missing_session_ids` contains the most recently modified missing
-/// native sessions and is capped so doctor output stays bounded.
+/// raw file. `missing_sessions` have no capture although the tool fires hooks
+/// for them. `hookless_sessions` have no capture and run without hooks (Codex
+/// guardian review sessions); only a backfill captures them, so they do not
+/// make the report stale. The three counts sum to `source_sessions`.
+/// `missing_session_ids` contains the most recently modified missing native
+/// sessions and is capped so doctor output stays bounded.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct CaptureFreshness {
     pub source_sessions: usize,
     pub captured_sessions: usize,
     pub missing_sessions: usize,
+    pub hookless_sessions: usize,
     pub missing_session_ids: Vec<String>,
     pub scan_error: Option<String>,
     pub stale: bool,

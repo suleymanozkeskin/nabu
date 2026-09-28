@@ -140,6 +140,7 @@ pub(crate) fn initialize_database(path: &Path) -> Result<()> {
     ensure_events_schema(&mut conn, path)?;
     ensure_memory_event_schema(&mut conn, path)?;
     ensure_tool_pi_schema(&mut conn, path)?;
+    ensure_unclassified_event_schema(&mut conn, path)?;
     ensure_events_fts_schema(&mut conn, path)?;
     ensure_all_schema_indexes(&conn, path)?;
     ensure_event_refs_schema(&mut conn, path)?;
@@ -199,6 +200,7 @@ fn try_open_index(path: &Path) -> Result<Connection> {
     ensure_events_schema(&mut conn, path)?;
     ensure_memory_event_schema(&mut conn, path)?;
     ensure_tool_pi_schema(&mut conn, path)?;
+    ensure_unclassified_event_schema(&mut conn, path)?;
     ensure_events_fts_schema(&mut conn, path)?;
     ensure_all_schema_indexes(&conn, path)?;
     ensure_event_refs_schema(&mut conn, path)?;
@@ -344,7 +346,8 @@ COMMIT;
 }
 
 /// The events-table definition the tool-pi migration (v3) rebuilds into: the
-/// full current events DDL including `memory.file`, `memory_sync`, and `pi`.
+/// events DDL including `memory.file`, `memory_sync`, and `pi`, before
+/// `unclassified` (v4) existed.
 const EVENTS_TABLE_WITH_PI: &str = r#"
 CREATE TABLE events_rebuilt (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -633,6 +636,215 @@ fn ensure_tool_pi_schema(conn: &mut Connection, path: &Path) -> Result<()> {
         tx.execute_batch(
             "INSERT INTO schema_migrations(version, name, applied_at)
              VALUES (3, 'tool_pi', strftime('%Y-%m-%dT%H:%M:%SZ', 'now'));",
+        )
+        .map_err(|source| Error::Sqlite {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        tx.commit().map_err(|source| Error::Sqlite {
+            path: path.to_path_buf(),
+            source,
+        })
+    })();
+    let foreign_keys = conn.execute_batch("PRAGMA foreign_keys = ON;");
+    match (rebuild, foreign_keys) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), _) => Err(error),
+        (Ok(()), Err(source)) => Err(Error::Sqlite {
+            path: path.to_path_buf(),
+            source,
+        }),
+    }
+}
+
+/// The events-table definition the unclassified migration (v4) rebuilds into:
+/// the full current events DDL, `unclassified` included. Must match
+/// `schema.sql` exactly; keep both in sync.
+const EVENTS_TABLE_WITH_UNCLASSIFIED: &str = r#"
+CREATE TABLE events_rebuilt (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tool TEXT NOT NULL CHECK (tool IN ('codex', 'claude', 'opencode', 'pi')),
+  session_id TEXT NOT NULL,
+  dedupe_key TEXT NOT NULL UNIQUE,
+  schema_version INTEGER NOT NULL,
+  captured_at TEXT NOT NULL,
+  tool_version TEXT,
+  turn_id TEXT,
+  message_id TEXT,
+  project_root TEXT,
+  cwd TEXT,
+  source TEXT NOT NULL CHECK (
+    source IN (
+      'hook',
+      'event_stream',
+      'transcript_tail',
+      'sdk_session_store',
+      'backfill',
+      'exec_json',
+      'app_server',
+      'memory_sync'
+    )
+  ),
+  source_event_type TEXT NOT NULL,
+  source_event_id TEXT,
+  tool_invocation_id TEXT,
+  canonical_type TEXT NOT NULL CHECK (
+    canonical_type IN (
+      'session.started',
+      'session.resumed',
+      'session.ended',
+      'user.message',
+      'assistant.delta',
+      'assistant.message',
+      'tool.call',
+      'tool.result',
+      'permission.requested',
+      'permission.replied',
+      'file.changed',
+      'compaction.before',
+      'compaction.after',
+      'source.discontinuity',
+      'error',
+      'unclassified',
+      'memory.file'
+    )
+  ),
+  sequence INTEGER,
+  raw_file TEXT NOT NULL,
+  raw_line INTEGER,
+  raw_offset INTEGER,
+  payload_json TEXT,
+  payload_ref TEXT,
+  searchable_text TEXT NOT NULL DEFAULT '',
+  compaction_state TEXT NOT NULL DEFAULT 'unknown' CHECK (
+    compaction_state IN ('pre_compaction', 'post_compaction', 'none', 'unknown')
+  ),
+  FOREIGN KEY (tool, session_id) REFERENCES sessions(tool, session_id)
+);
+"#;
+
+/// The events CHECK list before and after `unclassified` (schema v4). Every
+/// events DDL nabu wrote (schema.sql, the v2 and v3 rebuilds) spells the list
+/// tail exactly like this.
+const CANONICAL_CHECK_TAIL_BEFORE_UNCLASSIFIED: &str = "'error',\n      'memory.file'";
+const CANONICAL_CHECK_TAIL_WITH_UNCLASSIFIED: &str =
+    "'error',\n      'unclassified',\n      'memory.file'";
+
+/// Admit the `unclassified` canonical type in the events CHECK list (schema
+/// v4). Existing rows already satisfy the wider list, so the stored table
+/// SQL is edited in place, as SQLite documents for schema changes that do
+/// not affect on-disk content: constant time, no copy, no extra disk space.
+/// A store whose CHECK text has an unexpected form falls back to a full
+/// table rebuild.
+fn ensure_unclassified_event_schema(conn: &mut Connection, path: &Path) -> Result<()> {
+    let sql: String = conn
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'events'",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|source| Error::Sqlite {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    if sql.contains("'unclassified'") {
+        return Ok(());
+    }
+    match sql
+        .matches(CANONICAL_CHECK_TAIL_BEFORE_UNCLASSIFIED)
+        .count()
+    {
+        1 => widen_events_check_in_place(
+            conn,
+            path,
+            &sql.replacen(
+                CANONICAL_CHECK_TAIL_BEFORE_UNCLASSIFIED,
+                CANONICAL_CHECK_TAIL_WITH_UNCLASSIFIED,
+                1,
+            ),
+        ),
+        _ => rebuild_events_with_unclassified(conn, path),
+    }
+}
+
+/// Replace the stored `events` SQL with `widened_sql` and bump
+/// `schema_version` so every connection reloads the schema. `widened_sql`
+/// differs from the stored SQL only in a wider CHECK list. On an error the
+/// transaction rolls back and the schema is unchanged.
+fn widen_events_check_in_place(
+    conn: &mut Connection,
+    path: &Path,
+    widened_sql: &str,
+) -> Result<()> {
+    let sqlite = |source| Error::Sqlite {
+        path: path.to_path_buf(),
+        source,
+    };
+    let tx = conn.transaction().map_err(sqlite)?;
+    let schema_version: i64 = tx
+        .query_row("PRAGMA schema_version", [], |row| row.get(0))
+        .map_err(sqlite)?;
+    tx.execute_batch("PRAGMA writable_schema = ON;")
+        .map_err(sqlite)?;
+    let updated = tx
+        .execute(
+            "UPDATE sqlite_master SET sql = ?1 WHERE type = 'table' AND name = 'events'",
+            [widened_sql],
+        )
+        .map_err(sqlite)?;
+    assert_eq!(updated, 1, "events table row must exist in sqlite_master");
+    tx.execute_batch(&format!(
+        "PRAGMA schema_version = {};
+         PRAGMA writable_schema = OFF;
+         INSERT INTO schema_migrations(version, name, applied_at)
+         VALUES (4, 'unclassified_events', strftime('%Y-%m-%dT%H:%M:%SZ', 'now'));",
+        schema_version + 1
+    ))
+    .map_err(sqlite)?;
+    tx.commit().map_err(sqlite)
+}
+
+/// Fallback for [`ensure_unclassified_event_schema`]: rebuild the events
+/// table from [`EVENTS_TABLE_WITH_UNCLASSIFIED`]. Keeps every row id, so
+/// foreign keys and the contentless events_fts rowids keep pointing at the
+/// same events. Needs free disk space about the size of the events table.
+fn rebuild_events_with_unclassified(conn: &mut Connection, path: &Path) -> Result<()> {
+    conn.execute_batch("PRAGMA foreign_keys = OFF;")
+        .map_err(|source| Error::Sqlite {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    let rebuild = (|| -> Result<()> {
+        let tx = conn.transaction().map_err(|source| Error::Sqlite {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        tx.execute_batch(&format!(
+            "{E}
+             INSERT INTO events_rebuilt (
+               id, tool, session_id, dedupe_key, schema_version, captured_at, tool_version,
+               turn_id, message_id, project_root, cwd, source, source_event_type,
+               source_event_id, tool_invocation_id, canonical_type, sequence, raw_file,
+               raw_line, raw_offset, payload_json, payload_ref, searchable_text, compaction_state
+             ) SELECT
+               id, tool, session_id, dedupe_key, schema_version, captured_at, tool_version,
+               turn_id, message_id, project_root, cwd, source, source_event_type,
+               source_event_id, tool_invocation_id, canonical_type, sequence, raw_file,
+               raw_line, raw_offset, payload_json, payload_ref, searchable_text, compaction_state
+             FROM events;
+             DROP TABLE events;
+             ALTER TABLE events_rebuilt RENAME TO events;",
+            E = EVENTS_TABLE_WITH_UNCLASSIFIED
+        ))
+        .map_err(|source| Error::Sqlite {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        // DROP TABLE destroyed the events indexes; recreate the full set.
+        ensure_all_schema_indexes(&tx, path)?;
+        tx.execute_batch(
+            "INSERT INTO schema_migrations(version, name, applied_at)
+             VALUES (4, 'unclassified_events', strftime('%Y-%m-%dT%H:%M:%SZ', 'now'));",
         )
         .map_err(|source| Error::Sqlite {
             path: path.to_path_buf(),
@@ -1476,5 +1688,184 @@ CREATE TABLE metadata (
             )
             .unwrap();
         assert_eq!((v2, v3), (1, 1));
+    }
+
+    #[test]
+    fn pre_unclassified_index_admits_unclassified_without_losing_rows() {
+        let temp = tempdir().unwrap();
+        let db_path = temp.path().join("harness.db");
+        build_legacy_store(&db_path, &legacy_events_ddl(), true);
+
+        let conn = open_index(&db_path).unwrap();
+        let events_sql = table_sql(&conn, "events");
+        assert!(events_sql.contains("'unclassified'"), "{events_sql}");
+        assert!(events_sql.contains("'error'"), "{events_sql}");
+        let (count, max_id, canonical_type): (i64, i64, String) = conn
+            .query_row(
+                "SELECT COUNT(*), MAX(id), MAX(canonical_type) FROM events",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!((count, max_id), (1, 1));
+        assert_eq!(canonical_type, "user.message");
+        conn.execute_batch(
+            "INSERT INTO events(
+               tool, session_id, dedupe_key, schema_version, captured_at, source,
+               source_event_type, canonical_type, raw_file, raw_line, searchable_text, compaction_state,
+               payload_json
+             ) VALUES (
+               'codex', 'session-1', 'sha256:unclassified', 1, '2026-01-01T00:00:01Z', 'backfill',
+               'event_msg', 'unclassified', 'raw/codex/codex_session-1.jsonl', 2, '', 'none',
+               '{\"type\": \"event_msg\"}'
+             );",
+        )
+        .unwrap();
+        let index_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type = 'index' AND name = 'idx_events_canonical_captured'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(index_count, 1);
+        drop(conn);
+
+        let conn = open_index(&db_path).unwrap();
+        let v4: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM schema_migrations WHERE version = 4",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(v4, 1);
+    }
+
+    /// The events insert is `INSERT OR IGNORE`, which also ignores CHECK
+    /// violations: a canonical type missing from the CHECK list is dropped
+    /// from the index without an error. Every variant must be admitted.
+    #[test]
+    fn events_check_admits_every_canonical_type() {
+        fn listed(canonical_type: CanonicalType) -> &'static str {
+            match canonical_type {
+                CanonicalType::SessionStarted
+                | CanonicalType::SessionResumed
+                | CanonicalType::SessionEnded
+                | CanonicalType::UserMessage
+                | CanonicalType::AssistantDelta
+                | CanonicalType::AssistantMessage
+                | CanonicalType::ToolCall
+                | CanonicalType::ToolResult
+                | CanonicalType::PermissionRequested
+                | CanonicalType::PermissionReplied
+                | CanonicalType::FileChanged
+                | CanonicalType::CompactionBefore
+                | CanonicalType::CompactionAfter
+                | CanonicalType::SourceDiscontinuity
+                | CanonicalType::Error
+                | CanonicalType::Unclassified
+                | CanonicalType::MemoryFile => canonical_type.as_str(),
+            }
+        }
+        let every = [
+            CanonicalType::SessionStarted,
+            CanonicalType::SessionResumed,
+            CanonicalType::SessionEnded,
+            CanonicalType::UserMessage,
+            CanonicalType::AssistantDelta,
+            CanonicalType::AssistantMessage,
+            CanonicalType::ToolCall,
+            CanonicalType::ToolResult,
+            CanonicalType::PermissionRequested,
+            CanonicalType::PermissionReplied,
+            CanonicalType::FileChanged,
+            CanonicalType::CompactionBefore,
+            CanonicalType::CompactionAfter,
+            CanonicalType::SourceDiscontinuity,
+            CanonicalType::Error,
+            CanonicalType::Unclassified,
+            CanonicalType::MemoryFile,
+        ];
+        for canonical_type in every {
+            let quoted = format!("'{}'", listed(canonical_type));
+            assert!(SQLITE_SCHEMA.contains(&quoted), "schema.sql lacks {quoted}");
+            assert!(
+                EVENTS_TABLE_WITH_UNCLASSIFIED.contains(&quoted),
+                "v4 events DDL lacks {quoted}"
+            );
+        }
+    }
+
+    fn events_rootpage(db_path: &std::path::Path) -> i64 {
+        rusqlite::Connection::open(db_path)
+            .unwrap()
+            .query_row(
+                "SELECT rootpage FROM sqlite_master WHERE type = 'table' AND name = 'events'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn unclassified_migration_widens_the_check_without_rebuilding() {
+        let temp = tempdir().unwrap();
+        let db_path = temp.path().join("harness.db");
+        let v3_events = EVENTS_TABLE_WITH_PI.replace("events_rebuilt", "events");
+        build_legacy_store(&db_path, &v3_events, true);
+        let rootpage_before = events_rootpage(&db_path);
+
+        let conn = open_index(&db_path).unwrap();
+        assert!(table_sql(&conn, "events").contains("'unclassified'"));
+        let integrity: String = conn
+            .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(integrity, "ok");
+        conn.execute_batch(
+            "INSERT INTO events(
+               tool, session_id, dedupe_key, schema_version, captured_at, source,
+               source_event_type, canonical_type, raw_file, raw_line, searchable_text,
+               compaction_state, payload_json
+             ) VALUES (
+               'codex', 'session-1', 'sha256:in-place', 1, '2026-01-01T00:00:01Z', 'backfill',
+               'event_msg', 'unclassified', 'raw/codex/codex_session-1.jsonl', 2, '', 'none', '{}'
+             );",
+        )
+        .unwrap();
+        drop(conn);
+
+        assert_eq!(events_rootpage(&db_path), rootpage_before);
+    }
+
+    #[test]
+    fn unclassified_migration_rebuilds_a_check_with_unexpected_text() {
+        let temp = tempdir().unwrap();
+        let db_path = temp.path().join("harness.db");
+        let odd_events = EVENTS_TABLE_WITH_PI
+            .replace("events_rebuilt", "events")
+            .replace(
+                CANONICAL_CHECK_TAIL_BEFORE_UNCLASSIFIED,
+                "'error', 'memory.file'",
+            );
+        build_legacy_store(&db_path, &odd_events, true);
+
+        let conn = open_index(&db_path).unwrap();
+        assert!(table_sql(&conn, "events").contains("'unclassified'"));
+        let (count, max_id): (i64, i64) = conn
+            .query_row("SELECT COUNT(*), MAX(id) FROM events", [], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
+            .unwrap();
+        assert_eq!((count, max_id), (1, 1));
+        let v4: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM schema_migrations WHERE version = 4",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(v4, 1);
     }
 }

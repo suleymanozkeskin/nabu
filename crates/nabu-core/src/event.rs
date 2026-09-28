@@ -127,8 +127,15 @@ pub enum CanonicalType {
     CompactionAfter,
     #[serde(rename = "source.discontinuity")]
     SourceDiscontinuity,
+    /// A real failure: an unparseable native line, a tool-reported error
+    /// event, or a hook payload that could not be read.
     #[serde(rename = "error")]
     Error,
+    /// A native record kept verbatim that no canonical type models: token
+    /// usage counters, turn bookkeeping, developer instructions, record kinds
+    /// a newer tool version added. It is not a failure.
+    #[serde(rename = "unclassified")]
+    Unclassified,
     /// A memory file captured from a tool's own memory folder (claude
     /// `projects/<id>/memory/`, codex `memories/`). Served as a first-class
     /// read surface (list_memories/get_memory) and searchable like any other
@@ -155,6 +162,7 @@ impl CanonicalType {
             CanonicalType::CompactionAfter => "compaction.after",
             CanonicalType::SourceDiscontinuity => "source.discontinuity",
             CanonicalType::Error => "error",
+            CanonicalType::Unclassified => "unclassified",
             CanonicalType::MemoryFile => "memory.file",
         }
     }
@@ -180,6 +188,7 @@ impl FromStr for CanonicalType {
             "compaction.after" => Ok(CanonicalType::CompactionAfter),
             "source.discontinuity" => Ok(CanonicalType::SourceDiscontinuity),
             "error" => Ok(CanonicalType::Error),
+            "unclassified" => Ok(CanonicalType::Unclassified),
             "memory.file" => Ok(CanonicalType::MemoryFile),
             _ => Err(Error::Validation(format!(
                 "unsupported canonical_type: {value}"
@@ -242,7 +251,35 @@ impl CanonicalType {
             | CanonicalType::CompactionBefore
             | CanonicalType::SourceDiscontinuity
             | CanonicalType::Error
+            | CanonicalType::Unclassified
             | CanonicalType::MemoryFile => None,
+        }
+    }
+
+    /// The canonical type that capture identity hashes. `Unclassified` was
+    /// split out of `Error` after events were already captured under
+    /// `Error`; hashing it as `Error` keeps the dedupe key of each such
+    /// native record unchanged, so a re-read source never appends a second
+    /// copy of a record captured before the split.
+    pub fn identity_type(self) -> CanonicalType {
+        match self {
+            CanonicalType::Unclassified => CanonicalType::Error,
+            CanonicalType::SessionStarted
+            | CanonicalType::SessionResumed
+            | CanonicalType::SessionEnded
+            | CanonicalType::UserMessage
+            | CanonicalType::AssistantDelta
+            | CanonicalType::AssistantMessage
+            | CanonicalType::ToolCall
+            | CanonicalType::ToolResult
+            | CanonicalType::PermissionRequested
+            | CanonicalType::PermissionReplied
+            | CanonicalType::FileChanged
+            | CanonicalType::CompactionBefore
+            | CanonicalType::CompactionAfter
+            | CanonicalType::SourceDiscontinuity
+            | CanonicalType::Error
+            | CanonicalType::MemoryFile => self,
         }
     }
 }

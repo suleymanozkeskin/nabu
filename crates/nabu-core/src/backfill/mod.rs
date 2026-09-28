@@ -12,6 +12,10 @@ mod checkpoint;
 pub(crate) use checkpoint::*;
 mod codex;
 use codex::*;
+pub use codex::{
+    codex_rollouts_for_hook, reconcile_codex_rollout, CodexRollout, CodexRolloutClaim,
+    CodexRolloutReconcile, CodexRolloutRejectReason, CodexRolloutRejection,
+};
 mod opencode;
 pub(crate) use opencode::*;
 mod pi;
@@ -509,6 +513,13 @@ fn backfill_source_file(
         .into_iter()
         .filter(|report| report.appended)
         .count();
+    let (byte_offset, checkpoint_line_hash) = match parsed.extent {
+        ParsedExtent::WholeFile => (source_len, last_line_hash(source_path)?),
+        ParsedExtent::CompleteLines {
+            end_offset,
+            last_line_hash,
+        } => (end_offset, last_line_hash),
+    };
 
     let checkpoint = SourceCheckpoint {
         source_tool: tool,
@@ -520,10 +531,10 @@ fn backfill_source_file(
             .or_else(|| previous_checkpoint.map(|checkpoint| checkpoint.session_id))
             .or_else(|| session_id_from_source_path(source_path))
             .unwrap_or_else(|| source_path_fallback_session_id(source_path)),
-        byte_offset: source_len,
+        byte_offset,
         source_size: source_len,
         source_mtime: source_meta.mtime,
-        last_line_hash: last_line_hash(source_path)?,
+        last_line_hash: checkpoint_line_hash,
         last_successful_import_timestamp: now,
     };
     write_checkpoint(home, &checkpoint)?;
@@ -538,6 +549,26 @@ fn backfill_source_file(
 pub(crate) struct ParsedBackfillSource {
     pub(crate) events: Vec<EventEnvelope>,
     last_session_id: Option<String>,
+    extent: ParsedExtent,
+}
+
+/// How much of a source file one parse consumed. The checkpoint records
+/// this, so the next pass resumes exactly after it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ParsedExtent {
+    /// The whole file: JSON documents and whole-file parsers, which the
+    /// append path dedupes on every read.
+    WholeFile,
+    /// Every complete line before `end_offset`. A last line without a newline
+    /// that is not valid JSON is still being written by the live tool; it is
+    /// left for the next pass instead of being captured as a parse error. A
+    /// last line without a newline that is valid JSON is complete.
+    /// `last_line_hash` is the hash of the last complete line, or `None` when
+    /// the file has no complete line yet.
+    CompleteLines {
+        end_offset: u64,
+        last_line_hash: Option<String>,
+    },
 }
 
 fn parse_backfill_source(
@@ -556,6 +587,7 @@ fn parse_backfill_source(
             _ => Ok(ParsedBackfillSource {
                 events: Vec::new(),
                 last_session_id: None,
+                extent: ParsedExtent::WholeFile,
             }),
         },
     }
@@ -590,6 +622,7 @@ fn parse_backfill_jsonl(
     })?;
     let mut reader = BufReader::new(file);
     let mut line = String::new();
+    let mut last_complete_line = String::new();
     let mut offset = 0u64;
     let mut events = Vec::new();
     let mut last_session_id = None;
@@ -603,12 +636,18 @@ fn parse_backfill_jsonl(
         if bytes == 0 {
             break;
         }
+        let parsed_line = serde_json::from_str::<Value>(line.trim_end());
+        if !line.ends_with('\n') && parsed_line.is_err() {
+            break;
+        }
         let line_start = offset;
         offset += bytes as u64;
+        last_complete_line.clear();
+        last_complete_line.push_str(line.trim_end());
         if offset <= start_offset || line.trim().is_empty() {
             continue;
         }
-        let payload = match serde_json::from_str(line.trim_end()) {
+        let payload = match parsed_line {
             Ok(payload) => payload,
             Err(error) => malformed_native_payload(source_path, line_start, line.trim_end(), error),
         };
@@ -621,6 +660,10 @@ fn parse_backfill_jsonl(
     Ok(ParsedBackfillSource {
         events,
         last_session_id,
+        extent: ParsedExtent::CompleteLines {
+            end_offset: offset,
+            last_line_hash: (offset > 0).then(|| hash_line(&last_complete_line)),
+        },
     })
 }
 
@@ -646,6 +689,7 @@ fn parse_backfill_json(
             return Ok(ParsedBackfillSource {
                 last_session_id: Some(event.session_id.clone()),
                 events: vec![event],
+                extent: ParsedExtent::WholeFile,
             });
         }
     };
@@ -708,6 +752,7 @@ fn parse_backfill_json(
     Ok(ParsedBackfillSource {
         events,
         last_session_id,
+        extent: ParsedExtent::WholeFile,
     })
 }
 
@@ -893,6 +938,11 @@ fn backfill_session_id(
             return session_id;
         }
     }
+    if tool == Tool::Codex {
+        if let Some(thread_id) = codex_rollout_thread_id(source_path) {
+            return thread_id;
+        }
+    }
     string_pointer(payload, "/session_id")
         .or_else(|| string_pointer(payload, "/payload/session_id"))
         .or_else(|| string_pointer(payload, "/sessionId"))
@@ -949,8 +999,8 @@ fn canonical_type_for_backfill_payload(
         Tool::Claude => canonical_type_for_claude_native(payload),
         Tool::Codex => canonical_type_for_payload(tool, source_event_type, payload),
         Tool::Opencode => canonical_type_for_opencode_native(source_event_type, payload),
-        // Pi envelopes carry their canonical type from the pi parser (PR2).
-        Tool::Pi => CanonicalType::Error,
+        // Pi envelopes carry their canonical type from the pi parser.
+        Tool::Pi => CanonicalType::Unclassified,
     }
 }
 
